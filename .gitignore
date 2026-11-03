@@ -102,3 +102,6 @@ core-service/dist/
 core-service/tgdl-server
 core-service/tgdl-server.exe
 faces-service/tgdl-faces-win-x64.spec
+
+# The archive's invented sample export (not runtime data)
+!docs/archive-data-sample/data/
