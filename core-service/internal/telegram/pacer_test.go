@@ -404,10 +404,80 @@ func TestFloodGuardTellsPremiumWaitsApart(t *testing.T) {
 	g := newFloodGuard()
 	var kinds []bool
 	next := &scriptedInvoker{errs: []error{floodErr(1), &tgerr.Error{Code: 420, Type: "FLOOD_PREMIUM_WAIT", Argument: 1}}}
-	if err := g.invokeFiles(context.Background(), next, nil, nil, func(_ time.Duration, premium bool) { kinds = append(kinds, premium) }); err != nil {
+	if err := g.invokeFiles(context.Background(), next, nil, nil, partHooks{flood: func(_ time.Duration, premium bool) { kinds = append(kinds, premium) }}); err != nil {
 		t.Fatal(err)
 	}
 	if len(kinds) != 2 || kinds[0] || !kinds[1] {
 		t.Fatalf("kinds %v", kinds)
+	}
+}
+
+func TestPacerKeepsSlowAnswersUnderEightSeconds(t *testing.T) {
+	p := newDownloadPacer("")
+	clock := time.Unix(1_800_000_000, 0)
+	p.now = func() time.Time { return clock }
+	p.mu.Lock()
+	d := p.dcLocked(4)
+	d.window, d.waited, d.lastUse, d.bytes = 16, true, clock, 1<<20
+	p.mu.Unlock()
+	// Parts take 32 s each: at this speed 4 in flight would take 8 s.
+	for i := 0; i < 4; i++ {
+		p.answered(4, 32*time.Second)
+	}
+	clock = clock.Add(paceInterval)
+	p.tick()
+	p.mu.Lock()
+	w, ceiling := d.window, d.ceiling
+	p.mu.Unlock()
+	if w != 4 || ceiling != 0 {
+		t.Fatalf("window %d ceiling %d, want 4 and no ceiling", w, ceiling)
+	}
+	if st := p.stats(); st.DCs[0].PartSecs != 32 {
+		t.Fatalf("part time %v", st.DCs[0].PartSecs)
+	}
+	// Quick answers change nothing.
+	p.mu.Lock()
+	d.lastCut = time.Time{}
+	d.holdUntil = time.Time{}
+	p.mu.Unlock()
+	p.answered(4, time.Second)
+	clock = clock.Add(paceInterval)
+	p.tick()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if d.window != 4 {
+		t.Fatalf("window %d after quick answers", d.window)
+	}
+}
+
+type silentPool struct{ calls int }
+
+func (p *silentPool) Invoke(ctx context.Context, _ bin.Encoder, output bin.Decoder) error {
+	p.calls++
+	if p.calls == 1 {
+		<-ctx.Done() // never answered
+		return ctx.Err()
+	}
+	output.(*tg.UploadFileBox).File = &tg.UploadFile{Bytes: make([]byte, 10)}
+	return nil
+}
+func (p *silentPool) Close() error { return nil }
+
+func TestAPartTelegramNeverAnswersIsAskedForAgain(t *testing.T) {
+	old := filePartTimeout
+	filePartTimeout = 30 * time.Millisecond
+	defer func() { filePartTimeout = old }()
+	p := newDownloadPacer("")
+	pool := &silentPool{}
+	inv := sharedInvoker{pool: pool, guard: newFloodGuard(), pacer: p, dc: 4}
+	// The library's reader asks again after a timeout, as fetchPart does.
+	data, err := fetchPart(context.Background(), tg.NewClient(inv), &tg.InputDocumentFileLocation{}, 0)
+	if err != nil || len(data) != 10 || pool.calls != 2 {
+		t.Fatalf("data %d err %v calls %d", len(data), err, pool.calls)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if d := p.dcLocked(4); d.inflight != 0 || d.answers != 1 {
+		t.Fatalf("inflight %d answers %d", d.inflight, d.answers)
 	}
 }
