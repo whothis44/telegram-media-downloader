@@ -36,14 +36,19 @@ jobs:
           file=core-service/internal/version/app.go
           ours=$(sed -n 's/^var AppVersion = "\(.*\)"$/\1/p' "$file")
           if ! git merge --no-edit upstream/main; then
-            # The version line is expected to conflict; it is set below.
-            git checkout --theirs "$file" && git add "$file"
-            if [ -n "$(git diff --name-only --diff-filter=U)" ]; then
-              echo "::error::The original project changed the same lines as the archive features:"
-              git diff --name-only --diff-filter=U
-              exit 1
+            conflicts=$(git diff --name-only --diff-filter=U | grep -v "^$file\$" || true)
+            if [ -n "$conflicts" ]; then
+              # Where both sides changed the same lines, take the original
+              # project's version. The archive's own tests (below) then show
+              # whether its hooks survived; if not, nothing is published.
+              echo "Conflicts resolved in favour of the original project: $conflicts"
+              git merge --abort
+              git merge --no-edit -X theirs upstream/main
+            else
+              # Only the version line conflicted; it is set below.
+              git checkout --theirs "$file" && git add "$file"
+              git commit --no-edit
             fi
-            git commit --no-edit
           fi
           up=$(git show upstream/main:"$file" | sed -n 's/^var AppVersion = "\(.*\)"$/\1/p')
           base=${ours%%-ix.*}

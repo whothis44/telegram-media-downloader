@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/botnick/telegram-media-downloader/core-service/internal/engine"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/telegram"
 	"github.com/gotd/td/tg"
 )
@@ -545,5 +547,54 @@ func TestIxSmallRules(t *testing.T) {
 	}
 	if ixBare("-1001234567890") != "1234567890" || ixBare("-1000000000042") != "42" || ixBare("-55") != "55" || ixDirOf("-1001234567890") != "g_1234567890" {
 		t.Fatal("ids")
+	}
+}
+
+func TestIxMonitorRecordsLiveMessagesWithoutMedia(t *testing.T) {
+	made := make(chan *fixtureAccount, 2)
+	factory := func(_ engine.AccountConfig, _ *telegram.UpdateState, handler func(context.Context, tg.UpdatesClass) error, _ func(int64)) (engine.Account, error) {
+		account := &fixtureAccount{handle: handler, download: func(_ context.Context, _ telegram.Attachment, w io.Writer) error {
+			_, err := w.Write([]byte("live"))
+			return err
+		}}
+		made <- account
+		return account, nil
+	}
+	ctx := context.Background()
+	a, err := newConfiguredTestApp(ctx, Config{DataDir: t.TempDir(), AccountFactory: factory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	configureMonitor(t, a)
+	if rec := monitorRequest(t, a, "/api/monitor/start"); rec.Code != 200 {
+		t.Fatalf("start=%d %s", rec.Code, rec.Body.String())
+	}
+	account := <-made
+	text := ixTestMessage(50, "breaking news, no media")
+	if err = account.handle(ctx, &tg.Updates{Updates: []tg.UpdateClass{&tg.UpdateNewChannelMessage{Message: text}}, Users: []tg.UserClass{&tg.User{ID: 5, FirstName: "Ann"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err = account.handle(ctx, updateFixture()); err != nil {
+		t.Fatal(err)
+	}
+	waitCompleted(t, a)
+	var got, name string
+	if err = a.db.Reader.QueryRow(`SELECT text FROM ix_messages WHERE group_id='-1000000000042' AND message_id=50`).Scan(&got); err != nil || got != "breaking news, no media" {
+		t.Fatalf("live text message not recorded: %q %v", got, err)
+	}
+	a.db.Reader.QueryRow(`SELECT name FROM ix_peers WHERE peer_id='user:5'`).Scan(&name)
+	var media int
+	a.db.Reader.QueryRow(`SELECT count(*) FROM ix_messages WHERE group_id='-1000000000042' AND message_id=10 AND media_type<>''`).Scan(&media)
+	if name != "Ann" || media != 1 {
+		t.Fatalf("name=%q media=%d", name, media)
+	}
+	if err = account.handle(ctx, &tg.Updates{Updates: []tg.UpdateClass{&tg.UpdateDeleteChannelMessages{ChannelID: 42, Messages: []int{50}}}}); err != nil {
+		t.Fatal(err)
+	}
+	var deleted int64
+	a.db.Reader.QueryRow(`SELECT deleted_at FROM ix_messages WHERE group_id='-1000000000042' AND message_id=50`).Scan(&deleted)
+	if deleted == 0 {
+		t.Fatal("live deletion not recorded")
 	}
 }
