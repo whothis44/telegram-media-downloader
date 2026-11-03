@@ -26,6 +26,7 @@ func registerIxRoutes(mux *http.ServeMux, a *App) {
 	mux.Handle("POST /api/ix/groups/finished", a.requireAdmin(http.HandlerFunc(a.handleIxFinished)))
 	mux.Handle("GET /api/ix/dups", a.requireAdmin(http.HandlerFunc(a.handleIxDups)))
 	mux.Handle("POST /api/ix/dups/retry", a.requireAdmin(http.HandlerFunc(a.handleIxDupsRetry)))
+	registerIxDockerRoutes(mux, a)
 	registerIxBrowseRoutes(mux, a)
 }
 
@@ -185,6 +186,7 @@ func (a *App) handleIxStatus(w http.ResponseWriter, r *http.Request) {
 		"held":      a.ixHeldStatus(ctx),
 		"fixity":    a.ixFixityStatus(ctx),
 		"ml":        a.ixMLStatusNow(ctx),
+		"mlStart":   a.ixMLStartStatusNow(),
 		"deadline":  a.ixDeadlineEstimate(ctx, false),
 		"pictures":  a.ixMediaStatus(),
 	}

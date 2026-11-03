@@ -110,6 +110,7 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 	line("export %s at %s · pace %s · quiet %q–%q · pause on freeze %s · auto retry %s · download pacing %s", on(s.ExportEnabled), s.ExportTime, s.Pace, s.QuietStart, s.QuietEnd, on(s.PauseOnFreeze), on(s.AutoRetry), on(s.DownloadPacing))
 	line("duplicates %s (decoder %s, quiet %q–%q) · fixity %s · exact re-uploads %s · hold copies %s (forever %s)", on(s.DupEnabled), s.DupHWAccel, s.DupQuietStart, s.DupQuietEnd, on(s.FixityEnabled), on(s.SubstExact), on(s.HoldLikely), on(s.HoldForever))
 	line("alerts: web address %s (%s) · email %s · names in alerts %s", set(s.AlertWebhook), s.AlertWebhookKind, set(s.AlertEmailTo), on(s.AlertNames))
+	line("recognition services: auto start %s", on(s.MLAutoStart))
 	line("\n[account]")
 	acct := a.ixAccount()
 	line("frozen %v · deactivated %v · flood wait %v · last error %s", acct.Frozen, acct.Deactivated, acct.FloodWait, r.clean(acct.LastError))

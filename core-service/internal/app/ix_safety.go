@@ -45,6 +45,11 @@ type ixSettings struct {
 	MLThings      string `json:"mlThings"`      // subjects to tag, one per line; empty: ixDefaultThings
 	STTURL        string `json:"sttUrl"`        // speech to text (an OpenAI-compatible Whisper server); empty: off
 	STTModel      string `json:"sttModel"`      // its model; empty: ixSTTDefaultModel
+	// The Docker containers of the two services (see ix_docker.go), and
+	// whether the archive starts them when it starts.
+	MLContainer  string `json:"mlContainer"`
+	STTContainer string `json:"sttContainer"`
+	MLAutoStart  bool   `json:"mlAutoStart"`
 	DeadlineOrder string `json:"deadlineOrder"` // auto (when the backup would not finish before deletion), on, off
 	// DownloadPacing lets the download pacer set how many file parts are in
 	// flight (ix.9); off goes back to how ix.8 downloaded.
@@ -71,7 +76,7 @@ func (s ixSettings) public() ixSettings {
 }
 
 func ixDefaultSettings() ixSettings {
-	return ixSettings{ExportEnabled: true, ExportTime: "03:30", Pace: "normal", DupEnabled: true, DupHWAccel: "cuda", AutoRetry: true, FixityEnabled: true, SubstExact: true, HoldLikely: true, MLText: true, MLDupes: true, DeadlineOrder: "auto", DownloadPacing: true, AlertWebhookKind: "ntfy", AlertSMTPPort: "587"}
+	return ixSettings{ExportEnabled: true, ExportTime: "03:30", Pace: "normal", DupEnabled: true, DupHWAccel: "cuda", AutoRetry: true, FixityEnabled: true, SubstExact: true, HoldLikely: true, MLText: true, MLDupes: true, MLContainer: ixMLDefaultContainer, STTContainer: ixSTTDefaultContainer, DeadlineOrder: "auto", DownloadPacing: true, AlertWebhookKind: "ntfy", AlertSMTPPort: "587"}
 }
 
 func (a *App) ixLoadSettings(ctx context.Context) ixSettings {
@@ -276,7 +281,7 @@ func ixParseSettings(body map[string]any, s ixSettings) (ixSettings, error) {
 		s.AutoRetry = v
 	}
 	for key, dst := range map[string]*bool{"fixityEnabled": &s.FixityEnabled, "substExact": &s.SubstExact, "holdLikely": &s.HoldLikely, "holdForever": &s.HoldForever,
-		"mlFaces": &s.MLFaces, "mlText": &s.MLText, "mlDupes": &s.MLDupes, "downloadPacing": &s.DownloadPacing} {
+		"mlFaces": &s.MLFaces, "mlText": &s.MLText, "mlDupes": &s.MLDupes, "downloadPacing": &s.DownloadPacing, "mlAutoStart": &s.MLAutoStart} {
 		if v, ok := body[key].(bool); ok {
 			*dst = v
 		}
@@ -338,6 +343,20 @@ func ixParseSettings(body map[string]any, s ixSettings) (ixSettings, error) {
 			return s, errors.New("the speech model name may hold letters, digits, dots, dashes, underscores and one slash")
 		}
 		s.STTModel = v
+	}
+	for _, c := range []struct {
+		key, def string
+		dst      *string
+	}{{"mlContainer", ixMLDefaultContainer, &s.MLContainer}, {"sttContainer", ixSTTDefaultContainer, &s.STTContainer}} {
+		if v, ok := body[c.key].(string); ok {
+			if v = strings.TrimSpace(v); v == "" {
+				v = c.def
+			}
+			if !ixContainerRe.MatchString(v) {
+				return s, errors.New("a Docker container name may hold letters, digits, dots, dashes and underscores only (up to 64), starting with a letter or digit")
+			}
+			*c.dst = v
+		}
 	}
 	if v, ok := body["deadlineOrder"].(string); ok {
 		if v != "auto" && v != "on" && v != "off" {
