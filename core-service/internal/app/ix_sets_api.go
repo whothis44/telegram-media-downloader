@@ -197,8 +197,13 @@ func (a *App) handleIxMLCheck(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	// One small request loads the model (the first time it is downloaded).
+	// Small requests load both models (the first time they are downloaded).
 	if _, err := c.embed(ctx, nil, "a photo"); err != nil {
+		a.ixMLNote(true, err.Error())
+		writeJSONError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if _, err := c.embed(ctx, ixMLTestPicture(), ""); err != nil {
 		a.ixMLNote(true, err.Error())
 		writeJSONError(w, http.StatusBadGateway, err.Error())
 		return

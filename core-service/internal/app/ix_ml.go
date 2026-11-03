@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/jpeg"
 	"io"
 	"math"
 	"mime/multipart"
@@ -61,7 +63,7 @@ func ixMLCheckURL(raw string) (string, error) {
 		return "", errors.New("the image recognition address must look like http://127.0.0.1:3003")
 	}
 	host := u.Hostname()
-	if !ixLocalHost(host) {
+	if strings.Contains(host, "%") || !ixLocalHost(host) {
 		return "", errors.New("the image recognition service must be on this computer or the local network (127.0.0.1, a 192.168.x.x / 10.x.x.x address, or a local name), so no picture leaves your network")
 	}
 	return u.Scheme + "://" + u.Host, nil
@@ -75,9 +77,13 @@ func ixLocalHost(host string) bool {
 	if ip := net.ParseIP(h); ip != nil {
 		return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
 	}
-	// A bare machine name (no dots) is resolved on the local network.
-	return h != "" && !strings.Contains(h, ".")
+	// A bare machine name (no dots) is resolved on the local network; it
+	// must start with a letter (134744072 or 0x08080808 are addresses).
+	// The address actually connected to is checked again (ixMLHTTP).
+	return ixMachineNameRe.MatchString(h)
 }
+
+var ixMachineNameRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
 
 // ---------- client ----------
 
@@ -192,8 +198,8 @@ func (c *ixMLClient) embed(ctx context.Context, image []byte, text string) ([]fl
 			msg = msg[:300]
 		}
 		err := fmt.Errorf("image recognition answered %d: %s", resp.StatusCode, msg)
-		if resp.StatusCode >= 500 && image == nil {
-			return nil, ixMLUnreachable{err}
+		if resp.StatusCode >= 500 || resp.StatusCode == http.StatusNotFound {
+			return nil, ixMLUnreachable{err} // the service or its model, not this picture
 		}
 		return nil, err
 	}
@@ -503,7 +509,6 @@ func (a *App) ixRunML(ctx context.Context) {
 			wait = 5 * time.Minute
 			continue
 		}
-		a.ixMLNote(true, "")
 		if err := box.store.load(ctx, a.db.Reader, c.model); err != nil {
 			a.ixMLNote(true, err.Error())
 			continue
@@ -512,25 +517,92 @@ func (a *App) ixRunML(ctx context.Context) {
 		if err != nil || m == nil {
 			continue
 		}
-		for n := 0; n < 2000 && ctx.Err() == nil; n++ {
-			worked, err := a.ixMLStep(ctx, c, m)
-			if err != nil {
-				var down ixMLUnreachable
-				if errors.As(err, &down) {
-					a.ixMLNote(false, err.Error())
-					wait = 5 * time.Minute
-				} else {
-					a.ixLog("image recognition: %v", err)
-				}
-				break
-			}
-			if !worked {
-				break
-			}
-			wait = 2 * time.Second
-		}
+		wait = a.ixMLRound(ctx, c, m, 2000)
 		a.ixMLCount(ctx, m)
 	}
+}
+
+// ixMLRound embeds up to n files and says when to try again.
+func (a *App) ixMLRound(ctx context.Context, c *ixMLClient, m *ixModel, n int) time.Duration {
+	a.ixMLNote(true, "")
+	r := &ixMLRun{failed: a.ixMLFailedKeys(ctx, c.model), tried: map[string]bool{}, noFFmpeg: seekbar.FFmpegPath() == ""}
+	defer func() {
+		// Failures of single files are recorded once the service is known
+		// to work: a file worked in this round, or a test picture does.
+		if len(r.pending) > 0 && !r.ok {
+			if _, err := c.embed(ctx, ixMLTestPicture(), ""); err != nil {
+				r.pending = nil
+				return
+			}
+		}
+		a.ixMLFlush(ctx, c.model, r)
+	}()
+	for i := 0; i < n && ctx.Err() == nil; i++ {
+		worked, err := a.ixMLStep(ctx, c, m, r)
+		var down ixMLUnreachable
+		switch {
+		case errors.Is(err, errIxMLOffline):
+			return 5 * time.Minute // the NAS is offline
+		case errors.As(err, &down):
+			r.pending = nil // not the files' fault
+			a.ixMLNote(false, err.Error())
+			return 5 * time.Minute
+		case errors.Is(err, errIxMLStreak):
+			// Many files in a row failed and none worked: the service or
+			// its model is at fault, not the files.
+			msg := fmt.Sprintf("%d files in a row could not be looked at (%s); trying again in 30 minutes", len(r.pending), r.last)
+			r.pending = nil
+			a.ixMLNote(true, msg)
+			return 30 * time.Minute
+		case err != nil:
+			a.ixLog("image recognition: %v", err)
+			return time.Minute
+		case !worked:
+			return time.Minute
+		}
+	}
+	return 2 * time.Second
+}
+
+// ixMLTestPicture is a small grey gradient, to check the picture model.
+func ixMLTestPicture() []byte {
+	img := image.NewGray(image.Rect(0, 0, 64, 64))
+	for y := 0; y < 64; y++ {
+		for x := 0; x < 64; x++ {
+			img.Pix[y*64+x] = uint8(x*2 + y*2)
+		}
+	}
+	var buf bytes.Buffer
+	_ = jpeg.Encode(&buf, img, &jpeg.Options{Quality: 85})
+	return buf.Bytes()
+}
+
+var (
+	errIxMLOffline = errors.New("the downloads folder is offline")
+	errIxMLStreak  = errors.New("too many failures in a row")
+)
+
+// ixMLStreak is how many files in a row may fail, with none working, before
+// the service rather than the files is blamed.
+const ixMLStreak = 8
+
+// ixMLRun is one round's bookkeeping. A file's failure is recorded only
+// once another file has worked (or at the end of the round), so a broken
+// service or model never marks good files unreadable.
+type ixMLRun struct {
+	failed   map[string]bool
+	tried    map[string]bool
+	noFFmpeg bool
+	pending  [][2]string // key, error
+	last     string
+	ok       bool // a file worked in this round
+}
+
+func (a *App) ixMLFlush(ctx context.Context, model string, r *ixMLRun) {
+	for _, f := range r.pending {
+		_ = a.ixMLFail(ctx, model, f[0], f[1])
+	}
+	r.pending = nil
 }
 
 func (a *App) ixMLNote(reachable bool, msg string) {
@@ -558,21 +630,24 @@ func ixMLWanted(m *ixModel, c int) (int32, bool) {
 
 // ixMLStep embeds the next duplicate set without one; false when none is
 // left.
-func (a *App) ixMLStep(ctx context.Context, c *ixMLClient, m *ixModel) (bool, error) {
+func (a *App) ixMLStep(ctx context.Context, c *ixMLClient, m *ixModel, r *ixMLRun) (bool, error) {
 	box := a.ixMLBox()
 	box.mu.Lock()
 	start := box.after
 	box.mu.Unlock()
-	failed := a.ixMLFailedKeys(ctx, c.model)
+	if int(start) > len(m.Clusters) {
+		start = 0 // the model was rebuilt smaller
+	}
 	for ci := int(start); ci < len(m.Clusters); ci++ {
 		ii, ok := ixMLWanted(m, ci)
 		if !ok {
 			continue
 		}
 		it := &m.Items[ii]
-		if box.store.has(it.Key) || failed[it.Key] {
+		if box.store.has(it.Key) || r.failed[it.Key] || r.tried[it.Key] || (it.Type == "video" && r.noFFmpeg) {
 			continue
 		}
+		r.tried[it.Key] = true // once per round
 		box.mu.Lock()
 		box.after = int32(ci + 1)
 		box.st.Running = true
@@ -581,13 +656,37 @@ func (a *App) ixMLStep(ctx context.Context, c *ixMLClient, m *ixModel) (bool, er
 		box.mu.Lock()
 		box.st.Running = false
 		box.mu.Unlock()
+		var bad ixMLFileErr
+		if errors.As(err, &bad) {
+			r.pending = append(r.pending, [2]string{it.Key, bad.msg})
+			r.last = bad.msg
+			if !r.ok && len(r.pending) >= ixMLStreak {
+				return true, errIxMLStreak
+			}
+			if r.ok {
+				a.ixMLFlush(ctx, c.model, r)
+			}
+			return true, nil
+		}
+		if err == nil {
+			r.ok = true
+			a.ixMLFlush(ctx, c.model, r)
+		}
 		return true, err
 	}
 	box.mu.Lock()
 	box.after = 0
 	box.mu.Unlock()
+	if start > 0 {
+		return a.ixMLStep(ctx, c, m, r) // once more from the start
+	}
 	return false, nil
 }
+
+// ixMLFileErr: this file could not be looked at (the service works).
+type ixMLFileErr struct{ msg string }
+
+func (e ixMLFileErr) Error() string { return e.msg }
 
 func (a *App) ixMLFailedKeys(ctx context.Context, model string) map[string]bool {
 	out := map[string]bool{}
@@ -608,10 +707,13 @@ func (a *App) ixMLFailedKeys(ctx context.Context, model string) map[string]bool 
 func (a *App) ixMLEmbedItem(ctx context.Context, c *ixMLClient, it *ixMItem) error {
 	pics, err := a.ixMLPictures(ctx, it)
 	if err != nil {
-		if _, rootErr := os.Stat(a.downloadsDir); rootErr != nil {
-			return nil // the NAS is offline: try later
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
-		return a.ixMLFail(ctx, c.model, it.Key, err.Error())
+		if _, rootErr := os.Stat(a.downloadsDir); rootErr != nil {
+			return errIxMLOffline
+		}
+		return ixMLFileErr{err.Error()}
 	}
 	var sum []float32
 	for _, pic := range pics {
@@ -621,20 +723,20 @@ func (a *App) ixMLEmbedItem(ctx context.Context, c *ixMLClient, it *ixMItem) err
 			if errors.As(err, &down) || ctx.Err() != nil {
 				return err
 			}
-			return a.ixMLFail(ctx, c.model, it.Key, err.Error())
+			return ixMLFileErr{err.Error()}
 		}
 		if sum == nil {
 			sum = make([]float32, len(v))
 		}
 		if len(v) != len(sum) {
-			return a.ixMLFail(ctx, c.model, it.Key, "embeddings of different sizes")
+			return ixMLFileErr{"embeddings of different sizes"}
 		}
 		for i := range v {
 			sum[i] += v[i]
 		}
 	}
 	if !ixNormalise(sum) {
-		return a.ixMLFail(ctx, c.model, it.Key, "an empty embedding")
+		return ixMLFileErr{"an empty embedding"}
 	}
 	return a.ixMLSave(ctx, c.model, it.Key, sum)
 }

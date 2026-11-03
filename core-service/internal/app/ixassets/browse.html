@@ -246,7 +246,7 @@ function tileHTML(it, i, cardKey) {
   if (it.status === 'missing') labs.push(`<span class="lab t miss">not downloaded</span>`);
   if (it.sim && S.showSim) labs.push(`<span class="lab sim" title="Likeness (image recognition)">${Math.round(it.sim * 100)}%</span>`);
   const inner = (it.type === 'photo' || it.type === 'video' || it.status !== 'ok')
-    ? `<img loading="lazy" alt="" src="${esc(it.thumb)}" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'doc',textContent:${JSON.stringify(it.name || it.type)}}))">`
+    ? `<img loading="lazy" alt="" src="${esc(it.thumb)}" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'doc',textContent:${esc(JSON.stringify(String(it.name || it.type)))}}))">`
     : `<div class="doc">📄 ${esc(it.name || it.type)}<br>${esc(fmtSize(it.size))}</div>`;
   return `<button class="tile ${esc(it.status)}${it.fixed ? ' fixed' : ''}" data-card="${cardKey}" data-i="${i}" title="${esc(it.name || '')}">${inner}${labs.join('')}</button>`;
 }

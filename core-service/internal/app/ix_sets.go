@@ -141,19 +141,26 @@ func ixLouvain(adj [][]ixGEdge) []int32 {
 		for i := range next {
 			next[i] = map[int32]float64{}
 		}
+		// A self loop is stored once; an edge between two nodes is stored in
+		// both their lists, so when both fall in one community each half
+		// becomes part of its self loop.
 		for i, edges := range cur {
 			ci := ids[comm[i]]
 			for _, e := range edges {
 				cj := ids[comm[e.to]]
-				next[ci][cj] += e.w
+				switch {
+				case int32(i) == e.to:
+					next[ci][ci] += e.w
+				case ci == cj:
+					next[ci][ci] += e.w / 2
+				default:
+					next[ci][cj] += e.w
+				}
 			}
 		}
 		folded := make([][]ixGEdge, len(ids))
 		for i, m := range next {
 			for j, w := range m {
-				if int32(i) == j {
-					w /= 2 // both directions of an inside edge landed here
-				}
 				folded[i] = append(folded[i], ixGEdge{j, w})
 			}
 			sort.Slice(folded[i], func(a, b int) bool { return folded[i][a].to < folded[i][b].to })
@@ -324,7 +331,7 @@ func ixAssignSets(m *ixModel, fixes ixSetFixes, sim func(a, b string) (float32, 
 	for _, t := range fixes.ties {
 		a, okA := famOfPost[t[0]]
 		b, okB := famOfPost[t[1]]
-		if okA && okB && a != b {
+		if okA && okB && a != b && !alone[a] && !alone[b] {
 			if b < a {
 				a, b = b, a
 			}
@@ -425,7 +432,20 @@ func ixAssignSets(m *ixModel, fixes ixSetFixes, sim func(a, b string) (float32, 
 		}
 		s.Posts, s.Chats = posts, len(chats)
 		s.Anchor = ixPostRef(&m.Posts[m.Families[s.Families[0]].Lead])
-		fixed := fixes.item[s.Anchor]
+		// A person's placements follow the set: they were made under the
+		// set's first post at the time, which stays one of its posts even
+		// when an older post joins it later.
+		fixed := map[string]string{}
+		for _, fi := range s.Families {
+			for _, pi := range m.Families[fi].Posts {
+				for k, v := range fixes.item[ixPostRef(&m.Posts[pi])] {
+					fixed[k] = v
+				}
+			}
+		}
+		for k, v := range fixes.item[s.Anchor] {
+			fixed[k] = v // the current first post wins
+		}
 		var core []string
 		for _, c := range order {
 			counts := inSet(c)

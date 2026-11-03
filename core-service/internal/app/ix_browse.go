@@ -168,7 +168,7 @@ func (a *App) ixModelStamp(ctx context.Context) string {
 		`SELECT COUNT(*) FROM ix_org_keeper`,
 		`SELECT COUNT(*)||'/'||COALESCE(MAX(at),0) FROM ix_org_set_posts`,
 		`SELECT COUNT(*)||'/'||COALESCE(MAX(at),0) FROM ix_org_set_items`,
-		`SELECT COUNT(*)||'/'||COALESCE(MAX(at),0) FROM ix_emb`,
+		`SELECT COUNT(*)/500 FROM ix_emb`, // the sets use embeddings: rebuild every 500 new ones, not for each
 		`SELECT COUNT(*)||'/'||COALESCE(MAX(released_at),0)||'/'||COALESCE(MAX(held_at),0) FROM ix_held`,
 	} {
 		var s string

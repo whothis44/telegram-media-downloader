@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ---------- Louvain ----------
@@ -104,7 +105,7 @@ func ixSceneSim(key string) []float32 {
 	v := make([]float32, 16)
 	seed := 0
 	for _, r := range key {
-		seed = seed*31 + int(r)
+		seed = (seed*31 + int(r)) % 1000003
 	}
 	switch key[0] {
 	case 's':
@@ -258,7 +259,7 @@ func TestIxMLOnlyTalksToTheLocalNetwork(t *testing.T) {
 			t.Errorf("%s refused: %v", ok, err)
 		}
 	}
-	for _, bad := range []string{"http://8.8.8.8:3003", "https://example.com", "ftp://127.0.0.1", "http://user:pw@127.0.0.1:3003", "http://127.0.0.1:3003/predict", "127.0.0.1:3003"} {
+	for _, bad := range []string{"http://8.8.8.8:3003", "https://example.com", "ftp://127.0.0.1", "http://134744072:3003", "http://0x08080808:3003", "http://[fe80::1%25eth0]:3003", "http://user:pw@127.0.0.1:3003", "http://127.0.0.1:3003/predict", "127.0.0.1:3003"} {
 		if _, err := ixMLCheckURL(bad); err == nil {
 			t.Errorf("%s accepted", bad)
 		}
@@ -270,6 +271,8 @@ func TestIxMLOnlyTalksToTheLocalNetwork(t *testing.T) {
 		t.Error("a bad model name was saved")
 	}
 }
+
+var ixFakeMLMode string // "422" or "500": every picture fails so
 
 // ixFakeML answers like Immich's machine-learning service: the embedding of
 // an image is ixSceneSim of the text the test put in it, of a text the same.
@@ -308,6 +311,11 @@ func ixFakeML(t *testing.T, calls *int) *httptest.Server {
 				http.Error(w, "model", 422)
 				return
 			}
+		}
+		if ixFakeMLMode != "" && r.FormValue("text") == "" {
+			code := map[string]int{"422": 422, "500": 500}[ixFakeMLMode]
+			http.Error(w, `{"detail":"model failed"}`, code)
+			return
 		}
 		if seed == "broken" {
 			http.Error(w, `{"detail":"cannot identify image file"}`, 422)
@@ -360,28 +368,16 @@ func TestIxMLEmbedsSearchesAndFindsLookAlikes(t *testing.T) {
 	if err := a.ixMLBox().store.load(ctx, a.db.Reader, c.model); err != nil {
 		t.Fatal(err)
 	}
-	for n := 0; n < 200; n++ {
-		worked, err := a.ixMLStep(ctx, c, m)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !worked {
-			break
-		}
-	}
+	a.ixMLRound(ctx, c, m, 200)
 	a.ixMLCount(ctx, m)
 	st := a.ixMLStatusNow(ctx)
 	wanted := len(m.Clusters) - 1 // z1 is a document
-	if st.Embedded != wanted-1 || st.Pending != 1 {
+	if st.Embedded != wanted-1 || st.Pending != 1 || st.LastError != "" {
 		t.Fatalf("status after one pass: %+v (clusters %d)", st, len(m.Clusters))
 	}
 	// The broken picture is tried three times, then left.
 	for pass := 0; pass < 3; pass++ {
-		for n := 0; n < 5; n++ {
-			if worked, _ := a.ixMLStep(ctx, c, m); !worked {
-				break
-			}
-		}
+		a.ixMLRound(ctx, c, m, 10)
 	}
 	a.ixMLCount(ctx, m)
 	if st := a.ixMLStatusNow(ctx); st.Failed != 1 || st.Pending != 0 {
@@ -479,5 +475,98 @@ func TestIxMLNeverConnectsOutsideTheLocalNetwork(t *testing.T) {
 	c := &ixMLClient{base: srv.URL, model: "m", http: ixMLHTTP}
 	if _, err := c.embed(context.Background(), []byte("picture"), ""); err == nil || !strings.Contains(err.Error(), "redirect") {
 		t.Fatalf("redirect: %v", err)
+	}
+}
+
+func TestIxMLBlamesTheServiceNotTheFiles(t *testing.T) {
+	ctx := context.Background()
+	calls := 0
+	srv := ixFakeML(t, &calls)
+	defer srv.Close()
+	defer func() { ixFakeMLMode = "" }()
+	a, err := newConfiguredTestApp(ctx, Config{DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	s, _ := ixParseSettings(map[string]any{"mlUrl": srv.URL, "mlModel": "test-model"}, a.ixLoadSettings(ctx))
+	_ = a.ixSaveSettings(ctx, s)
+	m := ixSetScene()
+	for i := range m.Items {
+		m.Items[i].Path = "x/" + m.Items[i].Key + ".jpg"
+	}
+	m.Items[m.ByKey["x0"]].Type = "video"
+	old := ixMLPicturesHook
+	defer func() { ixMLPicturesHook = old }()
+	ixMLPicturesHook = func(_ *App, _ context.Context, it *ixMItem) ([][]byte, error) { return [][]byte{[]byte(it.Key)}, nil }
+	c := a.ixMLClientNow(ctx)
+	_ = a.ixMLBox().store.load(ctx, a.db.Reader, c.model)
+	errRows := func() int {
+		var n int
+		_ = a.db.Reader.QueryRow(`SELECT COUNT(*) FROM ix_emb_err`).Scan(&n)
+		return n
+	}
+	// The picture model fails for every picture: nothing is held against
+	// the files, and the round stops.
+	ixFakeMLMode = "422"
+	before := calls
+	if wait := a.ixMLRound(ctx, c, m, 500); wait < 10*time.Minute {
+		t.Fatalf("wait %v", wait)
+	}
+	if n := errRows(); n != 0 || calls-before > ixMLStreak+2 {
+		t.Fatalf("recorded %d failures after %d calls", n, calls-before)
+	}
+	if st := a.ixMLStatusNow(ctx); !strings.Contains(st.LastError, "in a row") {
+		t.Fatalf("status: %+v", st)
+	}
+	// A server error is the service's fault too.
+	ixFakeMLMode = "500"
+	if wait := a.ixMLRound(ctx, c, m, 500); wait < 5*time.Minute || errRows() != 0 {
+		t.Fatalf("500: wait %v, %d failures", wait, errRows())
+	}
+	if st := a.ixMLStatusNow(ctx); st.Reachable {
+		t.Fatalf("still reachable: %+v", st)
+	}
+	// Without ffmpeg, videos wait; pictures go ahead.
+	ixFakeMLMode = ""
+	a.ixMLRound(ctx, c, m, 500)
+	if errRows() != 0 {
+		t.Fatal("failures recorded")
+	}
+	if !a.ixMLBox().store.has("s00") {
+		t.Fatal("pictures not embedded")
+	}
+}
+
+func TestIxLouvainKeepsARingOfCliquesApart(t *testing.T) {
+	// Six cliques of seven, each joined to the next by one edge: modularity
+	// keeps them apart (merging two would lower it). Folding levels must
+	// keep the graph's weight for this to hold.
+	const k, n = 7, 6
+	adj := make([][]ixGEdge, k*n)
+	link := func(a, b int) {
+		adj[a] = append(adj[a], ixGEdge{int32(b), 1})
+		adj[b] = append(adj[b], ixGEdge{int32(a), 1})
+	}
+	for c := 0; c < n; c++ {
+		for i := 0; i < k; i++ {
+			for j := i + 1; j < k; j++ {
+				link(c*k+i, c*k+j)
+			}
+		}
+		link(c*k, ((c+1)%n)*k+1)
+	}
+	comm := ixLouvain(adj)
+	seen := map[int32]bool{}
+	for c := 0; c < n; c++ {
+		for i := 1; i < k; i++ {
+			if comm[c*k+i] != comm[c*k] {
+				t.Fatalf("clique %d split: %v", c, comm)
+			}
+		}
+		if seen[comm[c*k]] {
+			t.Fatalf("cliques merged: %v", comm)
+		}
+		seen[comm[c*k]] = true
 	}
 }

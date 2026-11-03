@@ -71,6 +71,10 @@ If the NAS runs Docker, the same image can run there:
 
 Most NAS processors are slow for this, so the PC is the better place.
 
+Only addresses on this computer or the local network are accepted, and the address actually connected to is
+checked too. A name that resolves to an internet address is refused, and so are VPN mesh addresses such as
+Tailscale's 100.x.y.z. The archive never uses a proxy for this connection and never follows a redirect.
+
 ## What is stored
 
 - **Where:** the archive's own database, table `ix_emb`. Each embedding is a list of 768 small numbers per distinct
