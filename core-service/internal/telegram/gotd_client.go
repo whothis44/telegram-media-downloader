@@ -41,6 +41,25 @@ type GotdClient struct {
 	pools  map[int]gotd.CloseInvoker
 	// threads adapts how many parts of one file are fetched at once.
 	threads *threadTuner
+	// pacer sets how many file parts are in flight per datacenter.
+	pacer *downloadPacer
+}
+
+// DownloadPace reports the account's download pacing.
+func (c *GotdClient) DownloadPace() PaceStats {
+	if c == nil || c.pacer == nil {
+		return PaceStats{}
+	}
+	return c.pacer.stats()
+}
+
+// SuggestedWorkers is how many files at once keep the account's download
+// windows full (0: not known yet).
+func (c *GotdClient) SuggestedWorkers() int {
+	if c == nil || c.pacer == nil {
+		return 0
+	}
+	return c.pacer.suggestedWorkers()
 }
 
 // FloodWaitUntil reports when Telegram allows this account's requests again
@@ -87,7 +106,7 @@ func NewGotdClient(cfg GotdConfig) (*GotdClient, error) {
 		}
 		options.Logger = logslog.New(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slogLevel})))
 	}
-	return &GotdClient{guard: guard, threads: newThreadTuner(maxDownloadThreads), client: gotd.NewClient(cfg.AppID, cfg.AppHash, options)}, nil
+	return &GotdClient{guard: guard, threads: newThreadTuner(maxDownloadThreads), pacer: newDownloadPacer(cfg.SessionPath + ".pace.json"), client: gotd.NewClient(cfg.AppID, cfg.AppHash, options)}, nil
 }
 
 func ensureConvertedSession(cfg GotdConfig, storage session.Storage) error {
@@ -135,6 +154,9 @@ func ensureConvertedSession(cfg GotdConfig, storage session.Storage) error {
 func (c *GotdClient) Run(ctx context.Context, ready func(context.Context) error) error {
 	if c == nil || c.client == nil {
 		return errors.New("Telegram client is not configured")
+	}
+	if c.pacer != nil {
+		go c.pacer.run(ctx)
 	}
 	return c.client.Run(ctx, ready)
 }

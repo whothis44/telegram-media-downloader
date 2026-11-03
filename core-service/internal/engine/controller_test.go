@@ -463,3 +463,58 @@ func TestChannelGapIsRepairedWithoutStoppingTheMonitor(t *testing.T) {
 		t.Fatalf("durable marker=%d err=%v", markers, err)
 	}
 }
+
+type pacedAccount struct {
+	floodGatedAccount
+	suggested atomic.Int64
+}
+
+func (a *pacedAccount) SuggestedWorkers() int { return int(a.suggested.Load()) }
+
+func TestScalerKeepsToWhatTheAccountsPacerSuggests(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	for i := 1; i <= 40; i++ {
+		if _, _, err := s.Enqueue(ctx, "one", Target{}, testMessage(i, 1, int64(i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	account := &pacedAccount{}
+	account.suggested.Store(3)
+	factory := func(AccountConfig, *telegram.UpdateState, func(context.Context, tg.UpdatesClass) error, func(int64)) (Account, error) {
+		return account, nil
+	}
+	filter := func(context.Context, string, *tg.Message, tg.UpdatesClass) (Target, bool, error) {
+		return Target{}, true, nil
+	}
+	release := make(chan struct{})
+	defer close(release)
+	sink := func(ctx context.Context, _ *Work, _ *tg.Message, _ telegram.MediaDownloader) error {
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return ctx.Err()
+	}
+	c := New(s.writer, s.reader, t.TempDir(), factory, filter, sink, nil)
+	c.SetScaling(Scaling{Min: 1, Max: 12, Interval: 20 * time.Millisecond})
+	if err := c.Start(ctx, ctx, []AccountConfig{{ID: "one"}}, 2, 1); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Stop(ctx)
+	time.Sleep(300 * time.Millisecond)
+	if status, _ := c.Status(ctx); status["workers"] != 3 {
+		t.Fatalf("workers past the pacer's suggestion: %v", status)
+	}
+	// The pacer finds more room: the workers follow.
+	account.suggested.Store(10)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if status, _ := c.Status(ctx); status["workers"] == 10 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	status, _ := c.Status(ctx)
+	t.Fatalf("workers did not follow the pacer: %v", status)
+}

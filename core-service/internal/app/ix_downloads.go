@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"database/sql"
+	"github.com/botnick/telegram-media-downloader/core-service/internal/telegram"
 	"net/http"
 	"strings"
 	"time"
@@ -141,11 +142,92 @@ type ixDownloadStats struct {
 	Errors        []ixDownloadError `json:"errors"`
 	RetryRounds   int               `json:"retryRounds"`
 	RetryAfterMin int               `json:"retryAfterMin"`
+	Pace          ixPace            `json:"pace"`
+	Days          []ixDownloadDay   `json:"days"` // the last 7 days, newest first
+}
+
+// ixPace is the download pacing of all running accounts together.
+type ixPace struct {
+	Speed     float64    `json:"speed"`   // bytes a second, last 10 s
+	Speed5m   float64    `json:"speed5m"` // last 5 minutes
+	Window    int        `json:"window"`  // file parts allowed in flight
+	Floods1h  int        `json:"floods1h"`
+	Floods24h int        `json:"floods24h"`
+	DCs       []ixPaceDC `json:"dcs"`
+}
+
+type ixPaceDC struct {
+	telegram.DCPace
+	Account string `json:"account,omitempty"` // only with several accounts
+}
+
+type ixDownloadDay struct {
+	Day   string `json:"day"` // YYYY-MM-DD, this computer's time
+	Files int    `json:"files"`
+	Bytes int64  `json:"bytes"`
+}
+
+func (a *App) ixPaceNow() ixPace {
+	var p ixPace
+	if a.monitor == nil {
+		return p
+	}
+	all := a.monitor.Pace()
+	for id, s := range all {
+		p.Speed += s.Speed
+		p.Speed5m += s.Speed5m
+		p.Window += s.Window
+		p.Floods1h += s.Floods1h
+		p.Floods24h += s.Floods24h
+		for _, d := range s.DCs {
+			x := ixPaceDC{DCPace: d}
+			if len(all) > 1 {
+				x.Account = id
+			}
+			p.DCs = append(p.DCs, x)
+		}
+	}
+	return p
+}
+
+// ixDownloadDays: files and bytes downloaded each of the last 7 days (files
+// covered by a saved copy not counted: nothing was downloaded for them).
+func (a *App) ixDownloadDays(ctx context.Context) []ixDownloadDay {
+	now := time.Now().In(ixTZ)
+	start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, ixTZ).AddDate(0, 0, -6)
+	byDay := map[string]*ixDownloadDay{}
+	var out []ixDownloadDay
+	for i := 0; i < 7; i++ {
+		day := start.AddDate(0, 0, 6-i).Format("2006-01-02")
+		out = append(out, ixDownloadDay{Day: day})
+	}
+	for i := range out {
+		byDay[out[i].Day] = &out[i]
+	}
+	rows, err := a.db.Reader.QueryContext(ctx, `SELECT w.updated_at, w.file_size FROM tgdl_work w WHERE w.status='completed' AND w.updated_at>=?
+		AND NOT EXISTS (SELECT 1 FROM ix_subst s WHERE s.group_id=w.group_id AND s.message_id=w.message_id)`, start.UnixMilli())
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var at, size int64
+		if rows.Scan(&at, &size) != nil {
+			continue
+		}
+		if d := byDay[time.UnixMilli(at).In(ixTZ).Format("2006-01-02")]; d != nil {
+			d.Files++
+			d.Bytes += size
+		}
+	}
+	return out
 }
 
 func (a *App) ixDownloads(ctx context.Context) ixDownloadStats {
 	st := ixDownloadStats{Errors: []ixDownloadError{}, RetryRounds: ixRetryRounds, RetryAfterMin: int(ixRetryAfter / time.Minute)}
 	st.EngineRunning = a.monitor != nil && a.monitor.RequireRunning() == nil
+	st.Pace = a.ixPaceNow()
+	st.Days = a.ixDownloadDays(ctx)
 	var paused sql.NullInt64
 	_ = a.db.Reader.QueryRowContext(ctx, `SELECT paused FROM tgdl_queue_state WHERE id=1`).Scan(&paused)
 	st.QueuePaused = paused.Int64 != 0

@@ -136,6 +136,16 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 	line("\n[downloads]")
 	d := a.ixDownloads(ctx)
 	line("engine running %v · queue paused %v · downloading %d · waiting %d · failed %d (given up %d) · last hour %d · last finished %s", d.EngineRunning, d.QueuePaused, d.Downloading, d.Waiting, d.Failed, d.GivenUp, d.LastHour, ixAgo(d.LastAt, now))
+	mb := func(b float64) float64 { return b / 1e6 }
+	line("speed %.2f MB/s now, %.2f MB/s over 5 min · parts in flight allowed %d · Telegram waits: %d in the last hour, %d in the last day", mb(d.Pace.Speed), mb(d.Pace.Speed5m), d.Pace.Window, d.Pace.Floods1h, d.Pace.Floods24h)
+	for _, dc := range d.Pace.DCs {
+		line("  DC%d: window %d, in flight %d, waiting %d, %.2f MB/s (5 min %.2f), waits last hour %d · %s", dc.DC, dc.Window, dc.InFlight, dc.Waiting, mb(dc.Speed), mb(dc.Speed5m), dc.Floods1h, dc.State)
+	}
+	var days []string
+	for _, day := range d.Days {
+		days = append(days, fmt.Sprintf("%s %d files %d MB", day.Day[5:], day.Files, day.Bytes>>20))
+	}
+	line("per day: %s", strings.Join(days, " | "))
 	for _, e := range d.Errors {
 		line("  %d× %s", e.Count, r.clean(e.Error))
 	}

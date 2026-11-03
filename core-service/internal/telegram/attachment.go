@@ -284,11 +284,18 @@ func (c *GotdClient) DownloadMedia(ctx context.Context, a Attachment, w io.Write
 	_, plainChat := c.unverified.Load(chat)
 	verify := verifyChunks && !plainFile && !plainChat
 	tuned := c.threads != nil && c.guard != nil && !verify && a.Identity.Size > downloadPartSize
-	// Several parts of one file at once; a FLOOD_WAIT meanwhile halves the
-	// account's threads for its next files.
+	// Several parts of one file at once. With the pacer, how many parts the
+	// account has in flight is its job (the datacenter windows), so a file
+	// may always ask for its full share; without it, a FLOOD_WAIT halves
+	// the account's threads for its next files.
 	threads, floods := 1, uint64(0)
 	if tuned {
 		threads, floods = c.threads.threads(), c.guard.floods.Load()
+		if c.pacer != nil {
+			threads, tuned = maxDownloadThreads, false
+		}
+	} else if c.pacer != nil && !verify && a.Identity.Size > downloadPartSize {
+		threads = maxDownloadThreads
 	}
 	err := downloadMedia(ctx, guardedClient{c.client, c}, a, w, verify, threads)
 	if tuned {
@@ -319,18 +326,20 @@ type guardedClient struct {
 const downloadPoolConnections = 12
 
 func (c guardedClient) Pool(int64) (gotd.CloseInvoker, error) {
-	return c.owner.sharedPool(0, func() (gotd.CloseInvoker, error) { return c.Client.Pool(downloadPoolConnections) })
+	return c.owner.sharedPool(0, c.Client.Config().ThisDC, func() (gotd.CloseInvoker, error) { return c.Client.Pool(downloadPoolConnections) })
 }
 
 func (c guardedClient) DC(ctx context.Context, dc int, _ int64) (gotd.CloseInvoker, error) {
-	return c.owner.sharedPool(dc, func() (gotd.CloseInvoker, error) { return c.Client.DC(ctx, dc, downloadPoolConnections) })
+	return c.owner.sharedPool(dc, dc, func() (gotd.CloseInvoker, error) { return c.Client.DC(ctx, dc, downloadPoolConnections) })
 }
 
-func (c *GotdClient) sharedPool(dc int, open func() (gotd.CloseInvoker, error)) (gotd.CloseInvoker, error) {
+// sharedPool returns the pool kept under key (0: the home datacenter),
+// paced as datacenter dc.
+func (c *GotdClient) sharedPool(key, dc int, open func() (gotd.CloseInvoker, error)) (gotd.CloseInvoker, error) {
 	c.poolMu.Lock()
 	defer c.poolMu.Unlock()
-	if pool := c.pools[dc]; pool != nil {
-		return sharedInvoker{pool, c.guard}, nil
+	if pool := c.pools[key]; pool != nil {
+		return sharedInvoker{pool, c.guard, c.pacer, dc}, nil
 	}
 	pool, err := open()
 	if err != nil {
@@ -339,8 +348,8 @@ func (c *GotdClient) sharedPool(dc int, open func() (gotd.CloseInvoker, error)) 
 	if c.pools == nil {
 		c.pools = map[int]gotd.CloseInvoker{}
 	}
-	c.pools[dc] = pool
-	return sharedInvoker{pool, c.guard}, nil
+	c.pools[key] = pool
+	return sharedInvoker{pool, c.guard, c.pacer, dc}, nil
 }
 
 // sharedInvoker is one download's view of a shared pool: guarded, and Close
@@ -348,17 +357,40 @@ func (c *GotdClient) sharedPool(dc int, open func() (gotd.CloseInvoker, error)) 
 type sharedInvoker struct {
 	pool  gotd.CloseInvoker
 	guard *floodGuard
+	pacer *downloadPacer
+	dc    int
 }
 
 func (i sharedInvoker) Invoke(ctx context.Context, input bin.Encoder, output bin.Decoder) error {
 	if i.guard == nil {
 		return i.pool.Invoke(ctx, input, output)
 	}
-	err := i.guard.invoke(ctx, i.pool, input, output)
+	call := func() error { return i.guard.invoke(ctx, i.pool, input, output) }
+	if _, part := input.(*tg.UploadGetFileRequest); part && i.pacer != nil {
+		// A file part: wait for room in the datacenter's window, and tell
+		// the pacer what came back.
+		if err := i.pacer.acquire(ctx, i.dc); err != nil {
+			return err
+		}
+		received := 0
+		defer func() { i.pacer.release(i.dc, received) }()
+		call = func() error {
+			err := i.guard.invokeFiles(ctx, i.pool, input, output, func(time.Duration) { i.pacer.flood(i.dc) })
+			if err == nil {
+				if box, ok := output.(*tg.UploadFileBox); ok {
+					if f, ok := box.File.(*tg.UploadFile); ok {
+						received = len(f.Bytes)
+					}
+				}
+			}
+			return err
+		}
+	}
+	err := call()
 	// Telegram drops download connections under load, failing every request
 	// in flight on them. Reads are idempotent: ask again on another pooled
 	// connection instead of failing the whole file.
-	err = retryLostConnection(ctx, err, func() error { return i.guard.invoke(ctx, i.pool, input, output) })
+	err = retryLostConnection(ctx, err, call)
 	// A wait short enough to sleep through that is still refused after every
 	// inline retry is Telegram refusing this file, not the account: the
 	// library would retry it forever, closing the account's gate each time

@@ -34,6 +34,11 @@ type floodGuard struct {
 	limiter *rate.Limiter
 	mu      sync.Mutex
 	until   time.Time
+	// filesUntil is the gate for file downloads alone: Telegram limits
+	// upload.getFile by itself, so a wait it asks for there holds the
+	// downloads back but not the account's other requests (rescans, gap
+	// checks), and the reverse.
+	filesUntil time.Time
 	// floods counts the FLOOD_WAITs Telegram has answered this account with.
 	floods atomic.Uint64
 }
@@ -53,19 +58,44 @@ func (g *floodGuard) FloodWaitUntil() time.Time {
 }
 
 func (g *floodGuard) close(d time.Duration) time.Time {
+	return g.closeGate(d, false)
+}
+
+func (g *floodGuard) closeGate(d time.Duration, files bool) time.Time {
 	g.floods.Add(1)
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if until := time.Now().Add(d + floodGateMargin); until.After(g.until) {
-		g.until = until
+	gate := &g.until
+	if files {
+		gate = &g.filesUntil
 	}
-	return g.until
+	if until := time.Now().Add(d + floodGateMargin); until.After(*gate) {
+		*gate = until
+	}
+	return *gate
+}
+
+// FilesWaitUntil reports when file downloads may go on (zero when open).
+func (g *floodGuard) FilesWaitUntil() time.Time {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if time.Now().After(g.filesUntil) {
+		return time.Time{}
+	}
+	return g.filesUntil
 }
 
 func (g *floodGuard) wait(ctx context.Context) error {
+	return g.waitGate(ctx, false)
+}
+
+func (g *floodGuard) waitGate(ctx context.Context, files bool) error {
 	for {
 		g.mu.Lock()
 		delay := time.Until(g.until)
+		if files {
+			delay = max(delay, time.Until(g.filesUntil))
+		}
 		g.mu.Unlock()
 		if delay <= 0 {
 			return g.limiter.Wait(ctx)
@@ -81,8 +111,19 @@ func (g *floodGuard) wait(ctx context.Context) error {
 }
 
 func (g *floodGuard) invoke(ctx context.Context, next tg.Invoker, input bin.Encoder, output bin.Decoder) error {
+	return g.invokeGate(ctx, next, input, output, false, nil)
+}
+
+// invokeFiles is invoke for file downloads: their own gate (which also
+// waits for the account's), and onFlood hears of every wait Telegram asks
+// for, so the pacer can slow down.
+func (g *floodGuard) invokeFiles(ctx context.Context, next tg.Invoker, input bin.Encoder, output bin.Decoder, onFlood func(time.Duration)) error {
+	return g.invokeGate(ctx, next, input, output, true, onFlood)
+}
+
+func (g *floodGuard) invokeGate(ctx context.Context, next tg.Invoker, input bin.Encoder, output bin.Decoder, files bool, onFlood func(time.Duration)) error {
 	for attempt := 0; ; attempt++ {
-		if err := g.wait(ctx); err != nil {
+		if err := g.waitGate(ctx, files); err != nil {
 			return err
 		}
 		err := next.Invoke(ctx, input, output)
@@ -90,7 +131,10 @@ func (g *floodGuard) invoke(ctx context.Context, next tg.Invoker, input bin.Enco
 		if !flood {
 			return err
 		}
-		g.close(d)
+		if onFlood != nil {
+			onFlood(d)
+		}
+		g.closeGate(d, files)
 		if d > floodSleepThreshold || attempt >= floodInlineRetries {
 			return err
 		}
