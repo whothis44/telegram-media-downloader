@@ -550,6 +550,24 @@ func (a *App) ixRunML(ctx context.Context) {
 		if err != nil || m == nil {
 			continue
 		}
+		// The counts in Settings and the browser are kept current while the
+		// work goes on (not only after a whole round).
+		a.ixMLCount(ctx, m)
+		stop := make(chan struct{})
+		go func() {
+			tick := time.NewTicker(30 * time.Second)
+			defer tick.Stop()
+			for {
+				select {
+				case <-stop:
+					return
+				case <-ctx.Done():
+					return
+				case <-tick.C:
+					a.ixMLCount(ctx, m)
+				}
+			}
+		}()
 		// Each kind of work takes its turn: what a picture shows first (it
 		// powers search and sets), then faces, then text.
 		wait = time.Minute
@@ -563,6 +581,7 @@ func (a *App) ixRunML(ctx context.Context) {
 				wait = w
 			}
 		}
+		close(stop)
 		a.ixMLCount(ctx, m)
 	}
 }

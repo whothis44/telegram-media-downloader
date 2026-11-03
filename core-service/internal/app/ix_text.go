@@ -416,6 +416,7 @@ func (a *App) ixRunSTT(ctx context.Context) {
 		if err != nil || m == nil {
 			continue
 		}
+		a.ixMLCount(ctx, m)
 		wait = a.ixMLRoundTask(ctx, a.ixSTTTask(ctx, c), m, 50)
 		a.ixMLCount(ctx, m)
 	}
