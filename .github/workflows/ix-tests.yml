@@ -30,6 +30,7 @@ jobs:
       - name: Archive tests
         env:
           IX_SAMPLE_OUT: ${{ runner.temp }}/archive-data-sample
+          IX_SAMPLE_PRINT: "1"
         run: |
           set -o pipefail
           go -C core-service test -race -count=1 -run 'TestIx' -v ./internal/app/ 2>&1 | grep -E '^(=== RUN|--- |PASS|FAIL|ok|panic)|ix.*_test.go'
