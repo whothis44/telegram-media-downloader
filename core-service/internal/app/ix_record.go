@@ -22,8 +22,16 @@ type ixRuntime struct {
 	groupsAt  time.Time
 	wake      chan struct{}
 	lastError time.Time
-	queueMu   sync.Mutex // serialises queue state changes
+	queueMu   sync.Mutex  // serialises queue state changes
+	recent    []ixLogLine // the last archive log lines, for the diagnostics report
 }
+
+type ixLogLine struct {
+	At   time.Time
+	Text string
+}
+
+const ixRecentLines = 300
 
 const ixGroupsTTL = 30 * time.Second
 
@@ -42,6 +50,10 @@ func (a *App) ix() *ixRuntime {
 func (a *App) ixLog(format string, args ...any) {
 	rt := a.ix()
 	rt.mu.Lock()
+	rt.recent = append(rt.recent, ixLogLine{time.Now(), fmt.Sprintf(format, args...)})
+	if len(rt.recent) > ixRecentLines {
+		rt.recent = append([]ixLogLine(nil), rt.recent[len(rt.recent)-ixRecentLines:]...)
+	}
 	quiet := time.Since(rt.lastError) < time.Minute
 	if !quiet {
 		rt.lastError = time.Now()

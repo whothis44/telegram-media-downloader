@@ -30,7 +30,11 @@ type ixSettings struct {
 	DupHWAccel    string `json:"dupHwaccel"`    // "cuda" (default), "none", or another ffmpeg backend
 	DupQuietStart string `json:"dupQuietStart"` // HH:MM; no fingerprinting between start and end
 	DupQuietEnd   string `json:"dupQuietEnd"`
-	AutoRetry     bool   `json:"autoRetry"` // put failed downloads back in the queue every few hours
+	AutoRetry     bool   `json:"autoRetry"`     // put failed downloads back in the queue every few hours
+	FixityEnabled bool   `json:"fixityEnabled"` // re-read every stored file about once a month
+	SubstExact    bool   `json:"substExact"`    // same-size re-uploads: check bytes on Telegram instead of downloading
+	HoldLikely    bool   `json:"holdLikely"`    // probable copies wait until nothing else is queued
+	HoldForever   bool   `json:"holdForever"`   // ...and are never released automatically
 	// Alerts (see ix_alerts.go). The SMTP password is never sent back to
 	// the dashboard; AlertSMTPPassSet says whether one is saved.
 	AlertWebhook     string `json:"alertWebhook"`
@@ -53,7 +57,7 @@ func (s ixSettings) public() ixSettings {
 }
 
 func ixDefaultSettings() ixSettings {
-	return ixSettings{ExportEnabled: true, ExportTime: "03:30", Pace: "normal", DupEnabled: true, DupHWAccel: "cuda", AutoRetry: true, AlertWebhookKind: "ntfy", AlertSMTPPort: "587"}
+	return ixSettings{ExportEnabled: true, ExportTime: "03:30", Pace: "normal", DupEnabled: true, DupHWAccel: "cuda", AutoRetry: true, FixityEnabled: true, SubstExact: true, HoldLikely: true, AlertWebhookKind: "ntfy", AlertSMTPPort: "587"}
 }
 
 func (a *App) ixLoadSettings(ctx context.Context) ixSettings {
@@ -255,6 +259,11 @@ func ixParseSettings(body map[string]any, s ixSettings) (ixSettings, error) {
 	}
 	if v, ok := body["autoRetry"].(bool); ok {
 		s.AutoRetry = v
+	}
+	for key, dst := range map[string]*bool{"fixityEnabled": &s.FixityEnabled, "substExact": &s.SubstExact, "holdLikely": &s.HoldLikely, "holdForever": &s.HoldForever} {
+		if v, ok := body[key].(bool); ok {
+			*dst = v
+		}
 	}
 	if v, ok := body["alertNames"].(bool); ok {
 		s.AlertNames = v

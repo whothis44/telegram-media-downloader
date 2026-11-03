@@ -1,6 +1,6 @@
 # Telegram archive: data files
 
-Everything the archive knows, in plain files for other tools. Written with the index (nightly, or with "Write the index to the NAS now"). Format version 2; `manifest.json` says which version a folder holds.
+Everything the archive knows, in plain files for other tools. Written with the index (nightly, or with "Write the index to the NAS now"). Format version 3; `manifest.json` says which version a folder holds.
 
 All files are UTF-8 [JSON Lines](https://jsonlines.org/): one JSON object per line. Message files are gzip-compressed.
 
@@ -9,12 +9,18 @@ All files are UTF-8 [JSON Lines](https://jsonlines.org/): one JSON object per li
 | File | One line per |
 |---|---|
 | `manifest.json` | (one object) export time, app version, `downloads_root`: the downloads folder as the server saw it |
-| `groups.jsonl` | chat: `group_id`, `chat_id`, `name`, `category`, `download_settings`, counts, `messages_file`; from Telegram's chat details: `telegram_title`, `type` (channel, supergroup, forum, group), `forum`, `about`, `username`, `members`, `pinned_message_id`, `discussion_group_id`, `telegram_message_count` (what Telegram says the chat holds; compare with `messages`), `info_tl_base64`; `finished_at` when marked finished |
+| `groups.jsonl` | chat: `group_id`, `chat_id`, `name`, `category`, `download_settings`, counts, `messages_file`; `link` (public t.me link), `invite_link` (when Telegram gave one), `photo` (the chat's picture, under `photos/`), `message_ids_gone` (message numbers Telegram confirmed are gone, as ranges like `112-119`); from Telegram's chat details: `telegram_title`, `type` (channel, supergroup, forum, group), `forum`, `about`, `username`, `members`, `pinned_message_id`, `discussion_group_id`, `telegram_message_count` (what Telegram says the chat holds; compare with `messages`), `info_tl_base64`; `finished_at` when marked finished |
 | `messages/g_<chat_id>.jsonl.gz` | message of that chat, oldest first |
 | `files.jsonl` | downloaded file: `group_id`, `download_id`, `path`, `size`, `type`, `sha256`, `telegram_file`, `created_at`, and when known `mime`, `width`, `height`, `duration_s`, `thumb_stripped_base64` |
 | `peers.jsonl` | sender or source: `peer_id` (`user:<id>`, `channel:<id>`, `chat:<id>`), `name`, `username` |
 | `topics.jsonl` | forum topic: `group_id`, `topic_id`, `title` |
-| `near_duplicates.jsonl` | set of videos that look the same (re-encodes, clips): `kind` (`same`, `mixed`); `members` (largest first: `download_id`, `path`, `sha256`, `telegram_file`, `size`, `duration_s`, `places` = the messages it appears in); `pairs` (`a`, `b` = member indexes, `kind` `same` or `clip`, `score`, `offset_s` = where the clip starts) |
+| `near_duplicates.jsonl` | set of videos that share footage (re-encodes, clips): `kind` (`same`, `mixed`); `members` (largest first: `download_id`, `path`, `sha256`, `telegram_file`, `size`, `duration_s`, `places` = the messages it appears in); `pairs` (`a`, `b` = member indexes, `kind` `same`, `clip` or `overlap`, `score`, `offset_s` = seconds to add to a time in `a` to reach the same moment in `b`, `cover_a`/`cover_b` = share of each video's length the shared footage covers) |
+| `posts.jsonl` | post (an album counts once): `post` (`<group_id>:<first message_id>`), `group_id`, `message_ids`, `album_id`, `date`, `original_date` (a forward's first date), `family`, `role` (`original`, `repost`, `adds`), `files` (`message_id`, `cluster`, `sha256` or `path`, `status`) |
+| `families.jsonl` | repost family: one original post and every repost of it: `family`, `lead_post`, `first_date`, `chats`, `merged` (later posts added files), `posts` (`post`, `group_id`, `date`, `role`), `files` (the merged album in order: `cluster`, `best` file, `introduced_by` post) |
+| `media_clusters.jsonl` | set of files that are the same picture or video (2 files or more): `cluster`, `kind`, `generic` (appears in many unrelated posts: a logo or sticker), `best` (the copy shown: most pixels, then most bytes), `members` (`group_id`, `message_id`, `sha256`, `path`, `status`, `matched_by`) |
+| `covered.jsonl` | file not downloaded because the library has it: `group_id`, `message_id`, `how` (`telegram-hashes` or `sampled-parts`: the same bytes as `of_path`, checked on Telegram; `held`: a probable copy of `like` waiting at the back of the queue), `at` |
+| `entities.jsonl` | link, @username, e-mail, phone, wallet or IBAN found in message text: `kind`, `value`, `count`, `chats`, `first`, `last`, `refs` (up to 200 messages: `group`, `msg`, `date`); wallets and IBANs pass their checksums |
+| `manifest-sha256.txt` | `<sha256>  <path>` per stored file (the `sha256sum -c` format, run from the downloads folder) |
 
 ## IDs
 
@@ -48,3 +54,4 @@ All files are UTF-8 [JSON Lines](https://jsonlines.org/): one JSON object per li
 
 - Exactly the same file: equal `sha256`, or equal `telegram_file` (the same Telegram upload, for example forwarded to several chats; `kind:id:size`).
 - Same video, different file (re-encoded, resized or cut): `near_duplicates.jsonl`.
+- Same picture or video in any form, folded for viewing: `media_clusters.jsonl`; posts that repeat earlier ones: `families.jsonl`. `family` and `cluster` numbers belong to one export.

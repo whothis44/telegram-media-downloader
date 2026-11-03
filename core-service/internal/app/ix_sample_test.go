@@ -346,6 +346,93 @@ func TestIxDataSample(t *testing.T) {
 			g.id, g.title, g.kind, g.about, g.username, g.members, g.pinned, g.linked, seen, g.count, seen, g.finished)
 	}
 
+	// ix.6: how to find the forum again, message numbers confirmed gone.
+	exec(`UPDATE ix_group_info SET invite_link='https://t.me/+TrailBuildersSample' WHERE group_id=?`, forum)
+	for _, id := range []int{112, 113, 114, 115, 116, 117, 118, 119} {
+		exec(`INSERT INTO ix_absent(group_id,message_id,checked_at) VALUES(?,?,?)`, club, id, seen)
+	}
+	// The forum reposts three photos of the season-opener album (the same
+	// Telegram files) and adds one of its own: the families merge them.
+	for i, src := range []int{120, 121, 122, -1} {
+		m := post(forum, 210+i, 20000, "")
+		if i == 0 {
+			m.Message = "Some of the season opener shots, plus mine from the hill."
+		}
+		m.FromID, m.GroupedID = user(1001), 3711000000000000210
+		if src > 0 {
+			m.Media = photo(5100000000000000000+int64(src), 300000+(src-120)*7000)
+		} else {
+			m.Media = photo(5100000000000000213, 333000)
+		}
+		var buf bin.Buffer
+		if err := m.Encode(&buf); err != nil {
+			t.Fatal(err)
+		}
+		var decoded tg.Message
+		if err := decoded.Decode(&buf); err != nil {
+			t.Fatal(err)
+		}
+		row := ixRowFromMessage(&decoded)
+		exec(`INSERT INTO ix_messages(group_id,message_id,date,text,grouped_id,sender_id,media_type,media_name,media_size,media_key,tl,first_seen,seen_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, forum, row.MessageID, row.Date, row.Text, row.GroupedID, row.SenderID, row.MediaType, row.MediaName, row.MediaSize, row.MediaKey, row.TL, seen, seen)
+		if src > 0 {
+			exec(`INSERT INTO downloads(group_id,group_name,message_id,file_name,file_size,file_type,file_path,status,created_at,file_hash,telegram_media_kind,telegram_media_id,telegram_media_size,telegram_mime,media_width,media_height)
+				SELECT ?,'',?,file_name,file_size,file_type,file_path,'completed','2026-03-14 18:40:00',file_hash,telegram_media_kind,telegram_media_id,telegram_media_size,telegram_mime,media_width,media_height
+				FROM downloads WHERE group_id=? AND message_id=?`, forum, 210+i, club, src)
+		} else {
+			media[forum+"/213"], _ = telegram.MessageAttachment(&decoded)
+			file(forum, 213, "Trail Builders Forum/images/2026-03-14_213.jpg", "photo", 333000, "2026-03-14 18:40:02")
+		}
+	}
+	// A recompressed copy of the braking-tips picture (club 109), found by
+	// the picture index; and a re-upload of the recap with the same bytes,
+	// not downloaded again (its bytes were checked on Telegram).
+	small := file(makers, 59, "Ottawa Maker Space/images/wet-braking-tips.jpg", "photo", 96_400, "2025-12-02 18:14:00")
+	exec(`INSERT INTO ix_mcl(key,cluster,how,distance) VALUES(?,?,'leader',0),(?,?,'auto',12)`, "h:"+hash("Riverside Cycling Club/images/2026-03-14_109.jpg"), "h:"+hash("Riverside Cycling Club/images/2026-03-14_109.jpg"),
+		"h:"+small, "h:"+hash("Riverside Cycling Club/images/2026-03-14_109.jpg"))
+	{
+		m := post(forum, 205, 9600, "Re-uploaded the recap for people who can't open forwards.")
+		m.FromID, m.ReplyTo = user(1003), &tg.MessageReplyHeader{ForumTopic: true, ReplyToMsgID: 14}
+		m.Media = video(5200000000000000205, 48_211_337, 94.5, "spring-ride-recap.mp4") // a new upload, the same bytes
+		var buf bin.Buffer
+		_ = m.Encode(&buf)
+		var decoded tg.Message
+		_ = decoded.Decode(&buf)
+		row := ixRowFromMessage(&decoded)
+		exec(`INSERT INTO ix_messages(group_id,message_id,date,text,sender_id,reply_to,topic_id,media_type,media_name,media_size,media_key,tl,first_seen,seen_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, forum, row.MessageID, row.Date, row.Text, row.SenderID, row.ReplyTo, row.TopicID, row.MediaType, row.MediaName, row.MediaSize, row.MediaKey, row.TL, seen, seen)
+		att, _ := telegram.MessageAttachment(&decoded)
+		exec(`INSERT INTO downloads(group_id,group_name,message_id,file_name,file_size,file_type,file_path,status,created_at,file_hash,telegram_media_kind,telegram_media_id,telegram_media_size)
+			VALUES(?,'',205,'spring-ride-recap.mp4',48211337,'video','Riverside Cycling Club/videos/spring-ride-recap.mp4','completed','2026-03-14 14:41:00',?,?,?,?)`, forum, recap, att.Identity.Kind, att.Identity.ID, att.Identity.Size)
+		exec(`INSERT INTO ix_subst(group_id,message_id,identity,size,of_path,how,at) VALUES(?,205,?,48211337,'Riverside Cycling Club/videos/spring-ride-recap.mp4','telegram-hashes',?)`, forum, att.Identity.Key(), seen)
+	}
+	// A probable copy of the descent clip, held at the back of the queue.
+	{
+		m := post(forum, 206, 9900, "Descent again, from my phone.")
+		m.FromID, m.ReplyTo = user(1002), &tg.MessageReplyHeader{ForumTopic: true, ReplyToMsgID: 14}
+		m.Media = video(5200000000000000206, 9_120_400, 21.0, "VID_0414.mp4")
+		var buf bin.Buffer
+		_ = m.Encode(&buf)
+		var decoded tg.Message
+		_ = decoded.Decode(&buf)
+		row := ixRowFromMessage(&decoded)
+		exec(`INSERT INTO ix_messages(group_id,message_id,date,text,sender_id,reply_to,topic_id,media_type,media_name,media_size,media_key,tl,first_seen,seen_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, forum, row.MessageID, row.Date, row.Text, row.SenderID, row.ReplyTo, row.TopicID, row.MediaType, row.MediaName, row.MediaSize, row.MediaKey, row.TL, seen, seen)
+		exec(`INSERT INTO ix_held(work_id,group_id,message_id,like_path,like_key,reason,held_at,released_at) VALUES(1,?,206,'Trail Builders Forum/videos/descent-clip.mp4',?,'looks like a saved copy',?,0)`, forum, "h:"+clip, seen)
+	}
+	// Things worth following, in a post: a donation address, an IBAN (the
+	// standard documentation examples) and a link.
+	{
+		m := post(forum, 304, 7000, "Donations for trail tools: BTC 1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2 or IBAN GB82 WEST 1234 5698 7654 32. Ride news at t.me/riversidecc, ask @mayachen.")
+		m.FromID = user(1003)
+		var buf bin.Buffer
+		_ = m.Encode(&buf)
+		var decoded tg.Message
+		_ = decoded.Decode(&buf)
+		row := ixRowFromMessage(&decoded)
+		exec(`INSERT INTO ix_messages(group_id,message_id,date,text,sender_id,tl,first_seen,seen_at) VALUES(?,?,?,?,?,?,?,?)`, forum, row.MessageID, row.Date, row.Text, row.SenderID, row.TL, seen, seen)
+	}
+
 	exec(`INSERT INTO ix_walks(job_id,group_id,started_at,finished_at,processed,marked_deleted,state) VALUES('sample-1',?,?,?,10,1,'done'),('sample-2',?,?,?,13,0,'done')`,
 		club, seen, seen+60_000, forum, seen, seen+90_000)
 

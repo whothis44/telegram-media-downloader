@@ -20,7 +20,13 @@ against it. The tool then runs on the real `data` folder unchanged.
 | `data/messages/g_<chat>.jsonl` | The same, uncompressed, for reading (a real export has only the `.gz`) |
 | `data/files.jsonl` | Every downloaded file |
 | `data/peers.jsonl`, `data/topics.jsonl` | Names of senders and channels; forum topic titles |
-| `data/near_duplicates.jsonl` | Videos that look the same |
+| `data/near_duplicates.jsonl` | Videos that share footage (same video, clips, overlaps) |
+| `data/posts.jsonl` | Every post (an album counts once) with its files, repost family and role |
+| `data/families.jsonl` | Each original with its reposts, and the merged album when later posts added files |
+| `data/media_clusters.jsonl` | Files that are the same picture or video, with the copy to show and how each was matched |
+| `data/covered.jsonl` | Files not downloaded because the library already has them (checked re-uploads, held probable copies) |
+| `data/entities.jsonl` | Links, @usernames, wallets and IBANs found in message text |
+| `data/manifest-sha256.txt` | Checksums of the stored files, in `sha256sum -c` format |
 | `schema.json` | JSON Schema (draft 2020-12) for each kind of record |
 
 The media files themselves are not included; `path` values point to where they would be under the
@@ -40,6 +46,7 @@ downloads folder.
 - 111: a system notice: the admin pinned 101 (`service: "messageActionPinMessage"`, `reply_to: 101`).
 - 120–129: one post of 7 photos and 3 videos (one `album_id`), caption on 120; the last clip (129) is still
   missing, so the album is partly downloaded.
+- 112–119: message numbers Telegram confirmed are gone (`message_ids_gone` in `groups.jsonl`).
 
 **Trail Builders Forum** (forum supergroup, `g_1811230002`; topics in `topics.jsonl`)
 - 14, 27: system notices opening the topics "Trail reports" and "Tools & repairs" (`service: "messageActionTopicCreate"`).
@@ -48,6 +55,14 @@ downloads folder.
 - 203: the club's recap video forwarded here. Same `telegram_file` and same `sha256` as club 105, and the
   same `path`: one file on disk, two messages.
 - 204: a 21-second clip cut from the recap (found as a near-duplicate, kind `clip`).
+- 205: the recap uploaded again as a new file. It was not downloaded: its bytes were checked on Telegram and
+  match the saved recap (`covered.jsonl`, `how: "telegram-hashes"`), so it points at the same file.
+- 206: a phone copy of the descent clip, held at the back of the download queue as a probable copy
+  (`covered.jsonl`, `how: "held"`; in `media_clusters.jsonl` with `held_likely_copy`).
+- 210–213: an album reposting three of the club's season-opener photos plus one new one. `families.jsonl`
+  merges it into the club's album (`merged: true`, the new photo `introduced_by` the forum post).
+- 304: a donation post with a Bitcoin address, an IBAN (the standard documentation examples), a t.me link and an
+  @username: `entities.jsonl`. The forum has an invite link in `groups.jsonl`.
 - 301: a voice note (`media.type: "voice"`), 302: a PDF still missing.
 
 **Riverside Cycling Club chat** (`g_1811230004`): the club's discussion group
@@ -56,7 +71,8 @@ downloads folder.
 **Ottawa Maker Space** (`g_1811230003`, marked finished: `finished_at`)
 - Files the downloader fetched before the archive existed; their messages were never captured. Each
   file still gets a line (`date` 0, no `raw`), so nothing on disk is left out. One of them is a
-  720p re-encode of the club's recap: a near-duplicate of kind `same`.
+  720p re-encode of the club's recap: a near-duplicate of kind `same`. Another (59) is a recompressed copy
+  of the club's braking-tips picture, grouped with it by the picture index (`picture_auto`).
 
 ## Typical jobs for a tool
 
@@ -70,6 +86,11 @@ downloads folder.
   messages it appears in; `pairs` say which are the same video and which are clips (and where the clip
   starts). Keeping the largest member of a `same` pair loses nothing.
 - **Inventory**: count `file_status` per chat; `missing` lines are what is still to be fetched.
+- **Originals only**: one card per line of `families.jsonl`; show its `files` (the merged album) and list
+  its `posts` as "also posted in". `media_clusters.jsonl` gives the best copy of each file.
+- **Completeness by number**: message IDs 1 to the newest are either in the messages file or in
+  `message_ids_gone`.
+- **Fixity**: run `sha256sum -c data/manifest-sha256.txt` from the downloads folder.
 - **Full detail**: anything not lifted into its own field (reactions, buttons, link previews, exact
   media sizes) is in `raw`; `tl_base64` is the original bytes for MTProto libraries.
 

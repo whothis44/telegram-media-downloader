@@ -95,7 +95,7 @@ func (a *App) ixDupClusters(ctx context.Context) ([]ixDupCluster, error) {
 		var largest int64
 		for _, k := range comp {
 			for _, n := range near[k] {
-				if n.Kind == "clip" {
+				if n.Kind != "same" {
 					cl.Kind = "mixed"
 				}
 			}

@@ -1,0 +1,591 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Archive browser</title>
+<style>
+:root{--bg:#fff;--fg:#1f2328;--muted:#5d6670;--line:#d9dde3;--soft:#f3f5f7;--sunk:#e7ebef;--accent:#2481cc;--accent-fg:#fff;--ok:#1a7f37;--warn:#9a6700;--bad:#cf222e;--bubble:#fff;--bubble-line:#e3e7eb;--chatbg:#e6ebee;--new:#8250df}
+@media (prefers-color-scheme:dark){:root{--bg:#17212b;--fg:#e7edf3;--muted:#9aa7b4;--line:#2b3a49;--soft:#1f2c3a;--sunk:#24313f;--accent:#5eaaf0;--accent-fg:#0d1620;--ok:#4cc26a;--warn:#e3b341;--bad:#ff7b72;--bubble:#182533;--bubble-line:#26394b;--chatbg:#0e1621;--new:#c297ff}}
+*{box-sizing:border-box}html,body{margin:0;background:var(--bg);color:var(--fg);font:14.5px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+a{color:var(--accent)}button,input,select{font:inherit;color:inherit}
+.muted{color:var(--muted);font-size:13px}.warn{color:var(--warn)}.bad{color:var(--bad)}.ok{color:var(--ok)}
+header.top{position:sticky;top:0;z-index:20;background:var(--bg);border-bottom:1px solid var(--line);padding:8px 16px;display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center}
+header.top h1{font-size:18px;margin:0;white-space:nowrap}header.top .grow{flex:1}
+.tabs{display:flex;gap:4px;flex-wrap:wrap}.tab{border:1px solid var(--line);background:var(--soft);border-radius:8px;padding:5px 11px;cursor:pointer;font-size:13.5px}
+.tab.on{background:var(--accent);border-color:var(--accent);color:var(--accent-fg);font-weight:600}
+.tab .n{opacity:.8;margin-left:4px;font-size:12px}
+.layout{display:grid;grid-template-columns:250px minmax(0,1fr);min-height:calc(100vh - 50px)}
+aside{border-right:1px solid var(--line);padding:10px 8px 40px;overflow:auto;max-height:calc(100vh - 50px);position:sticky;top:50px}
+aside h3{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin:12px 8px 4px}
+.side-item{display:flex;justify-content:space-between;gap:6px;padding:4px 8px;border-radius:7px;cursor:pointer;font-size:13.5px;word-break:break-word}
+.side-item:hover{background:var(--soft)}.side-item.on{background:var(--accent);color:var(--accent-fg)}.side-item .c{color:var(--muted);font-size:12px;white-space:nowrap}.side-item.on .c{color:var(--accent-fg)}
+.side-item.cat{font-weight:600}
+main{padding:10px 16px 60px;min-width:0}
+.bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}
+input.t,select.t{padding:6px 9px;border-radius:8px;border:1px solid var(--line);background:var(--soft);font-size:14px}
+input.t.search{min-width:220px;flex:1;max-width:420px}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.seg button{border:0;background:var(--soft);padding:5px 10px;cursor:pointer;font-size:13.5px}.seg button.on{background:var(--accent);color:var(--accent-fg);font-weight:600}
+label.chk{display:inline-flex;gap:5px;align-items:center;font-size:13.5px;cursor:pointer}
+button.b{border:1px solid var(--line);background:var(--soft);border-radius:8px;padding:5px 11px;font-size:13.5px;cursor:pointer}
+button.b.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-fg);font-weight:600}button.b.danger{border-color:var(--bad);color:var(--bad)}
+button.b:disabled{opacity:.5;cursor:default}button.link{border:0;background:none;color:var(--accent);cursor:pointer;padding:0;font-size:inherit;text-decoration:underline}
+.note{padding:9px 12px;border-radius:10px;background:var(--soft);margin:0 0 10px;font-size:13.5px}.note.warn{border:1px solid var(--warn)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px;align-items:start}
+.grid.media{grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:6px}
+.card{border:1px solid var(--line);border-radius:12px;background:var(--bg);overflow:hidden;display:flex;flex-direction:column}
+.card .meta{padding:8px 10px;display:flex;flex-direction:column;gap:4px}
+.card .where{display:flex;justify-content:space-between;gap:8px;font-size:12.5px;color:var(--muted)}
+.card .where b{color:var(--fg);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.card .cap{font-size:13.5px;white-space:pre-wrap;word-break:break-word;max-height:4.4em;overflow:hidden}
+.card .badges{display:flex;flex-wrap:wrap;gap:4px}
+.badge{font-size:11.5px;font-weight:600;padding:1px 7px;border-radius:999px;border:1px solid var(--line);white-space:nowrap;color:var(--muted);background:var(--bg)}
+.badge.rep{color:var(--accent);border-color:var(--accent);cursor:pointer}.badge.merged{color:var(--new);border-color:var(--new)}.badge.del{color:var(--bad);border-color:var(--bad)}
+.badge.held{color:var(--warn);border-color:var(--warn)}.badge.miss{color:var(--bad);border-color:var(--bad)}
+.mosaic{display:grid;gap:2px;background:var(--line)}
+.mosaic.n1{grid-template-columns:1fr}.mosaic.n2{grid-template-columns:1fr 1fr}.mosaic.n3{grid-template-columns:2fr 1fr;grid-template-rows:1fr 1fr}.mosaic.n3 .tile:first-child{grid-row:1/3}
+.mosaic.n4{grid-template-columns:1fr 1fr}.mosaic.nmany{grid-template-columns:repeat(3,1fr)}
+.tile{position:relative;background:var(--sunk);aspect-ratio:1;overflow:hidden;cursor:zoom-in;display:block;border:0;padding:0;width:100%}
+.mosaic.n1 .tile{aspect-ratio:auto;max-height:420px;min-height:120px}.mosaic.n1 .tile img{max-height:420px;object-fit:contain;background:var(--sunk)}
+.tile img{width:100%;height:100%;object-fit:cover;display:block}
+.tile .lab{position:absolute;left:5px;bottom:5px;font-size:11px;font-weight:600;padding:1px 6px;border-radius:6px;background:rgba(0,0,0,.6);color:#fff}
+.tile .lab.r{left:auto;right:5px}.tile .lab.t{bottom:auto;top:5px}
+.tile .lab.new{background:var(--new)}.tile .lab.held{background:#9a6700}.tile .lab.miss{background:#a4262c}
+.tile.held img,.tile.missing img{filter:blur(1.5px) grayscale(.3);opacity:.75}
+.tile .doc{display:flex;align-items:center;justify-content:center;height:100%;padding:8px;text-align:center;font-size:12px;color:var(--muted);word-break:break-all}
+.more{padding:6px 10px;font-size:12.5px;color:var(--muted)}
+.sentinel{height:40px;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:13px}
+dialog{border:1px solid var(--line);border-radius:14px;background:var(--bg);color:var(--fg);padding:0;width:min(1100px,96vw);max-height:92vh}
+dialog::backdrop{background:rgba(0,0,0,.55)}
+.dlg-head{position:sticky;top:0;background:var(--bg);display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);z-index:2}
+.dlg-head h2{font-size:16px;margin:0}.dlg-body{padding:12px 14px;overflow:auto;max-height:calc(92vh - 52px)}
+.appear{display:grid;grid-template-columns:110px minmax(0,1fr);gap:4px 12px;border-top:1px solid var(--line);padding:8px 0;font-size:13.5px}
+.appear:first-child{border-top:0}
+.lb{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:12px}
+.lb .view{background:#000;border-radius:10px;display:flex;align-items:center;justify-content:center;min-height:300px;max-height:78vh}
+.lb .view img,.lb .view video{max-width:100%;max-height:78vh;display:block}
+.lb .info{font-size:13.5px;display:flex;flex-direction:column;gap:8px;overflow:auto;max-height:78vh}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:2px 10px}.kv dt{color:var(--muted)}.kv dd{margin:0;word-break:break-all}
+.copy{display:flex;gap:8px;align-items:center;border-top:1px solid var(--line);padding:6px 0}.copy img{width:52px;height:52px;object-fit:cover;border-radius:6px;background:var(--sunk)}
+.chat{background:var(--chatbg);border-radius:12px;padding:10px;display:flex;flex-direction:column;gap:6px}
+.msg{max-width:min(620px,92%);background:var(--bubble);border:1px solid var(--bubble-line);border-radius:12px;padding:6px 10px;align-self:flex-start}
+.msg.del{opacity:.6;border-style:dashed}.msg .who{font-weight:600;font-size:13px;color:var(--accent)}
+.msg .fwd{font-size:12.5px;color:var(--muted)}.msg .reply{font-size:12.5px;border-left:3px solid var(--accent);padding-left:6px;margin:2px 0;color:var(--muted);cursor:pointer}
+.msg .txt{white-space:pre-wrap;word-break:break-word}.msg .foot{display:flex;gap:8px;justify-content:flex-end;font-size:11.5px;color:var(--muted);flex-wrap:wrap}
+.msg .mosaic{border-radius:8px;overflow:hidden;margin:4px 0}
+.msg.hl{outline:2px solid var(--warn)}
+.svc{align-self:center;font-size:12.5px;background:rgba(0,0,0,.25);color:#fff;border-radius:999px;padding:2px 10px}
+.pair{display:grid;grid-template-columns:1fr 1fr;gap:12px}.pair .side{border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.pair .side .view{background:#000;display:flex;align-items:center;justify-content:center;height:min(52vh,520px)}.pair .side .view img,.pair .side .view video{max-width:100%;max-height:100%}
+.pair .side .m{padding:8px 10px;font-size:13px}
+table{border-collapse:collapse;width:100%;font-size:13.5px}th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}th{color:var(--muted);font-weight:600}td.n{text-align:right;font-variant-numeric:tabular-nums}
+.panel{border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:12px;display:flex;flex-direction:column;gap:8px}
+.panel h2{font-size:15px;margin:0}.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.menu{position:relative}.menu .pop{position:absolute;right:0;top:100%;z-index:5;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:6px;min-width:200px;display:none;box-shadow:0 6px 20px rgba(0,0,0,.18)}
+.menu.open .pop{display:block}.pop button{display:block;width:100%;text-align:left;border:0;background:none;padding:6px 8px;border-radius:6px;cursor:pointer;font-size:13.5px}.pop button:hover{background:var(--soft)}
+.toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:8px 14px;border-radius:10px;font-size:13.5px;z-index:50;display:none}
+mark{background:#fff1a8;color:#111}
+@media (max-width:820px){.layout{grid-template-columns:1fr}aside{position:static;max-height:none;border-right:0;border-bottom:1px solid var(--line)}.lb{grid-template-columns:1fr}.pair{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header class="top">
+  <h1>Archive browser</h1>
+  <nav class="tabs" id="tabs">
+    <button class="tab on" data-tab="browse">Browse</button>
+    <button class="tab" data-tab="chat">Read a chat</button>
+    <button class="tab" data-tab="review">Review look-alikes<span class="n" id="n-review"></span></button>
+    <button class="tab" data-tab="organise">Collections &amp; files</button>
+    <button class="tab" data-tab="entities">Links &amp; wallets</button>
+  </nav>
+  <span class="grow"></span>
+  <span class="muted" id="built"></span>
+  <a href="/ix" class="muted">← Archive</a>
+</header>
+<div class="layout">
+  <aside id="side"></aside>
+  <main>
+    <section id="v-browse">
+      <div class="bar">
+        <div class="seg" id="view">
+          <button data-v="families" class="on" title="One card per original post; reposts and copies fold into it">Originals only</button>
+          <button data-v="posts" title="Every post as it appeared in its chat">Every post</button>
+          <button data-v="media" title="One tile per picture or video, duplicates folded">Media grid</button>
+        </div>
+        <input class="t search" id="q" type="search" placeholder="Search captions, messages and file names">
+        <select class="t" id="type"><option value="">All kinds</option><option value="photo">Pictures</option><option value="video">Videos</option><option value="album">Albums</option><option value="other">Files, audio</option></select>
+        <select class="t" id="status"><option value="">Any state</option><option value="held">Held back (likely copies)</option><option value="missing">Not downloaded</option><option value="subst">Same file as another upload</option></select>
+        <select class="t" id="sort"><option value="new">Newest first</option><option value="old">Oldest first</option></select>
+        <label class="chk"><input type="checkbox" id="dups"> Only reposted</label>
+      </div>
+      <div id="feed-note" class="muted" style="margin-bottom:8px"></div>
+      <div id="feed" class="grid"></div>
+      <div class="sentinel" id="sentinel"></div>
+    </section>
+    <section id="v-chat" hidden>
+      <div class="bar">
+        <select class="t" id="chat-group" style="min-width:240px"></select>
+        <select class="t" id="chat-topic" hidden></select>
+        <input class="t" id="chat-date" type="date" title="Jump to a date">
+        <button class="b" id="chat-older">Load older</button>
+        <button class="b" id="chat-newer">Load newer</button>
+      </div>
+      <div id="chat-info" class="note" hidden></div>
+      <div class="chat" id="chat"></div>
+    </section>
+    <section id="v-review" hidden>
+      <p class="note">These pairs look alike but did not pass the automatic checks. Decide once and the browser remembers it. Keys: <b>1</b> same, keep left · <b>2</b> same, keep right · <b>S</b> same · <b>N</b> different · <b>→</b> skip. Nothing is deleted either way.</p>
+      <div id="review"></div>
+    </section>
+    <section id="v-organise" hidden>
+      <div class="panel"><h2>Collections</h2>
+        <div class="row"><input class="t" id="coll-name" placeholder="New collection name"><button class="b primary" id="coll-new">Create</button></div>
+        <div id="colls"></div>
+      </div>
+      <div class="panel"><h2>Copy or move files</h2>
+        <p class="muted" style="margin:0">Every plan is listed in full before anything happens. Applying it checks each file's fingerprint at its new place before the old copy is let go, records every step, and can be undone. Nothing is ever deleted: "trash" means a dated <code>_trash</code> folder in the downloads folder.</p>
+        <div class="row"><b>Extra copies:</b> <button class="b" id="plan-dups">Plan: move byte-identical extra copies to _trash</button></div>
+        <div class="row"><b>A collection:</b> <select class="t" id="plan-coll"></select> to folder <input class="t" id="plan-coll-dir" placeholder="collections/my-set"> <label class="chk"><input type="checkbox" id="plan-coll-move"> move instead of copy</label> <button class="b" id="plan-coll-go">Plan</button></div>
+        <div class="row"><b>Originals of:</b> <select class="t" id="plan-orig"></select> to folder <input class="t" id="plan-orig-dir" placeholder="originals/sports"> <label class="chk"><input type="checkbox" id="plan-orig-move"> move instead of copy</label> <button class="b" id="plan-orig-go">Plan</button></div>
+        <div id="plans"></div>
+      </div>
+    </section>
+    <section id="v-entities" hidden>
+      <div class="bar"><div class="seg" id="ent-kinds"></div><input class="t search" id="ent-q" type="search" placeholder="Filter"></div>
+      <div id="entities"></div>
+    </section>
+  </main>
+</div>
+<dialog id="dlg"><div class="dlg-head"><h2 id="dlg-title"></h2><button class="b" id="dlg-close">Close</button></div><div class="dlg-body" id="dlg-body"></div></dialog>
+<div class="toast" id="toast"></div>
+<script>
+'use strict';
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => Array.from(el.querySelectorAll(s));
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+async function api(method, url, body) {
+  const init = { method, credentials: 'same-origin', headers: {} };
+  if (body !== undefined) { init.headers['Content-Type'] = 'application/json'; init.body = JSON.stringify(body); }
+  try {
+    const r = await fetch(url, init);
+    let data = null; try { data = await r.json(); } catch { /* not JSON */ }
+    if (r.status === 401) location.href = '/login.html';
+    return { ok: r.ok, status: r.status, data };
+  } catch (e) { return { ok: false, status: 0, data: { error: String(e) } }; }
+}
+const errText = (r) => (r.data && r.data.error) || ('HTTP ' + r.status);
+function toast(msg) { const t = $('#toast'); t.textContent = msg; t.style.display = 'block'; clearTimeout(toast.t); toast.t = setTimeout(() => { t.style.display = 'none'; }, 3500); }
+const fmtDate = (s) => s ? new Date(s * 1000).toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—';
+const fmtDay = (s) => s ? new Date(s * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : '—';
+const fmtSize = (n) => !n ? '' : n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(0) + ' KB' : n < 1073741824 ? (n / 1048576).toFixed(1) + ' MB' : (n / 1073741824).toFixed(2) + ' GB';
+const fmtDur = (s) => { if (!s) return ''; s = Math.round(s); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60; return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(x).padStart(2, '0'); };
+const roleText = { original: 'original', repost: 'repost', adds: 'adds new files' };
+const statusText = { held: 'waiting – likely a copy', missing: 'not downloaded', subst: 'same file as another upload' };
+
+const S = { info: null, view: 'families', group: '', category: '', q: '', type: '', status: '', sort: 'new', dups: false, collection: 0, cursor: 0, loading: false, done: false, tab: 'browse', cards: [] };
+
+// ---------- info, sidebar ----------
+async function loadInfo() {
+  const r = await api('GET', '/api/ix/browse/info');
+  if (!r.ok) { $('#feed-note').textContent = 'The browser index could not be built: ' + errText(r); return; }
+  S.info = r.data;
+  $('#built').textContent = 'Indexed ' + new Date(r.data.built).toLocaleTimeString() + (r.data.building ? ' · updating…' : '');
+  $('#n-review').textContent = r.data.review ? r.data.review : '';
+  renderSide();
+  fillSelects();
+}
+function renderSide() {
+  const info = S.info; if (!info) return;
+  const byCat = {};
+  for (const g of info.groups) (byCat[g.category || 'Uncategorised'] ||= []).push(g);
+  let h = `<div class="side-item ${!S.group && !S.category && !S.collection ? 'on' : ''}" data-all="1"><span>Everything</span><span class="c">${info.posts.toLocaleString()}</span></div>`;
+  h += `<h3>Categories &amp; chats</h3>`;
+  for (const cat of Object.keys(byCat).sort()) {
+    const n = byCat[cat].reduce((a, g) => a + g.posts, 0);
+    h += `<div class="side-item cat ${S.category === cat && !S.group ? 'on' : ''}" data-cat="${esc(cat)}"><span>${esc(cat)}</span><span class="c">${n.toLocaleString()}</span></div>`;
+    for (const g of byCat[cat]) h += `<div class="side-item ${S.group === g.id ? 'on' : ''}" data-group="${esc(g.id)}" style="padding-left:18px"><span>${esc(g.name)}</span><span class="c">${g.posts.toLocaleString()}</span></div>`;
+  }
+  if (info.collections && info.collections.length) {
+    h += `<h3>Collections</h3>`;
+    for (const c of info.collections) h += `<div class="side-item ${S.collection === c.id ? 'on' : ''}" data-coll="${c.id}"><span>${esc(c.name)}</span><span class="c">${c.items}</span></div>`;
+  }
+  h += `<h3>Index</h3><div class="muted" style="padding:0 8px">${info.families.toLocaleString()} originals · ${info.repostPosts.toLocaleString()} reposts folded in · ${info.mergedAlbums.toLocaleString()} merged albums · ${info.held} held back · ${info.missing.toLocaleString()} not downloaded<br>Pictures indexed: ${info.media.done.toLocaleString()} / ${info.media.total.toLocaleString()} · videos: ${info.videos.done.toLocaleString()} / ${info.videos.total.toLocaleString()}<br><button class="link" id="rebuild">Rebuild now</button></div>`;
+  $('#side').innerHTML = h;
+  $$('#side .side-item').forEach((el) => el.addEventListener('click', () => {
+    S.group = el.dataset.group || ''; S.category = el.dataset.cat || ''; S.collection = Number(el.dataset.coll || 0);
+    if (el.dataset.all) { S.group = S.category = ''; S.collection = 0; }
+    if (S.tab === 'chat' && S.group) { $('#chat-group').value = S.group; openChat(S.group); return; }
+    switchTab('browse'); renderSide(); resetFeed();
+  }));
+  const rb = $('#rebuild'); if (rb) rb.addEventListener('click', async () => { rb.disabled = true; const r = await api('POST', '/api/ix/browse/rebuild'); if (!r.ok) toast(errText(r)); await loadInfo(); resetFeed(); });
+}
+function fillSelects() {
+  const info = S.info;
+  const opts = info.groups.map((g) => `<option value="${esc(g.id)}">${esc(g.name)} (${g.posts})</option>`).join('');
+  const cg = $('#chat-group'); const keep = cg.value; cg.innerHTML = '<option value="">Choose a chat…</option>' + opts; if (keep) cg.value = keep;
+  $('#plan-orig').innerHTML = '<option value="">Everything</option>' + info.categories.map((c) => `<option value="cat:${esc(c)}">Category: ${esc(c)}</option>`).join('') + info.groups.map((g) => `<option value="group:${esc(g.id)}">Chat: ${esc(g.name)}</option>`).join('');
+  $('#plan-coll').innerHTML = (info.collections || []).map((c) => `<option value="${c.id}">${esc(c.name)} (${c.items})</option>`).join('') || '<option value="">No collections yet</option>';
+}
+
+// ---------- tiles and cards ----------
+function tileHTML(it, i, cardKey) {
+  const labs = [];
+  if (it.type === 'video') labs.push(`<span class="lab">▶ ${esc(fmtDur(it.dur))}</span>`);
+  if (it.copies > 1) labs.push(`<span class="lab r" title="Copies of this file in the archive">×${it.copies}</span>`);
+  if (it.new) labs.push(`<span class="lab t new" title="Brought by a later post">new</span>`);
+  if (it.status === 'held') labs.push(`<span class="lab t held">waiting · likely copy</span>`);
+  if (it.status === 'missing') labs.push(`<span class="lab t miss">not downloaded</span>`);
+  const inner = (it.type === 'photo' || it.type === 'video' || it.status !== 'ok')
+    ? `<img loading="lazy" alt="" src="${esc(it.thumb)}" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'doc',textContent:${JSON.stringify(it.name || it.type)}}))">`
+    : `<div class="doc">📄 ${esc(it.name || it.type)}<br>${esc(fmtSize(it.size))}</div>`;
+  return `<button class="tile ${esc(it.status)}" data-card="${cardKey}" data-i="${i}" title="${esc(it.name || '')}">${inner}${labs.join('')}</button>`;
+}
+function mosaicHTML(items, cardKey) {
+  const n = items.length;
+  const cls = n === 1 ? 'n1' : n === 2 ? 'n2' : n === 3 ? 'n3' : n === 4 ? 'n4' : 'nmany';
+  return `<div class="mosaic ${cls}">${items.map((it, i) => tileHTML(it, i, cardKey)).join('')}</div>`;
+}
+function cardHTML(c, key) {
+  if (c.kind === 'media') {
+    const it = c.items[0];
+    return `<div class="card" data-key="${key}">${mosaicHTML([it], key)}<div class="meta"><div class="where"><b>${esc(c.groupName)}</b><span>${fmtDay(c.date)}</span></div>${c.posts > 1 ? `<div class="badges"><span class="badge rep" data-fam="${c.family}">in ${c.posts} posts</span></div>` : ''}</div></div>`;
+  }
+  const badges = [];
+  if (c.kind === 'family') {
+    if (c.posts > 1) badges.push(`<span class="badge rep" data-fam="${c.family}">×${c.posts} posts${c.chats > 1 ? ' in ' + c.chats + ' chats' : ''}</span>`);
+    if (c.merged) badges.push(`<span class="badge merged" data-fam="${c.family}" title="Overlapping albums merged: files marked 'new' came from later posts">merged album</span>`);
+  } else {
+    if (c.role && c.role !== 'original') badges.push(`<span class="badge rep" data-fam="${c.family}">${esc(roleText[c.role] || c.role)} · see original</span>`);
+    else if (c.posts > 1) badges.push(`<span class="badge rep" data-fam="${c.family}">original · ${c.posts - 1} repost(s)</span>`);
+  }
+  if (c.deleted) badges.push(`<span class="badge del">deleted on Telegram</span>`);
+  return `<div class="card" data-key="${key}">${mosaicHTML(c.items, key)}${c.more ? `<div class="more">+${c.more} more</div>` : ''}
+    <div class="meta"><div class="where"><b title="${esc(c.groupName)}">${esc(c.groupName)}</b><span>${fmtDate(c.date)}</span></div>
+    ${c.caption ? `<div class="cap">${esc(c.caption)}</div>` : ''}
+    <div class="badges">${badges.join('')}<span class="grow"></span>
+      <span class="menu"><button class="badge" data-menu="${key}">⋯</button><span class="pop">
+        <button data-act="chat">Open in its chat</button>
+        <button data-act="family">All appearances</button>
+        <button data-act="collect">Add to a collection…</button></span></span></div></div></div>`;
+}
+function feedURL() {
+  const p = new URLSearchParams({ view: S.view, sort: S.sort, cursor: String(S.cursor), limit: S.view === 'media' ? '120' : '48' });
+  for (const k of ['group', 'category', 'q', 'type', 'status']) if (S[k]) p.set(k, S[k]);
+  if (S.dups) p.set('dups', '1');
+  if (S.collection) p.set('collection', String(S.collection));
+  return '/api/ix/browse/feed?' + p;
+}
+async function loadMore() {
+  if (S.loading || S.done) return;
+  S.loading = true; $('#sentinel').textContent = 'Loading…';
+  const r = await api('GET', feedURL());
+  S.loading = false;
+  if (!r.ok) { $('#sentinel').textContent = errText(r); return; }
+  const feed = $('#feed');
+  const start = S.cards.length;
+  S.cards.push(...r.data.cards);
+  feed.insertAdjacentHTML('beforeend', r.data.cards.map((c, i) => cardHTML(c, start + i)).join(''));
+  S.cursor = r.data.next; S.done = !r.data.next;
+  const what = { families: 'originals', posts: 'posts', media: 'pictures and videos' }[S.view];
+  $('#feed-note').textContent = r.data.total.toLocaleString() + ' ' + what + (S.view === 'families' ? ' (reposts and copies folded in)' : '');
+  $('#sentinel').textContent = S.done ? (S.cards.length ? 'End' : 'Nothing here') : '';
+}
+function resetFeed() {
+  S.cursor = 0; S.done = false; S.cards = [];
+  $('#feed').innerHTML = ''; $('#feed').className = 'grid' + (S.view === 'media' ? ' media' : '');
+  loadMore();
+}
+new IntersectionObserver((e) => { if (e[0].isIntersecting && S.tab === 'browse') loadMore(); }, { rootMargin: '800px' }).observe($('#sentinel'));
+
+$('#view').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; S.view = b.dataset.v; $$('#view button').forEach((x) => x.classList.toggle('on', x === b)); resetFeed(); });
+let qTimer; $('#q').addEventListener('input', () => { clearTimeout(qTimer); qTimer = setTimeout(() => { S.q = $('#q').value.trim(); resetFeed(); }, 350); });
+for (const id of ['type', 'status', 'sort']) $('#' + id).addEventListener('change', () => { S[id] = $('#' + id).value; resetFeed(); });
+$('#dups').addEventListener('change', () => { S.dups = $('#dups').checked; resetFeed(); });
+
+document.addEventListener('click', async (e) => {
+  const menuBtn = e.target.closest('[data-menu]');
+  $$('.menu.open').forEach((m) => { if (!menuBtn || m !== menuBtn.parentElement) m.classList.remove('open'); });
+  if (menuBtn) { menuBtn.parentElement.classList.toggle('open'); return; }
+  const act = e.target.closest('[data-act]');
+  if (act) {
+    const card = S.cards[Number(act.closest('.card').dataset.key)];
+    if (act.dataset.act === 'chat') openChatAt(card.group, card.msg);
+    if (act.dataset.act === 'family') openFamily(card.family);
+    if (act.dataset.act === 'collect') collectDialog(card.kind === 'media' ? ['file:' + card.items[0].key] : ['post:' + card.group + ':' + card.msg]);
+    return;
+  }
+  const fam = e.target.closest('[data-fam]');
+  if (fam) { openFamily(Number(fam.dataset.fam)); return; }
+  const tile = e.target.closest('.tile[data-card]');
+  if (tile) {
+    const src = tile.dataset.card;
+    const items = src.startsWith('x') ? (lightboxSets[src] || []) : S.cards[Number(src)].items;
+    openItem(items, Number(tile.dataset.i));
+  }
+});
+
+// ---------- dialogs ----------
+const dlg = $('#dlg');
+function showDialog(title, html) { $('#dlg-title').textContent = title; $('#dlg-body').innerHTML = html; if (!dlg.open) dlg.showModal(); $('#dlg-body').scrollTop = 0; }
+$('#dlg-close').addEventListener('click', () => dlg.close());
+dlg.addEventListener('close', () => { $$('#dlg video').forEach((v) => v.pause()); });
+const lightboxSets = {}; let setSeq = 0;
+function registerSet(items) { const k = 'x' + (++setSeq); lightboxSets[k] = items; return k; }
+
+async function openFamily(id) {
+  if (id < 0) return;
+  const r = await api('GET', '/api/ix/browse/family?id=' + id);
+  if (!r.ok) { toast(errText(r)); return; }
+  const f = r.data.family;
+  const k = registerSet(f.items);
+  let h = `<p class="muted">First posted ${fmtDate(f.date)} · ${f.posts} post(s) in ${f.chats} chat(s).${f.merged ? ' Overlapping albums are merged: files marked <b>new</b> were added by later posts.' : ''}</p>`;
+  h += mosaicHTML(f.items, k);
+  h += `<h3 style="font-size:14px;margin:14px 0 4px">Every appearance</h3>`;
+  for (const p of r.data.posts) {
+    const pk = registerSet(p.items);
+    h += `<div class="appear"><div><b>${esc(roleText[p.role] || p.role)}</b><br><span class="muted">${fmtDate(p.date)}</span>${p.origin ? `<br><span class="muted">first ${fmtDay(p.origin)}</span>` : ''}</div>
+      <div><b>${esc(p.groupName)}</b> · <button class="link" data-open-chat="${esc(p.group)}:${p.msg}">open in chat</button> · ${p.items.length} file(s)${p.deleted ? ' · <span class="bad">deleted</span>' : ''}
+      ${p.caption ? `<div style="white-space:pre-wrap;word-break:break-word;margin-top:2px">${esc(p.caption)}</div>` : ''}
+      <div style="max-width:420px;margin-top:4px">${mosaicHTML(p.items, pk)}</div></div></div>`;
+  }
+  showDialog(f.posts > 1 ? 'An original and its reposts' : 'Post', h);
+}
+document.addEventListener('click', (e) => { const b = e.target.closest('[data-open-chat]'); if (!b) return; const [g, m] = b.dataset.openChat.split(/:(?=[^:]*$)/); dlg.close(); openChatAt(g, Number(m)); });
+
+async function openItem(items, i) {
+  const it = items[i]; if (!it) return;
+  const q = it.id ? 'id=' + it.id : 'group=' + encodeURIComponent(it.group) + '&msg=' + it.msg;
+  const viewHTML = (x) => {
+    if (x.status !== 'ok' && x.status !== 'subst' && x.like) return `<div style="color:#fff;text-align:center;padding:10px"><img src="${esc(x.like.thumb)}" style="max-height:60vh"><br>Not downloaded yet: this is the saved copy it most likely is.</div>`;
+    if (!x.src) return `<img src="${esc(x.thumb)}" alt="" style="min-width:200px;filter:blur(2px)">`;
+    if (x.type === 'video') return `<video src="${esc(x.src)}" controls autoplay playsinline preload="metadata"></video>`;
+    if (x.type === 'photo') return `<img src="${esc(x.src)}" alt="">`;
+    if (x.type === 'audio' || x.type === 'voice') return `<audio src="${esc(x.src)}" controls></audio>`;
+    return `<a href="${esc(x.src)}" style="color:#fff">Open ${esc(x.name || 'file')}</a>`;
+  };
+  showDialog(it.name || (it.type === 'video' ? 'Video' : 'Picture'), `<div class="lb"><div class="view">${viewHTML(it)}</div><div class="info" id="lb-info"><span class="muted">Loading…</span></div></div>
+    <div class="row" style="margin-top:8px"><button class="b" id="lb-prev" ${i ? '' : 'disabled'}>← Previous</button><button class="b" id="lb-next" ${i < items.length - 1 ? '' : 'disabled'}>Next →</button>
+    ${it.key ? `<button class="b" id="lb-collect">Add to a collection…</button>` : ''}</div>`);
+  $('#lb-prev').onclick = () => openItem(items, i - 1);
+  $('#lb-next').onclick = () => openItem(items, i + 1);
+  if (it.key) $('#lb-collect').onclick = () => collectDialog(['file:' + it.key]);
+  const r = await api('GET', '/api/ix/browse/item?' + q);
+  if (!r.ok) { $('#lb-info').textContent = errText(r); return; }
+  const d = r.data, x = d.item;
+  let h = `<dl class="kv"><dt>Kind</dt><dd>${esc(x.type)}${x.status !== 'ok' ? ' · ' + esc(statusText[x.status] || x.status) : ''}</dd>
+    ${x.w ? `<dt>Size</dt><dd>${x.w}×${x.h}${x.dur ? ' · ' + fmtDur(x.dur) : ''}</dd>` : ''}${x.size ? `<dt>Bytes</dt><dd>${fmtSize(x.size)}</dd>` : ''}
+    <dt>Posted</dt><dd>${esc(d.post.groupName)}, ${fmtDate(d.post.date)}</dd>${d.post.fwd ? `<dt>Forwarded</dt><dd>from ${esc(d.post.fwd)}</dd>` : ''}
+    ${x.key ? `<dt>File</dt><dd class="muted">${esc(x.key.startsWith('h:') ? 'SHA-256 ' + x.key.slice(2, 18) + '…' : x.key)}</dd>` : ''}</dl>
+    <button class="link" data-open-chat="${esc(d.post.group)}:${d.post.msg}">Open in its chat</button>`;
+  if (d.generic) h += `<p class="muted">This file appears in many unrelated posts (a logo or sticker), so it does not link posts together.</p>`;
+  if (d.copies.length > 1) {
+    h += `<b>${d.copies.length} copies in the archive</b>`;
+    for (const c of d.copies) h += `<div class="copy"><img src="${esc(c.thumb)}" alt=""><div><b>${esc(c.groupName)}</b> · ${fmtDay(c.date)}${c.canon ? ' · <span class="ok">shown</span>' : ''}<br><span class="muted">${c.w ? c.w + '×' + c.h + ' · ' : ''}${fmtSize(c.size)} · ${esc(roleText[c.role] || c.role)}</span>
+      ${!c.canon && c.key ? `<br><button class="link" data-keeper="${esc(c.key)}" data-cluster="${esc(x.key)}">Show this copy instead</button>` : ''}</div></div>`;
+  }
+  if (d.related && d.related.length) {
+    h += `<b>Shares footage with</b>`;
+    for (const rel of d.related) {
+      const what = rel.kind === 'clip' ? (rel.coverThis > rel.coverOther ? 'this is a clip of it' : 'it is a clip of this') : 'part of the footage is shared';
+      h += `<div class="copy">${rel.item ? `<img src="${esc(rel.item.thumb)}" alt="">` : ''}<div>${esc(what)}<br><span class="muted">${Math.round(rel.coverThis * 100)}% of this, ${Math.round(rel.coverOther * 100)}% of that · offset ${rel.offsetS.toFixed(0)} s</span></div></div>`;
+    }
+  }
+  $('#lb-info').innerHTML = h;
+  $$('#lb-info [data-keeper]').forEach((b) => b.onclick = async () => { const r = await api('POST', '/api/ix/browse/keeper', { cluster: b.dataset.cluster, key: b.dataset.keeper }); toast(r.ok ? 'Saved. The browser shows that copy after its next update.' : errText(r)); });
+}
+
+async function collectDialog(refs) {
+  const r = await api('GET', '/api/ix/browse/collections');
+  const list = (r.data && r.data.collections) || [];
+  showDialog('Add to a collection', `<div class="row">${list.map((c) => `<button class="b" data-coll-add="${c.id}">${esc(c.name)} (${c.items})</button>`).join('') || '<span class="muted">No collections yet.</span>'}</div>
+    <div class="row" style="margin-top:10px"><input class="t" id="cd-name" placeholder="New collection"><button class="b primary" id="cd-new">Create and add</button></div>`);
+  $$('[data-coll-add]').forEach((b) => b.onclick = async () => { const x = await api('POST', '/api/ix/browse/collections/' + b.dataset.collAdd, { action: 'add', refs }); toast(x.ok ? 'Added.' : errText(x)); dlg.close(); loadInfo(); });
+  $('#cd-new').onclick = async () => { const x = await api('POST', '/api/ix/browse/collections', { name: $('#cd-name').value, refs }); toast(x.ok ? 'Created.' : errText(x)); if (x.ok) { dlg.close(); loadInfo(); } };
+}
+
+// ---------- tabs ----------
+function switchTab(tab) {
+  S.tab = tab;
+  $$('#tabs .tab').forEach((t) => t.classList.toggle('on', t.dataset.tab === tab));
+  for (const v of ['browse', 'chat', 'review', 'organise', 'entities']) $('#v-' + v).hidden = v !== tab;
+  if (tab === 'review') loadReview();
+  if (tab === 'organise') loadOrganise();
+  if (tab === 'entities') loadEntities();
+  if (tab === 'chat' && !$('#chat-group').value && S.group) { $('#chat-group').value = S.group; openChat(S.group); }
+}
+$('#tabs').addEventListener('click', (e) => { const t = e.target.closest('.tab'); if (t) switchTab(t.dataset.tab); });
+
+// ---------- chat reader ----------
+const C = { group: '', msgs: [], names: {}, topics: {}, topic: '', highlight: 0 };
+async function openChatAt(group, msg) {
+  switchTab('chat'); $('#chat-group').value = group;
+  await openChat(group, { after: Math.max(0, msg - 30) }, msg);
+}
+async function openChat(group, where = {}, highlight = 0) {
+  C.group = group; C.msgs = []; C.highlight = highlight; $('#chat').innerHTML = '';
+  if (!group) return;
+  await fetchChat(where, 'replace');
+}
+async function fetchChat(where, mode) {
+  const p = new URLSearchParams({ group: C.group });
+  for (const [k, v] of Object.entries(where)) if (v) p.set(k, v);
+  if (C.topic) p.set('topic', C.topic);
+  const r = await api('GET', '/api/ix/browse/chat?' + p);
+  if (!r.ok) { toast(errText(r)); return; }
+  Object.assign(C.names, r.data.names || {}); C.topics = r.data.topics || {};
+  const ids = new Set(C.msgs.map((m) => m.id));
+  const fresh = r.data.messages.filter((m) => !ids.has(m.id));
+  C.msgs = mode === 'replace' ? r.data.messages : C.msgs.concat(fresh).sort((a, b) => a.id - b.id);
+  const info = r.data.info || {};
+  const parts = [];
+  if (info.about) parts.push(`<div style="white-space:pre-wrap">${esc(info.about)}</div>`);
+  const links = [];
+  if (info.username) links.push(`<a href="https://t.me/${esc(info.username)}" target="_blank" rel="noopener">t.me/${esc(info.username)}</a>`);
+  if (info.invite) links.push(`invite: <span class="mono">${esc(info.invite)}</span>`);
+  if (info.members) links.push(info.members.toLocaleString() + ' members');
+  if (info.kind) links.push(info.kind);
+  if (links.length) parts.push(`<div class="muted">${links.join(' · ')}</div>`);
+  $('#chat-info').hidden = !parts.length; $('#chat-info').innerHTML = parts.join('');
+  const topics = Object.entries(C.topics);
+  const ts = $('#chat-topic'); ts.hidden = !topics.length;
+  if (topics.length && !ts.options.length) ts.innerHTML = '<option value="">All topics</option>' + topics.map(([id, t]) => `<option value="${esc(id)}">${esc(t)}</option>`).join('');
+  renderChat();
+}
+const svcText = (s) => ({ messageActionPinMessage: 'pinned a message', messageActionChatEditTitle: 'changed the name', messageActionChatEditPhoto: 'changed the photo', messageActionTopicCreate: 'opened a topic', messageActionChatAddUser: 'added a member', messageActionChatJoinedByLink: 'joined by link', messageActionChannelCreate: 'created the channel', messageActionChatCreate: 'created the group' }[s] || s.replace(/^messageAction/, '').replace(/([A-Z])/g, ' $1').trim().toLowerCase());
+function linkify(t) { return esc(t).replace(/(https?:\/\/[^\s<]+|t\.me\/[^\s<]+)/g, (u) => `<a href="${u.startsWith('http') ? u : 'https://' + u}" target="_blank" rel="noopener noreferrer">${u}</a>`); }
+function renderChat() {
+  const out = []; const byID = new Map(C.msgs.map((m) => [m.id, m]));
+  for (let i = 0; i < C.msgs.length; i++) {
+    const m = C.msgs[i];
+    if (m.service) { out.push(`<div class="svc" id="m${m.id}">${esc(C.names[m.sender] || '')} ${esc(svcText(m.service))} · ${fmtDate(m.date)}</div>`); continue; }
+    let items = m.items || [], text = m.text, last = m;
+    if (m.grouped) { while (i + 1 < C.msgs.length && C.msgs[i + 1].grouped === m.grouped) { i++; items = items.concat(C.msgs[i].items || []); if (!text && C.msgs[i].text) text = C.msgs[i].text; last = C.msgs[i]; } }
+    const k = registerSet(items);
+    const reply = m.reply && byID.get(m.reply);
+    const badges = [];
+    if (m.famPosts > 1) badges.push(`<span class="badge rep" data-fam="${m.family}">${m.role === 'original' ? 'original · ' + (m.famPosts - 1) + ' repost(s)' : esc(roleText[m.role] || m.role) + ' · see original'}</span>`);
+    out.push(`<div class="msg ${m.deleted ? 'del' : ''} ${C.highlight && (C.highlight >= m.id && C.highlight <= last.id) ? 'hl' : ''}" id="m${m.id}">
+      ${m.sender && C.names[m.sender] ? `<div class="who">${esc(C.names[m.sender])}${m.author ? ' · ' + esc(m.author) : ''}</div>` : m.author ? `<div class="who">${esc(m.author)}</div>` : ''}
+      ${m.fwd ? `<div class="fwd">Forwarded from ${esc(C.names[m.fwd] || m.fwd)}${m.fwdDate ? ' · ' + fmtDay(m.fwdDate) : ''}</div>` : ''}
+      ${m.reply ? `<div class="reply" data-jump="${m.reply}">↪ ${reply ? esc((reply.text || reply.mediaType || '').slice(0, 90)) : 'message #' + m.reply}</div>` : ''}
+      ${m.commentOn ? `<div class="fwd">Comment on post #${esc(m.commentOn.split(':').pop())}</div>` : ''}
+      ${items.length ? mosaicHTML(items, k) : m.mediaType ? `<div class="muted">[${esc(m.mediaType)}${m.mediaName ? ': ' + esc(m.mediaName) : ''} — not kept]</div>` : ''}
+      ${text ? `<div class="txt">${linkify(text)}</div>` : ''}
+      ${badges.length ? `<div class="badges">${badges.join('')}</div>` : ''}
+      <div class="foot">${m.views ? m.views.toLocaleString() + ' views · ' : ''}${m.comments ? m.comments + ' comments · ' : ''}${m.edits ? `<span title="Earlier versions are kept">edited ${m.edits}×</span> · ` : ''}${m.deleted ? '<span class="bad">deleted ' + fmtDay(m.deleted / 1000) + '</span> · ' : ''}#${m.id} · ${fmtDate(m.date)}</div></div>`);
+  }
+  $('#chat').innerHTML = out.join('') || '<div class="muted">No messages kept for this chat.</div>';
+  if (C.highlight) { const el = $('#m' + C.highlight) || $('.msg.hl'); if (el) el.scrollIntoView({ block: 'center' }); }
+}
+$('#chat').addEventListener('click', (e) => { const j = e.target.closest('[data-jump]'); if (!j) return; const el = $('#m' + j.dataset.jump); if (el) { el.scrollIntoView({ block: 'center' }); el.classList.add('hl'); } else openChat(C.group, { after: Number(j.dataset.jump) - 1 }, Number(j.dataset.jump)); });
+$('#chat-group').addEventListener('change', () => { $('#chat-topic').innerHTML = ''; C.topic = ''; openChat($('#chat-group').value); });
+$('#chat-topic').addEventListener('change', () => { C.topic = $('#chat-topic').value; openChat(C.group); });
+$('#chat-older').addEventListener('click', () => { if (C.msgs.length) fetchChat({ before: C.msgs[0].id }, 'merge'); });
+$('#chat-newer').addEventListener('click', () => { if (C.msgs.length) fetchChat({ after: C.msgs[C.msgs.length - 1].id }, 'merge'); });
+$('#chat-date').addEventListener('change', () => { const v = $('#chat-date').value; if (v && C.group) openChat(C.group, { date: Math.floor(new Date(v + 'T00:00:00').getTime() / 1000) }); });
+
+// ---------- review ----------
+const R = { pairs: [], i: 0 };
+async function loadReview() {
+  const r = await api('GET', '/api/ix/browse/review');
+  if (!r.ok) { $('#review').textContent = errText(r); return; }
+  R.pairs = r.data.pairs; R.i = 0; renderReview();
+}
+function sideHTML(x, where, date) {
+  const view = x.type === 'video' && x.src ? `<video src="${esc(x.src)}" controls muted preload="metadata"></video>` : `<img src="${esc(x.src && x.type === 'photo' ? x.src : x.thumb)}" alt="">`;
+  return `<div class="side"><div class="view">${view}</div><div class="m"><b>${esc(where)}</b> · ${fmtDay(date)}<br><span class="muted">${x.w ? x.w + '×' + x.h + ' · ' : ''}${fmtSize(x.size)}${x.dur ? ' · ' + fmtDur(x.dur) : ''}</span></div></div>`;
+}
+function renderReview() {
+  const p = R.pairs[R.i];
+  if (!p) { $('#review').innerHTML = `<p class="muted">Nothing left to review${R.pairs.length ? ' in this batch' : ''}.</p>`; loadInfo(); return; }
+  $('#review').innerHTML = `<p class="muted">${R.i + 1} of ${R.pairs.length} in this batch · ${p.kind === 'video' ? 'videos sharing part of their footage' : 'pictures ' + p.distance + ' bits apart (31 or fewer may be the same)'}</p>
+    <div class="pair">${sideHTML(p.a, p.aWhere, p.aDate)}${sideHTML(p.b, p.bWhere, p.bDate)}</div>
+    <div class="row" style="margin-top:10px"><button class="b primary" data-d="1">1 · Same, keep left</button><button class="b primary" data-d="2">2 · Same, keep right</button><button class="b" data-d="s">S · Same</button><button class="b danger" data-d="n">N · Different</button><button class="b" data-d="skip">→ Skip</button></div>`;
+  $$('#review [data-d]').forEach((b) => b.onclick = () => decide(b.dataset.d));
+}
+async function decide(d) {
+  const p = R.pairs[R.i]; if (!p) return;
+  if (d !== 'skip') {
+    const body = { a: p.a.key, b: p.b.key, decision: d === 'n' ? 'different' : 'same' };
+    if (d === '1') body.keep = p.a.key; if (d === '2') body.keep = p.b.key;
+    const r = await api('POST', '/api/ix/browse/review', body);
+    if (!r.ok) { toast(errText(r)); return; }
+  }
+  R.i++; renderReview();
+}
+document.addEventListener('keydown', (e) => {
+  if (S.tab !== 'review' || e.target.matches('input,select,textarea') || dlg.open) return;
+  const k = { '1': '1', '2': '2', s: 's', S: 's', n: 'n', N: 'n', ArrowRight: 'skip' }[e.key];
+  if (k) { e.preventDefault(); decide(k); }
+});
+
+// ---------- organise ----------
+async function loadOrganise() {
+  await loadInfo();
+  const list = S.info.collections || [];
+  $('#colls').innerHTML = list.length ? `<table><tr><th>Collection</th><th class="n">Items</th><th></th></tr>${list.map((c) => `<tr><td>${esc(c.name)}</td><td class="n">${c.items}</td><td><button class="link" data-c-view="${c.id}">view</button> · <button class="link" data-c-rename="${c.id}">rename</button> · <button class="link" data-c-del="${c.id}">delete</button></td></tr>`).join('')}</table>` : '<p class="muted">No collections yet. Use “Add to a collection” on any post or picture.</p>';
+  $$('[data-c-view]').forEach((b) => b.onclick = () => { S.collection = Number(b.dataset.cView); S.group = S.category = ''; switchTab('browse'); renderSide(); resetFeed(); });
+  $$('[data-c-rename]').forEach((b) => b.onclick = async () => { const name = prompt('New name'); if (!name) return; const r = await api('POST', '/api/ix/browse/collections/' + b.dataset.cRename, { action: 'rename', name }); toast(r.ok ? 'Renamed.' : errText(r)); loadOrganise(); });
+  $$('[data-c-del]').forEach((b) => b.onclick = () => confirmDialog('Delete this collection? Its files stay where they are; only the list goes.', async () => { const r = await api('POST', '/api/ix/browse/collections/' + b.dataset.cDel, { action: 'delete' }); toast(r.ok ? 'Deleted.' : errText(r)); loadOrganise(); }));
+  loadPlans();
+}
+function confirmDialog(text, go) {
+  showDialog('Please confirm', `<p>${esc(text)}</p><div class="row"><button class="b primary" id="cf-yes">Yes, go ahead</button><button class="b" id="cf-no">Cancel</button></div>`);
+  $('#cf-yes').onclick = () => { dlg.close(); go(); }; $('#cf-no').onclick = () => dlg.close();
+}
+async function makePlan(body) {
+  const r = await api('POST', '/api/ix/moves/plan', body);
+  if (!r.ok) { toast(errText(r)); return; }
+  showPlan(r.data); loadPlans();
+}
+$('#plan-dups').onclick = () => makePlan({ kind: 'duplicate-copies' });
+$('#plan-coll-go').onclick = () => makePlan({ kind: 'collection', collection: Number($('#plan-coll').value), folder: $('#plan-coll-dir').value, move: $('#plan-coll-move').checked });
+$('#plan-orig-go').onclick = () => { const v = $('#plan-orig').value; makePlan({ kind: 'originals', category: v.startsWith('cat:') ? v.slice(4) : '', group: v.startsWith('group:') ? v.slice(6) : '', folder: $('#plan-orig-dir').value, move: $('#plan-orig-move').checked }); };
+async function loadPlans() {
+  const r = await api('GET', '/api/ix/moves');
+  const plans = (r.data && r.data.plans) || [];
+  $('#plans').innerHTML = plans.length ? `<table><tr><th>Plan</th><th>State</th><th class="n">Files</th><th class="n">Size</th><th></th></tr>${plans.map((p) => `<tr><td>${esc(p.title)}<br><span class="muted">${new Date(p.created).toLocaleString()}</span>${p.error ? `<br><span class="bad">${esc(p.error)}</span>` : ''}</td><td>${esc(p.state)}${p.state === 'applying' ? ' (' + p.done + '/' + p.ops + ')' : ''}</td><td class="n">${p.ops}</td><td class="n">${fmtSize(p.bytes)}</td><td><button class="link" data-plan="${p.id}">review</button></td></tr>`).join('')}</table>` : '<p class="muted">No plans yet.</p>';
+  $$('[data-plan]').forEach((b) => b.onclick = async () => { const x = await api('GET', '/api/ix/moves/' + b.dataset.plan); if (x.ok) showPlan(x.data); else toast(errText(x)); });
+  if (plans.some((p) => p.state === 'applying' || p.state === 'undoing')) setTimeout(() => { if (S.tab === 'organise') loadPlans(); }, 3000);
+}
+function showPlan(p) {
+  const rows = (p.list || []).slice(0, 2000).map((o) => `<tr><td>${o.seq}</td><td>${esc(o.op)}</td><td class="mono" style="word-break:break-all">${esc(o.src)}</td><td class="mono" style="word-break:break-all">${esc(o.dst)}</td><td class="n">${fmtSize(o.size)}</td><td>${esc(o.state)}${o.error ? ' <span class="bad">' + esc(o.error) + '</span>' : ''}</td></tr>`).join('');
+  const can = { apply: p.state === 'planned' || p.state === 'failed', undo: p.state === 'applied' || (p.state === 'failed' && p.done > 0), discard: p.state === 'planned' };
+  showDialog(p.title, `<p class="muted">${p.ops} file(s), ${fmtSize(p.bytes)} · state: ${esc(p.state)}${p.ops > 2000 ? ' · the first 2,000 are listed' : ''}</p>
+    <div class="row">${can.apply ? '<button class="b primary" id="pl-apply">Apply this plan</button>' : ''}${can.undo ? '<button class="b" id="pl-undo">Undo it</button>' : ''}${can.discard ? '<button class="b" id="pl-discard">Discard</button>' : ''}</div>
+    <table style="margin-top:8px"><tr><th>#</th><th>Do</th><th>From</th><th>To</th><th class="n">Size</th><th>State</th></tr>${rows}</table>`);
+  const act = (a) => async () => { const r = await api('POST', `/api/ix/moves/${p.id}/${a}`); toast(r.ok ? (a === 'discard' ? 'Discarded.' : 'Started. Progress shows in the list.') : errText(r)); dlg.close(); loadPlans(); };
+  if (can.apply) $('#pl-apply').onclick = () => confirmDialog(`Apply "${p.title}" to ${p.ops} file(s)? Every step is recorded and can be undone.`, act('apply'));
+  if (can.undo) $('#pl-undo').onclick = () => confirmDialog('Undo every step of this plan, newest first?', act('undo'));
+  if (can.discard) $('#pl-discard').onclick = act('discard');
+}
+
+// ---------- entities ----------
+const E = { kind: '', q: '' };
+const kindName = { telegram_link: 't.me links', mention: '@usernames', email: 'e-mail', phone: 'phone numbers', btc: 'Bitcoin', eth: 'Ethereum', tron: 'TRON', ltc: 'Litecoin', doge: 'Dogecoin', xmr: 'Monero', iban: 'IBAN' };
+async function loadEntities() {
+  $('#entities').innerHTML = '<p class="muted">Reading every archived message… (the first time takes a while)</p>';
+  const p = new URLSearchParams(); if (E.kind) p.set('kind', E.kind); if (E.q) p.set('q', E.q);
+  const r = await api('GET', '/api/ix/browse/entities?' + p);
+  if (!r.ok) { $('#entities').textContent = errText(r); return; }
+  const kinds = r.data.kinds || {};
+  $('#ent-kinds').innerHTML = `<button data-k="" class="${!E.kind ? 'on' : ''}">All</button>` + Object.keys(kinds).sort().map((k) => `<button data-k="${esc(k)}" class="${E.kind === k ? 'on' : ''}">${esc(kindName[k] || k)} ${kinds[k]}</button>`).join('');
+  $('#entities').innerHTML = r.data.entities.length ? `<p class="muted">${r.data.total.toLocaleString()} found${r.data.total > 200 ? ' (most mentioned first; filter to narrow)' : ''}. Addresses are checked with their own checksums.</p><table><tr><th>Value</th><th>Kind</th><th class="n">Messages</th><th class="n">Chats</th><th>First</th><th>Last</th></tr>${r.data.entities.map((e) => `<tr><td class="mono" style="word-break:break-all"><button class="link" data-ent="${esc(e.kind)}" data-val="${esc(e.value)}">${esc(e.value)}</button></td><td>${esc(kindName[e.kind] || e.kind)}</td><td class="n">${e.count}</td><td class="n">${e.chats}</td><td>${fmtDay(e.first)}</td><td>${fmtDay(e.last)}</td></tr>`).join('')}</table>` : '<p class="muted">Nothing found.</p>';
+  $$('[data-ent]').forEach((b) => b.onclick = () => openEntity(b.dataset.ent, b.dataset.val));
+}
+$('#ent-kinds').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; E.kind = b.dataset.k; loadEntities(); });
+let eTimer; $('#ent-q').addEventListener('input', () => { clearTimeout(eTimer); eTimer = setTimeout(() => { E.q = $('#ent-q').value.trim(); loadEntities(); }, 350); });
+async function openEntity(kind, value) {
+  const r = await api('GET', '/api/ix/browse/entity?kind=' + encodeURIComponent(kind) + '&value=' + encodeURIComponent(value));
+  if (!r.ok) { toast(errText(r)); return; }
+  const e = r.data.entity;
+  const mark = (t) => value ? esc(t).split(esc(value)).join(`<mark>${esc(value)}</mark>`) : esc(t);
+  showDialog(value, `<p class="muted">${esc(kindName[kind] || kind)} · in ${e.count} message(s) across ${e.chats} chat(s)${e.count > r.data.hits.length ? ' · the first ' + r.data.hits.length + ' are listed' : ''}</p>` +
+    r.data.hits.map((h) => `<div class="appear"><div><span class="muted">${fmtDate(h.date)}</span></div><div><b>${esc(h.groupName)}</b> · <button class="link" data-open-chat="${esc(h.group)}:${h.msg}">open in chat</button><div style="white-space:pre-wrap;word-break:break-word">${mark(h.text)}</div></div></div>`).join(''));
+}
+
+loadInfo().then(resetFeed);
+</script>
+</body>
+</html>

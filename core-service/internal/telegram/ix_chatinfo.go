@@ -19,6 +19,7 @@ type ChatInfo struct {
 	Username string
 	Members  int
 	PinnedID int
+	Invite   string  // an invite link, when Telegram includes one (the account made it or administers the chat)
 	Linked   *Dialog // a channel's discussion group, when it has one
 	TL       []byte  // messages.chatFull as Telegram sent it
 	Users    []tg.UserClass
@@ -44,6 +45,11 @@ func (a *Account) ChatInfo(ctx context.Context, dialog Dialog) (ChatInfo, error)
 		info.About = cf.About
 		info.Members, _ = cf.GetParticipantsCount()
 		info.PinnedID, _ = cf.GetPinnedMsgID()
+		if inv, ok := cf.GetExportedInvite(); ok {
+			if e, ok := inv.(*tg.ChatInviteExported); ok {
+				info.Invite = e.Link
+			}
+		}
 		linked, hasLinked := cf.GetLinkedChatID()
 		for _, raw := range full.Chats {
 			c, ok := raw.(*tg.Channel)
@@ -77,6 +83,11 @@ func (a *Account) ChatInfo(ctx context.Context, dialog Dialog) (ChatInfo, error)
 		}
 		info.About = cf.About
 		info.PinnedID, _ = cf.GetPinnedMsgID()
+		if inv, ok := cf.GetExportedInvite(); ok {
+			if e, ok := inv.(*tg.ChatInviteExported); ok {
+				info.Invite = e.Link
+			}
+		}
 		for _, raw := range full.Chats {
 			if c, ok := raw.(*tg.Chat); ok && c.ID == peer.ChatID {
 				info.Title, info.Members, info.Kind = c.Title, c.ParticipantsCount, "group"

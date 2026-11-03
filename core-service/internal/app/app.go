@@ -239,6 +239,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		a.Close()
 		return nil, err
 	}
+	a.library.Substitute = a.ixSubstitute // archive: exact re-uploads are checked, not downloaded
 	if err = a.library.Recover(ctx); err != nil {
 		a.Close()
 		return nil, fmt.Errorf("recover media ingestion: %w", err)

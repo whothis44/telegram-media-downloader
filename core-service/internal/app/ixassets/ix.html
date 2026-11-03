@@ -51,7 +51,10 @@ const NONE = ' none', UNSAVED = ' unsaved';
 const fmtNum = (n) => Number(n || 0).toLocaleString('en-CA');
 const fmtTime = (ms) => (ms ? new Date(ms).toLocaleString('en-CA', { dateStyle: 'medium', timeStyle: 'short' }) : '');
 const fmtDate = (s) => (s ? new Date(s * 1000).toLocaleDateString('en-CA') : '');
-const suggest = (name) => { const m = String(name || '').trim().match(/^(.*?)[\s._-]*\d+$/); return m && m[1].trim() ? m[1].trim() : ''; };
+const suggestName = (name) => { const m = String(name || '').trim().match(/^(.*?)[\s._-]*\d+$/); return m && m[1].trim() ? m[1].trim() : ''; };
+// A suggestion from the name (sports-3 → sports), or else from what the group posts.
+const suggestG = (g) => suggestName(g.name) || g.contentSuggest || '';
+const suggestWhy = (g) => suggestName(g.name) ? 'from its name' : g.contentSuggest ? `shares ${Math.round((g.contentShare || 0) * 100)}% of its pictures and videos with ${g.contentSuggest}` : '';
 const natural = (a, b) => String(a).localeCompare(String(b), undefined, { sensitivity: 'base', numeric: true });
 
 async function api(method, url, body) {
@@ -95,6 +98,11 @@ function banner() {
   if (!s) return '';
   let h = '';
   const acct = s.account || {};
+  const fz = s.freeze || {};
+  if (fz.until) {
+    const days = Math.max(0, Math.floor((fz.until * 1000 - Date.now()) / 86400000));
+    h += `<div class="status bad"><b>Telegram will delete this account on ${esc(new Date(fz.until * 1000).toLocaleString())} — ${days} day(s) left</b> unless an appeal is accepted${fz.appealUrl ? ` (<a href="${esc(fz.appealUrl)}" target="_blank" rel="noopener">appeal</a>)` : ''}. Rescans now take private chats before public ones. <b>Never log this account out of the app:</b> a frozen account cannot sign in again. <button class="mini" data-act="freeze-check">Check again</button></div>`;
+  } else if (fz.since) h += `<div class="status warn"><b>Telegram lists this account as frozen since ${esc(new Date(fz.since * 1000).toLocaleString())}</b>, with no deletion date given. <button class="mini" data-act="freeze-check">Check again</button></div>`;
   if (acct.deactivated) h += `<div class="status bad"><b>Telegram reports this account is logged out or deactivated</b> (${esc(acct.lastError)}). Rescans are paused.</div>`;
   else if (acct.frozen) h += `<div class="status warn"><b>Telegram reports this account is frozen</b> (${esc(acct.lastError)}). Rescans keep going for as long as Telegram still lets the account read history${s.settings && s.settings.pauseOnFreeze ? ' — except that you chose to pause them on a freeze (Settings)' : ''}. Messages saved here stay saved even if the account is later deleted.</div>`;
   else if (acct.floodWait) h += `<div class="status"><b>Telegram asked the app to slow down</b> (${esc(acct.lastError)}). The app waits as asked; nothing to do.</div>`;
@@ -111,12 +119,14 @@ function viewOverview() {
   const ex = s.export || {};
   let h = `<div class="card"><h2>Your index</h2>
 <div class="btns"><a class="b" style="text-decoration:none;padding:7px 12px;border-radius:8px;border:1px solid var(--accent);background:var(--accent);color:var(--accent-fg);font-weight:600" href="/ix/view/" target="_blank">Open the index</a>
+<a class="b" style="text-decoration:none;padding:7px 12px;border-radius:8px;border:1px solid var(--accent);color:var(--accent);font-weight:600" href="/ix/browse" target="_blank">Open the media browser</a>
 <button class="b" data-act="export" ${ex.running ? 'disabled' : ''}>${ex.running ? 'Writing…' : 'Write the index to the NAS now'}</button></div>
 <div class="muted">The index opens here in the dashboard, always up to date. A copy is also written to <code>${esc(s.exportDir || '?')}</code> ${s.settings.exportEnabled ? 'every night at ' + esc(s.settings.exportTime) : '(nightly copy turned off in Settings)'}, so you can open <code>index.html</code> there without the app. Its <code>data</code> folder holds everything in plain files for other tools (every message with its full Telegram record, albums, files with checksums, duplicates; see <code>data/README.md</code>).${s.exportDirError ? ` <span class="bad">${esc(s.exportDirError)}</span>` : ''}</div>
 ${ex.running ? `<div class="muted">${esc(ex.progress || 'Working…')}</div>` : ''}
 ${ex.finishedAt && !ex.running ? `<div class="muted">Last written ${esc(fmtTime(ex.finishedAt))}${ex.error ? ` — <span class="bad">failed: ${esc(ex.error)}</span>` : ` (${fmtNum(ex.files)} files)`}.</div>` : ''}
 </div>`;
   h += viewDownloads();
+  h += viewKeeping();
   h += `<div class="card"><h2>Messages captured</h2><div class="muted">${fmtNum(total)} messages saved across ${gs.length} group(s). ${notYet ? `<b>${notYet} group(s) have not had a full rescan yet</b> — use the Rescan tab to capture their history.` : 'Every group has had a full rescan.'} New posts are saved as the monitor sees them.</div>
 <div class="btns"><button class="b" data-act="g-finish-complete" ${gs.some((g) => !g.finishedAt && g.tgCount && g.lastWalk && g.tgCount - (g.messages - g.deleted) <= 0) ? '' : 'disabled'} title="Every group marked ✓ complete is set to finished; rescans then leave it alone">✓ Finish all complete groups</button><span class="muted">Finished groups are skipped by every rescan. To finish or reopen several at once, tick them in Rescan → Choose groups.</span></div>
 <div class="muted">Complete: every message Telegram says the group holds has been saved, checked at each rescan. Groups rescanned before version ix.5 may show a few short: system notices (pins, renames) are only saved from ix.5 on; a new rescan fills them in.</div>
@@ -127,10 +137,24 @@ ${ex.finishedAt && !ex.running ? `<div class="muted">Last written ${esc(fmtTime(
     const complete = short === null ? '<span class="muted" title="Telegram\'s count is read at the next rescan">not checked yet</span>'
       : short <= 0 ? (g.lastWalk ? '<span class="ok">✓ complete</span>' : '<span class="muted">all seen so far</span>')
       : `<span class="warn">${fmtNum(short)} short</span>`;
-    h += `<tr><td><a href="/ix/view/${esc(g.dir)}/index.html" target="_blank">${esc(g.name)}</a>${g.about ? `<div class="muted" style="max-width:340px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(g.about)}">${esc(g.about)}</div>` : ''}</td><td>${esc(g.category || '')}</td><td class="n">${g.messages ? fmtNum(g.messages) : '<span class="warn">none yet</span>'}${g.comments ? `<div class="muted">+${fmtNum(g.comments)} comments</div>` : ''}</td><td class="n">${g.tgCount ? fmtNum(g.tgCount) : '<span class="muted">–</span>'}</td><td>${complete}</td><td>${g.finishedAt ? `<button class="fin on" data-act="g-open" data-id="${esc(g.id)}" title="Finished ${esc(fmtDate(Math.floor(g.finishedAt / 1000)))}: rescans leave it alone. Click to reopen.">✓ Finished</button>` : `<button class="fin" data-act="g-finish" data-id="${esc(g.id)}" title="Mark finished: rescans will leave it alone">Finish</button>`}</td><td class="n">${fmtNum(g.deleted)}</td><td class="n">${fmtNum(g.files)}</td><td class="muted">${esc(fmtDate(g.firstDate))}${g.firstDate ? ' – ' : ''}${esc(fmtDate(g.lastDate))}</td><td>${g.lastWalk ? esc(fmtTime(g.lastWalk)) : '<span class="warn">never</span>'}</td></tr>`;
+    const ids = g.maxId ? `<div class="muted" title="Every message number from 1 to the newest is either saved here or confirmed gone on Telegram (checked at the end of each messages pass)">IDs 1–${fmtNum(g.maxId)}: ${fmtNum(Math.min(g.maxId, g.messages + g.gone))} accounted for${g.maxId - g.messages - g.gone > 0 ? `, <span class="warn">${fmtNum(g.maxId - g.messages - g.gone)} unchecked</span>` : ''}</div>` : '';
+    const link = g.username ? `<div class="muted"><a href="https://t.me/${esc(g.username)}" target="_blank" rel="noopener">t.me/${esc(g.username)}</a></div>` : g.invite ? `<div class="muted" title="Invite link">${esc(g.invite)}</div>` : '';
+    h += `<tr><td><a href="/ix/view/${esc(g.dir)}/index.html" target="_blank">${esc(g.name)}</a>${link}${g.about ? `<div class="muted" style="max-width:340px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(g.about)}">${esc(g.about)}</div>` : ''}</td><td>${esc(g.category || '')}</td><td class="n">${g.messages ? fmtNum(g.messages) : '<span class="warn">none yet</span>'}${g.comments ? `<div class="muted">+${fmtNum(g.comments)} comments</div>` : ''}</td><td class="n">${g.tgCount ? fmtNum(g.tgCount) : '<span class="muted">–</span>'}</td><td>${complete}${ids}</td><td>${g.finishedAt ? `<button class="fin on" data-act="g-open" data-id="${esc(g.id)}" title="Finished ${esc(fmtDate(Math.floor(g.finishedAt / 1000)))}: rescans leave it alone. Click to reopen.">✓ Finished</button>` : `<button class="fin" data-act="g-finish" data-id="${esc(g.id)}" title="Mark finished: rescans will leave it alone">Finish</button>`}</td><td class="n">${fmtNum(g.deleted)}</td><td class="n">${fmtNum(g.files)}</td><td class="muted">${esc(fmtDate(g.firstDate))}${g.firstDate ? ' – ' : ''}${esc(fmtDate(g.lastDate))}</td><td>${g.lastWalk ? esc(fmtTime(g.lastWalk)) : '<span class="warn">never</span>'}</td></tr>`;
   }
   h += `</table></div></div>`;
   return h;
+}
+
+function viewKeeping() {
+  const s = state.status, hd = s.held || {}, fx = s.fixity || {}, pic = s.pictures || {}, vd = s.dups || {};
+  const pct = (a, b) => b ? Math.floor((100 * a) / b) + '%' : '—';
+  return `<div class="card"><h2>Copies, duplicates and integrity</h2>
+<div><b>Not downloaded because they are copies:</b> ${fmtNum(hd.subst || 0)} exact re-upload(s) (${fmtNum(hd.savedMb || 0)} MB saved; the bytes were checked on Telegram) · ${fmtNum(hd.held || 0)} likely copies held at the back of the queue${s.settings.holdForever ? ' (kept held: Settings)' : ' until nothing else is waiting'}.</div>
+<div class="btns"><button class="b" data-act="held-release" ${hd.held ? '' : 'disabled'}>Download the held files now</button><button class="b" data-act="subst-fetch" ${hd.subst ? '' : 'disabled'}>Fetch the real files of re-uploads</button>${state.keepMsg ? `<span class="muted">${esc(state.keepMsg)}</span>` : ''}</div>
+<div class="muted">Every message is archived in full either way, so any of these files can be fetched later.</div>
+<div style="margin-top:6px"><b>Duplicate finding:</b> pictures ${fmtNum(pic.done || 0)} of ${fmtNum(pic.total || 0)} (${pct(pic.done || 0, pic.total)}), ${fmtNum(pic.grouped || 0)} grouped with a look-alike, ${fmtNum(pic.suggested || 0)} to review · videos ${fmtNum(vd.done || 0)} of ${fmtNum(vd.total || 0)} (${pct(vd.done || 0, vd.total)}). Runs on this PC from the files on the NAS; it never uses Telegram.</div>
+<div style="margin-top:6px"><b>Integrity check:</b> ${fmtNum(fx.checked || 0)} of ${fmtNum(fx.files || 0)} stored files re-read this month (every file is re-read about once a month and its fingerprint compared)${fx.changed ? ` · <span class="bad">${fmtNum(fx.changed)} changed</span>` : ''}${fx.missing ? ` · <span class="bad">${fmtNum(fx.missing)} missing</span>` : ''}${fx.sizeOff ? ` · <span class="warn">${fmtNum(fx.sizeOff)} not the size Telegram gave</span>` : ''}${!fx.changed && !fx.missing && fx.checked ? ' · <span class="ok">no problems</span>' : ''}.</div>
+</div>`;
 }
 
 function viewDownloads() {
@@ -233,7 +257,7 @@ function viewCategories() {
   if (state.filter && state.filter !== NONE && state.filter !== UNSAVED && !catCount.has(state.filter)) state.filter = '';
   const shown = shownGroups();
   const clusters = new Map();
-  for (const g of all) { if (catOf(g).trim()) continue; const s = suggest(g.name); if (s) { const k = s.toLowerCase(); const c = clusters.get(k) || { name: s, ids: [] }; c.ids.push(g.id); clusters.set(k, c); } }
+  for (const g of all) { if (catOf(g).trim()) continue; const s = suggestG(g); if (s) { const k = s.toLowerCase(); const c = clusters.get(k) || { name: s, ids: [] }; c.ids.push(g.id); clusters.set(k, c); } }
   const options = [...new Set(cats.concat([...clusters.values()].map((c) => c.name)))];
   const chip = (key, label, n) => `<button class="chip ${state.filter === key ? 'on' : ''}" data-act="c-filter" data-key="${esc(key)}">${esc(label)} <span>${n}</span></button>`;
   let h = `<div class="card"><h2>Categories</h2><div class="muted">Group related groups together (football-1, sports-3 and soccer-6 can all be "Sports"). In the index, each category gets a page showing every file once, with "also in…" links to everywhere it was posted.</div>
@@ -247,14 +271,14 @@ ${state.msg ? `<div class="muted">${esc(state.msg)}</div>` : ''}</div>
 <datalist id="ixcats">${options.map((c) => `<option value="${esc(c)}"></option>`).join('')}</datalist>`;
   if (clusters.size && state.filter !== UNSAVED) {
     const list = [...clusters.values()].sort((a, b) => b.ids.length - a.ids.length || natural(a.name, b.name));
-    h += `<div class="muted">Uncategorised groups with similar names — click to tick them: ${list.slice(0, 60).map((c) => `<button class="chip" data-act="c-cluster" data-key="${esc(c.name.toLowerCase())}">${esc(c.name)}… <span>${c.ids.length}</span></button>`).join(' ')} <button class="mini" data-act="c-suggest">Use all ${list.reduce((n, c) => n + c.ids.length, 0)} suggestions as they are</button></div>`;
+    h += `<div class="muted">Suggested categories for uncategorised groups (from similar names, or from the pictures and videos they share with a category's groups) — click to tick them: ${list.slice(0, 60).map((c) => `<button class="chip" data-act="c-cluster" data-key="${esc(c.name.toLowerCase())}">${esc(c.name)}… <span>${c.ids.length}</span></button>`).join(' ')} <button class="mini" data-act="c-suggest">Use all ${list.reduce((n, c) => n + c.ids.length, 0)} suggestions as they are</button></div>`;
   }
   h += `<div class="muted">${shown.length === all.length ? `${all.length} groups` : `Showing ${shown.length} of ${all.length} groups`}. Changes are kept until you press Save; a dot marks unsaved ones.</div><div class="rows">`;
   for (const g of shown) {
     const cur = catOf(g);
     const dirty = state.draft.has(g.id) && cur.trim() !== (g.category || '');
-    const s = suggest(g.name);
-    h += `<div class="row${state.sel.has(g.id) ? ' sel' : ''}"><label><input type="checkbox" data-sel="${esc(g.id)}" ${state.sel.has(g.id) ? 'checked' : ''}><span>${esc(g.name)}${dirty ? ' <b class="warn">•</b>' : ''}</span></label><span class="cat"><input class="t" list="ixcats" data-cat="${esc(g.id)}" data-focus="cat-${esc(g.id)}" value="${esc(cur)}" placeholder="Uncategorised">${s && !cur.trim() ? `<button class="chip" data-act="c-use" data-id="${esc(g.id)}">→ ${esc(s)}</button>` : ''}</span></div>`;
+    const s = suggestG(g);
+    h += `<div class="row${state.sel.has(g.id) ? ' sel' : ''}"><label><input type="checkbox" data-sel="${esc(g.id)}" ${state.sel.has(g.id) ? 'checked' : ''}><span>${esc(g.name)}${dirty ? ' <b class="warn">•</b>' : ''}</span></label><span class="cat"><input class="t" list="ixcats" data-cat="${esc(g.id)}" data-focus="cat-${esc(g.id)}" value="${esc(cur)}" placeholder="Uncategorised">${s && !cur.trim() ? `<button class="chip" data-act="c-use" data-id="${esc(g.id)}" title="${esc(suggestWhy(g))}">→ ${esc(s)}${suggestName(g.name) ? '' : ' <span>by content</span>'}</button>` : ''}</span></div>`;
   }
   h += `</div></div>`;
   return h;
@@ -277,7 +301,7 @@ function viewDuplicates() {
   const st = (state.dups && state.dups.status) || state.status.dups || {};
   const pct = st.total ? Math.floor((100 * st.done) / st.total) : 100;
   let h = `<div class="card"><h2>Near-duplicate videos</h2>
-<div class="muted">Finds the same footage saved as different files — re-encoded, resized, trimmed or watermarked — which identical-file matching can't see. It decodes only each video's key frames (on the graphics card when it can) and compares visual fingerprints. Nothing is deleted or moved: the index shows each set once on category pages and lists them in near_duplicates.csv.</div>`;
+<div class="muted">Finds the same footage saved as different files — re-encoded, resized, trimmed or watermarked — which identical-file matching can't see. It samples each video on a fixed time grid (one or two frames a second, on the graphics card when it can), cuts off black bars, also checks mirror images, and compares the footage frame by frame. Pictures are matched the same way in the media browser. Nothing is deleted or moved: the index shows each set once on category pages and lists them in near_duplicates.csv.</div>`;
   if (st.ffmpeg === false) h += `<div class="status warn"><b>ffmpeg is not installed on this PC</b>, so videos can't be checked yet. Open PowerShell and run <code>winget install Gyan.FFmpeg</code>, then restart the app (close and reopen start.bat).</div>`;
   h += `<div><b>${fmtNum(st.done)} of ${fmtNum(st.total)} videos checked</b> (${pct}%)${st.errors ? ` · <span class="warn">${fmtNum(st.errors)} could not be read</span> <button class="mini" data-act="d-retry">Try them again</button>` : ''} · ${fmtNum(st.pairs)} matching pairs found${st.running ? ` · now: <span class="muted">${esc(st.current)}</span> (${esc(st.hwaccel === 'cpu' ? 'processor' : 'graphics card: ' + st.hwaccel)})` : s.dupEnabled ? ' · idle' : ' · <b>paused</b>'}</div>
 ${st.lastError ? `<div class="muted">Last problem: ${esc(st.lastError)}</div>` : ''}
@@ -324,7 +348,11 @@ function viewSearch() {
 // ---------------- Settings ----------------
 function viewSettings() {
   const s = state.status.settings;
-  return `<div class="card"><h2>Index copy on the NAS</h2>
+  return `<div class="card"><h2>Diagnostics report</h2>
+<div class="muted">If something isn't working, make a report and paste it to whoever is helping you. It lists settings, counts, progress and error messages only: every chat, file, person, link and long number is replaced by a placeholder (chats become G1, G2… consistently), and no message text, caption or file name is included. Read it before you share it.</div>
+<div class="btns"><button class="b" data-act="diag">Make the report</button>${state.diag ? '<button class="b" data-act="diag-copy">Copy it</button>' : ''}${state.diagMsg ? `<span class="muted">${esc(state.diagMsg)}</span>` : ''}</div>
+${state.diag ? `<textarea id="diag" readonly style="width:100%;min-height:260px;font:12px/1.4 ui-monospace,Consolas,monospace;background:var(--soft);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px">${esc(state.diag)}</textarea>` : ''}</div>
+<div class="card"><h2>Index copy on the NAS</h2>
 <label><input type="checkbox" data-set="exportEnabled" ${s.exportEnabled ? 'checked' : ''}> Write a copy of the index every night</label>
 <div class="btns">At <input class="t" data-set-text="exportTime" value="${esc(s.exportTime)}" style="width:80px"> (24-hour, this computer's time)</div>
 <div class="btns">Folder: <input class="t" data-set-text="exportDir" value="${esc(s.exportDir)}" placeholder="${esc(state.status.exportDir || '')}" style="flex:1;min-width:240px"></div>
@@ -334,6 +362,10 @@ function viewSettings() {
 <div class="btns">Quiet hours (no new group starts): <input class="t" data-set-text="quietStart" value="${esc(s.quietStart)}" placeholder="22:00" style="width:80px"> to <input class="t" data-set-text="quietEnd" value="${esc(s.quietEnd)}" placeholder="07:00" style="width:80px"> <span class="muted">empty = none</span></div>
 <label><input type="checkbox" data-set="pauseOnFreeze" ${s.pauseOnFreeze ? 'checked' : ''}> Pause rescans when Telegram reports the account frozen</label>
 <label><input type="checkbox" data-set="autoRetry" ${s.autoRetry ? 'checked' : ''}> Retry failed downloads automatically every few hours (up to 5 times per file)</label>
+<label><input type="checkbox" data-set="substExact" ${s.substExact ? 'checked' : ''}> Don't download exact re-uploads: when a file is exactly as large as one already saved, compare its bytes on Telegram first (uses Telegram's own fingerprints, or three 1 MB samples)</label>
+<label><input type="checkbox" data-set="holdLikely" ${s.holdLikely ? 'checked' : ''}> Hold likely copies at the back of the queue: videos as long, as large and with the same preview as one already saved download after everything else</label>
+<label style="margin-left:22px"><input type="checkbox" data-set="holdForever" ${s.holdForever ? 'checked' : ''}> …and keep them held until I release them (Overview)</label>
+<label><input type="checkbox" data-set="fixityEnabled" ${s.fixityEnabled ? 'checked' : ''}> Re-read every stored file about once a month to check it is unchanged (reads from the NAS; follows the duplicate-finding quiet hours)</label>
 <div class="muted">A frozen account can still read history. Leave this off to keep capturing messages while you can.</div>
 <div class="btns"><button class="b primary" data-act="set-save">Save settings</button></div>
 ${state.setMsg ? `<div class="muted">${esc(state.setMsg)}</div>` : ''}</div>
@@ -356,6 +388,8 @@ function render() {
   const focusKey = prev && prev.getAttribute ? prev.getAttribute('data-focus') : null;
   const caret = focusKey && typeof prev.selectionStart === 'number' ? prev.selectionStart : null;
   const y = window.scrollY;
+  // Scrolled lists keep their place when the numbers refresh.
+  const listScroll = [...$app.querySelectorAll('.list,.rows')].map((el) => el.scrollTop);
   let h = `<header class="top"><h1>Archive</h1><nav class="tabs">${TABS.map(([k, l]) => `<button class="tab ${state.tab === k ? 'on' : ''}" data-act="tab" data-key="${k}">${l}</button>`).join('')}</nav><span class="grow"></span><a href="/">← Dashboard</a></header>`;
   if (state.error) h += `<div class="status bad">${esc(state.error)} <button class="b" data-act="reload">Try again</button></div>`;
   if (!state.status) { $app.innerHTML = h + (state.error ? '' : '<p class="muted">Loading…</p>'); return; }
@@ -364,6 +398,7 @@ function render() {
   h += view();
   $app.innerHTML = h;
   window.scrollTo(0, y);
+  $app.querySelectorAll('.list,.rows').forEach((el, i) => { if (listScroll[i]) el.scrollTop = listScroll[i]; });
   if (focusKey) {
     const el = $app.querySelector(`[data-focus="${CSS.escape(focusKey)}"]`);
     if (el) { el.focus(); if (caret !== null) { try { el.setSelectionRange(caret, caret); } catch { /* ignore */ } } }
@@ -429,6 +464,17 @@ $app.addEventListener('click', async (ev) => {
       await load(); loadDups(false); break;
     }
     case 'reload': load(); break;
+    case 'diag': { const r = await fetch('/api/ix/diagnostics', { credentials: 'same-origin' }); state.diag = r.ok ? await r.text() : ''; state.diagMsg = r.ok ? '' : 'Could not make the report: HTTP ' + r.status; render(); break; }
+    case 'diag-copy': { try { await navigator.clipboard.writeText(state.diag); state.diagMsg = 'Copied.'; } catch { const t = document.getElementById('diag'); if (t) { t.select(); document.execCommand('copy'); } state.diagMsg = 'Copied.'; } render(); break; }
+    case 'freeze-check': { const r = await api('POST', '/api/ix/freeze/check'); if (!r.ok) state.error = 'Could not read the freeze state: ' + errText(r); load(); break; }
+    case 'held-release': { const r = await api('POST', '/api/ix/held/release'); state.keepMsg = r.ok ? 'The held files are back in the download queue.' : errText(r); load(); break; }
+    case 'subst-fetch': {
+      if (!confirm('Download the real files of every re-upload that was matched to a saved file? Their groups get a files pass.')) break;
+      const r = await api('POST', '/api/ix/subst/fetch');
+      if (!r.ok) { state.keepMsg = errText(r); load(); break; }
+      if (r.data.groups && r.data.groups.length) await api('POST', '/api/ix/queue/add', { groups: r.data.groups.map((id) => ({ id })), start: true, includeFinished: true });
+      state.keepMsg = `${fmtNum(r.data.files)} file(s) will be downloaded in full by their groups' next files pass.`; load(); break;
+    }
     case 'dl-retry': {
       const r = await api('POST', '/api/ix/downloads/retry');
       state.dlMsg = r.ok ? `${fmtNum(r.data.retried)} file(s) put back in the queue.` : 'Could not retry: ' + errText(r);
@@ -479,9 +525,9 @@ $app.addEventListener('click', async (ev) => {
     case 'c-none': state.sel.clear(); render(); break;
     case 'c-bulk': for (const gid of state.sel) state.draft.set(gid, state.bulk.trim()); state.msg = ''; render(); break;
     case 'c-bulk-clear': for (const gid of state.sel) state.draft.set(gid, ''); state.msg = ''; render(); break;
-    case 'c-cluster': for (const g of all) if (!catOf(g).trim() && suggest(g.name).toLowerCase() === key) state.sel.add(g.id); render(); break;
-    case 'c-use': { const g = all.find((x) => x.id === id); if (g) state.draft.set(g.id, suggest(g.name)); render(); break; }
-    case 'c-suggest': for (const g of all) { const s = suggest(g.name); if (!catOf(g).trim() && s) state.draft.set(g.id, s); } render(); break;
+    case 'c-cluster': for (const g of all) if (!catOf(g).trim() && suggestG(g).toLowerCase() === key) state.sel.add(g.id); render(); break;
+    case 'c-use': { const g = all.find((x) => x.id === id); if (g) state.draft.set(g.id, suggestG(g)); render(); break; }
+    case 'c-suggest': for (const g of all) { const s = suggestG(g); if (!catOf(g).trim() && s) state.draft.set(g.id, s); } render(); break;
     case 'c-undo': state.draft.clear(); state.msg = 'Unsaved changes undone.'; render(); break;
     case 'c-save': saveCategories(); break;
     case 's-go': runSearch(false); break;

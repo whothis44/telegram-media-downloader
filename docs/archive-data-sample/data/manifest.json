@@ -1,17 +1,23 @@
 {
-  "app_version": "3.4.18-ix.5",
+  "app_version": "3.4.18-ix.6",
   "downloads_root": "/volume1/Telegram",
   "exported_at": "2026-11-03T05:00:00Z",
   "files": {
+    "checksums": "manifest-sha256.txt",
+    "covered": "covered.jsonl",
+    "entities": "entities.jsonl",
+    "families": "families.jsonl",
     "files": "files.jsonl",
     "groups": "groups.jsonl",
+    "media_clusters": "media_clusters.jsonl",
     "messages": "messages/\u003cgroup folder\u003e.jsonl.gz",
     "near_duplicates": "near_duplicates.jsonl",
     "peers": "peers.jsonl",
+    "posts": "posts.jsonl",
     "readme": "README.md",
     "topics": "topics.jsonl"
   },
   "format": "telegram-archive",
-  "format_version": 2,
+  "format_version": 3,
   "groups": 4
 }

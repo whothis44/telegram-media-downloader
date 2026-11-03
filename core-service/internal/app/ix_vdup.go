@@ -1,12 +1,13 @@
 package app
 
 import (
-	"bytes"
+	"bufio"
 	"context"
 	"database/sql"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"math/bits"
 	"os"
@@ -24,28 +25,41 @@ import (
 )
 
 // Near-duplicate videos: the same footage saved as different files
-// (re-encoded, resized, trimmed, watermarked), which SHA-256 cannot see.
+// (re-encoded, resized, letterboxed, mirrored, trimmed), which SHA-256
+// cannot see.
 //
-// Each video gets a visual fingerprint: ffmpeg decodes only its key frames
-// (encoders put them at scene changes and every few seconds), each is shrunk
-// to 32×32 grey and turned into a 64-bit perceptual hash (DCT, as pHash).
-// Two videos are near-duplicates when many of their frames have close
-// hashes at a consistent time offset. Candidates are found through 16-bit
-// slices of the hashes, so a video is compared only with likely matches.
+// Each video is sampled on a fixed time grid: two frames a second for
+// videos up to 30 s, one a second up to 20 minutes, one every two seconds
+// beyond (the published norm is about one a second; key frames, used
+// before ix.6, sit at different moments in every encode). Each frame has
+// any flat border cut off, is shrunk to 32×32 grey and gets a 64-bit DCT
+// hash (as pHash), and a second hash of its mirror image. Candidates come
+// from an in-memory index of 16-bit slices of the hashes, also probing
+// every slice one bit away. Two videos are compared by voting on the time
+// offset between matching frames, then finding the longest run of matching
+// frames along that offset. The run must last at least 5 s (or half of a
+// short video); "same" means it covers 80% of both videos, "clip" 90% of
+// the shorter one only, and "overlap" anything else they share.
 
 const (
-	ixVdupHamming     = 10   // bits that may differ between two frames of the same footage
-	ixVdupMinScore    = 0.6  // share of the shorter video's frames that must match
-	ixVdupMaxFrames   = 600  // frames kept per video
-	ixVdupCommonBand  = 2000 // a hash slice this common is ignored (black frames, logos)
-	ixVdupSameLength  = 0.85 // duration ratio above which two matches are "the same video"
-	ixVdupFrameBytes  = 12
-	ixVdupMaxDuration = 30 * time.Minute // per-video ffmpeg time limit
+	ixVdupHamming     = 8    // bits that may differ between two frames of the same footage
+	ixVdupShortHam    = 5    // the same, for videos with three samples or fewer
+	ixVdupMinRatio    = 0.6  // share of samples inside a run that must match
+	ixVdupMinRun      = 5.0  // seconds a shared run must last (or half a short video)
+	ixVdupSameCover   = 0.8  // both videos covered this much: the same video
+	ixVdupClipCover   = 0.9  // the shorter covered this much: a clip of the longer
+	ixVdupMaxFrames   = 3600 // frames kept per video
+	ixVdupIndexFrames = 256  // frames per video in the candidate index
+	ixVdupFrameBytes  = 20
+	ixVdupMaxDuration = 60 * time.Minute // per-video ffmpeg time limit
+	ixVdupVersion     = 2
+	ixVSide           = 96 // ffmpeg's frame size before borders are cut
 )
 
 type ixVFrame struct {
-	T float32
-	H uint64
+	T  float32
+	H  uint64 // hash of the frame
+	HF uint64 // hash of its mirror image
 }
 
 // ---------- perceptual hash ----------
@@ -114,8 +128,10 @@ func ixPHash(px []byte) (uint64, bool) {
 func ixPackFrames(frames []ixVFrame) []byte {
 	out := make([]byte, len(frames)*ixVdupFrameBytes)
 	for i, f := range frames {
-		binary.LittleEndian.PutUint32(out[i*12:], math.Float32bits(f.T))
-		binary.LittleEndian.PutUint64(out[i*12+4:], f.H)
+		o := i * ixVdupFrameBytes
+		binary.LittleEndian.PutUint32(out[o:], math.Float32bits(f.T))
+		binary.LittleEndian.PutUint64(out[o+4:], f.H)
+		binary.LittleEndian.PutUint64(out[o+12:], f.HF)
 	}
 	return out
 }
@@ -124,7 +140,8 @@ func ixUnpackFrames(b []byte) []ixVFrame {
 	n := len(b) / ixVdupFrameBytes
 	out := make([]ixVFrame, n)
 	for i := range out {
-		out[i] = ixVFrame{T: math.Float32frombits(binary.LittleEndian.Uint32(b[i*12:])), H: binary.LittleEndian.Uint64(b[i*12+4:])}
+		o := i * ixVdupFrameBytes
+		out[i] = ixVFrame{T: math.Float32frombits(binary.LittleEndian.Uint32(b[o:])), H: binary.LittleEndian.Uint64(b[o+4:]), HF: binary.LittleEndian.Uint64(b[o+12:])}
 	}
 	return out
 }
@@ -141,23 +158,180 @@ func ixThin(frames []ixVFrame, max int) []ixVFrame {
 	return out
 }
 
+// ---------- frames ----------
+
+// ixTrimBorders finds the picture inside dark borders (letterbox and
+// pillarbox bars) of a side×side grey frame: dark rows and columns whose
+// pixels barely vary are cut from each edge, at most 35% per side. Flat
+// areas that are not dark (a white wall, coloured bars) are picture.
+func ixTrimBorders(px []byte, side int) (x0, y0, x1, y1 int) {
+	x0, y0, x1, y1 = 0, 0, side, side
+	flatRow := func(y, xa, xb int) bool {
+		var sum, sq float64
+		n := float64(xb - xa)
+		for x := xa; x < xb; x++ {
+			v := float64(px[y*side+x])
+			sum += v
+			sq += v * v
+		}
+		m := sum / n
+		return m < 40 && sq/n-m*m < 16
+	}
+	flatCol := func(x, ya, yb int) bool {
+		var sum, sq float64
+		n := float64(yb - ya)
+		for y := ya; y < yb; y++ {
+			v := float64(px[y*side+x])
+			sum += v
+			sq += v * v
+		}
+		m := sum / n
+		return m < 40 && sq/n-m*m < 16
+	}
+	limit := side * 35 / 100
+	for y0 < limit && flatRow(y0, x0, x1) {
+		y0++
+	}
+	for side-y1 < limit && flatRow(y1-1, x0, x1) {
+		y1--
+	}
+	for x0 < limit && flatCol(x0, y0, y1) {
+		x0++
+	}
+	for side-x1 < limit && flatCol(x1-1, y0, y1) {
+		x1--
+	}
+	return
+}
+
+// ixResample32 shrinks the region [x0,x1)×[y0,y1) of a side×side frame to
+// 32×32 by area averaging.
+func ixResample32(px []byte, side, x0, y0, x1, y1 int) []byte {
+	out := make([]byte, 1024)
+	w, h := float64(x1-x0), float64(y1-y0)
+	for i := 0; i < 32; i++ {
+		sy0, sy1 := float64(y0)+float64(i)*h/32, float64(y0)+float64(i+1)*h/32
+		for j := 0; j < 32; j++ {
+			sx0, sx1 := float64(x0)+float64(j)*w/32, float64(x0)+float64(j+1)*w/32
+			var sum, wt float64
+			for y := int(sy0); y < int(math.Ceil(sy1)) && y < side; y++ {
+				wy := math.Min(sy1, float64(y+1)) - math.Max(sy0, float64(y))
+				if wy <= 0 {
+					continue
+				}
+				for x := int(sx0); x < int(math.Ceil(sx1)) && x < side; x++ {
+					wx := math.Min(sx1, float64(x+1)) - math.Max(sx0, float64(x))
+					if wx <= 0 {
+						continue
+					}
+					sum += float64(px[y*side+x]) * wx * wy
+					wt += wx * wy
+				}
+			}
+			if wt > 0 {
+				out[i*32+j] = byte(math.Round(sum / wt))
+			}
+		}
+	}
+	return out
+}
+
+// ixFrameHashes hashes one side×side grey frame and its mirror image. ok is
+// false for frames that say nothing (flat, or nearly all bits alike).
+func ixFrameHashes(px []byte, side int) (h, hf uint64, ok bool) {
+	if len(px) < side*side {
+		return 0, 0, false
+	}
+	x0, y0, x1, y1 := ixTrimBorders(px, side)
+	small := ixResample32(px, side, x0, y0, x1, y1)
+	if h, ok = ixPHash(small); !ok {
+		return 0, 0, false
+	}
+	if pop := bits.OnesCount64(h); pop < 8 || pop > 56 {
+		return 0, 0, false
+	}
+	mirror := make([]byte, 1024)
+	for y := 0; y < 32; y++ {
+		for x := 0; x < 32; x++ {
+			mirror[y*32+x] = small[y*32+31-x]
+		}
+	}
+	hf, _ = ixPHash(mirror)
+	return h, hf, true
+}
+
+// ixGridStep is the sampling step, in half seconds, for a video's length.
+func ixGridStep(duration float64) int {
+	switch {
+	case duration <= 30:
+		return 1
+	case duration <= 1200:
+		return 2
+	}
+	return 4
+}
+
+// ixOnGrid keeps the frames (sampled every half second) that fall on the
+// grid for the video's length, so copies of similar length are sampled at
+// the same moments.
+func ixOnGrid(frames []ixVFrame, duration float64) []ixVFrame {
+	step := ixGridStep(duration)
+	if step == 1 {
+		return frames
+	}
+	out := frames[:0:0]
+	for _, f := range frames {
+		if int(math.Round(float64(f.T)*2))%step == 0 {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
 // ---------- comparing two videos ----------
 
 type ixVMatch struct {
 	Matched int
-	Score   float64
-	Offset  float64
+	Score   float64 // share of samples matching inside the shared run
+	Offset  float64 // seconds to add to a's time to get b's
+	Span    float64 // seconds of footage shared
+	CoverA  float64 // share of a's length the run covers
+	CoverB  float64
 }
 
-// ixCompareFrames counts frames of the shorter list that have a close hash
-// in the other at one consistent time offset (±1.5 s), so a match is the same
-// footage in the same order, not a few look-alike shots.
-func ixCompareFrames(a, b []ixVFrame, hamming int) ixVMatch {
-	if len(a) == 0 || len(b) == 0 {
-		return ixVMatch{}
+func ixVInterval(f []ixVFrame) float64 {
+	if len(f) < 2 {
+		return 1
 	}
-	if len(a) > len(b) {
-		a, b = b, a
+	var gaps []float64
+	for i := 1; i < len(f); i++ {
+		if d := float64(f[i].T - f[i-1].T); d > 0 {
+			gaps = append(gaps, d)
+		}
+	}
+	if len(gaps) == 0 {
+		return 1
+	}
+	sort.Float64s(gaps)
+	return gaps[len(gaps)/2]
+}
+
+func ixVLength(f []ixVFrame, dur float64) float64 {
+	if dur > 0 {
+		return dur
+	}
+	if len(f) == 0 {
+		return 0
+	}
+	return float64(f[len(f)-1].T) + ixVInterval(f)
+}
+
+// ixVRun finds the longest run of x's samples matching y at one offset.
+// mirror compares x's mirror-image hashes.
+func ixVRun(x, y []ixVFrame, mirror bool) ixVMatch {
+	tau := ixVdupHamming
+	if len(x) <= 3 || len(y) <= 3 {
+		tau = ixVdupShortHam
 	}
 	type pair struct {
 		i   int
@@ -165,10 +339,14 @@ func ixCompareFrames(a, b []ixVFrame, hamming int) ixVMatch {
 	}
 	var pairs []pair
 	votes := map[int]int{}
-	for i, fa := range a {
-		for _, fb := range b {
-			if bits.OnesCount64(fa.H^fb.H) <= hamming {
-				off := float64(fb.T - fa.T)
+	for i, fx := range x {
+		hx := fx.H
+		if mirror {
+			hx = fx.HF
+		}
+		for _, fy := range y {
+			if bits.OnesCount64(hx^fy.H) <= tau {
+				off := float64(fy.T - fx.T)
 				pairs = append(pairs, pair{i, off})
 				votes[int(math.Round(off))]++
 			}
@@ -184,35 +362,206 @@ func ixCompareFrames(a, b []ixVFrame, hamming int) ixVMatch {
 			best, bestVotes = off, n
 		}
 	}
-	seen := map[int]bool{}
+	matched := make([]bool, len(x))
 	for _, p := range pairs {
 		if math.Abs(p.off-float64(best)) <= 1.5 {
-			seen[p.i] = true
+			matched[p.i] = true
 		}
 	}
-	m := ixVMatch{Matched: len(seen), Offset: float64(best)}
-	m.Score = float64(m.Matched) / float64(len(a))
-	return m
+	interval := ixVInterval(x)
+	// A run may skip a stretch that hashes badly (noise, a flash): up to
+	// three samples or four seconds, whichever is more.
+	allowGap := max(3, int(4/interval))
+	var top ixVMatch
+	start, last, gap, hit := -1, -1, 0, 0
+	closeRun := func() {
+		if start < 0 || last < start {
+			return
+		}
+		total := last - start + 1
+		ratio := float64(hit) / float64(total)
+		span := float64(x[last].T-x[start].T) + interval
+		if ratio >= ixVdupMinRatio && hit >= min(2, len(x)) && span > top.Span {
+			top = ixVMatch{Matched: hit, Score: ratio, Offset: float64(best), Span: span}
+		}
+	}
+	for i := range x {
+		if matched[i] {
+			if start < 0 {
+				start, hit = i, 0
+			}
+			last, gap = i, 0
+			hit++
+			continue
+		}
+		if start >= 0 {
+			gap++
+			if gap > allowGap {
+				closeRun()
+				start, last, gap, hit = -1, -1, 0, 0
+			}
+		}
+	}
+	closeRun()
+	return top
 }
 
-// ixVKind says whether two fingerprints are the same video, one a clip of
-// the other, or unrelated (""). Videos with one or two usable frames (very
-// short or nearly still) must match much more closely.
-func ixVKind(a, b []ixVFrame, durA, durB float64) (string, ixVMatch) {
-	short := min(len(a), len(b))
-	hamming, need := ixVdupHamming, 2
-	if short < 3 {
-		hamming, need = 4, short
+// ixVCompare says whether two fingerprints share footage: "same" (the same
+// video), "clip" (the shorter is part of the longer), "overlap" (they share
+// a stretch) or "" (unrelated).
+func ixVCompare(a, b []ixVFrame, durA, durB float64) (string, ixVMatch) {
+	if len(a) == 0 || len(b) == 0 {
+		return "", ixVMatch{}
 	}
-	m := ixCompareFrames(a, b, hamming)
-	if m.Matched < need || m.Score < ixVdupMinScore {
+	lenA, lenB := ixVLength(a, durA), ixVLength(b, durB)
+	// Walk the video with fewer samples; both orientations.
+	x, y, swapped := a, b, false
+	if len(b) < len(a) {
+		x, y, swapped = b, a, true
+	}
+	m := ixVRun(x, y, false)
+	if mm := ixVRun(x, y, true); mm.Span > m.Span {
+		m = mm
+	}
+	if m.Matched == 0 {
 		return "", m
 	}
-	lo, hi := math.Min(durA, durB), math.Max(durA, durB)
-	if hi <= 0 || lo/hi >= ixVdupSameLength {
-		return "same", m
+	if swapped {
+		m.Offset = -m.Offset
 	}
-	return "clip", m
+	short := math.Min(lenA, lenB)
+	if m.Span < ixVdupMinRun && !(short < 2*ixVdupMinRun && m.Span >= 0.5*short) {
+		return "", m
+	}
+	if lenA > 0 {
+		m.CoverA = math.Min(1, m.Span/lenA)
+	}
+	if lenB > 0 {
+		m.CoverB = math.Min(1, m.Span/lenB)
+	}
+	coverShort, coverLong := m.CoverA, m.CoverB
+	if lenB < lenA {
+		coverShort, coverLong = m.CoverB, m.CoverA
+	}
+	switch {
+	case m.CoverA >= ixVdupSameCover && m.CoverB >= ixVdupSameCover:
+		return "same", m
+	case coverShort >= ixVdupClipCover && coverLong < ixVdupSameCover:
+		return "clip", m
+	}
+	return "overlap", m
+}
+
+// ---------- the candidate index ----------
+
+// ixVIndex finds videos sharing hash slices with a new one, in memory.
+type ixVIndex struct {
+	keys     []string
+	byKey    map[string]int32
+	postings [4][65536][]int32
+}
+
+func newIxVIndex() *ixVIndex { return &ixVIndex{byKey: map[string]int32{}} }
+
+func ixIndexSample(frames []ixVFrame) []ixVFrame {
+	return ixThin(frames, ixVdupIndexFrames)
+}
+
+func (x *ixVIndex) add(key string, frames []ixVFrame) {
+	id, ok := x.byKey[key]
+	if !ok {
+		id = int32(len(x.keys))
+		x.keys = append(x.keys, key)
+		x.byKey[key] = id
+	}
+	seen := map[uint32]bool{}
+	for _, f := range ixIndexSample(frames) {
+		for band := 0; band < 4; band++ {
+			v := uint16(f.H >> (16 * uint(band)))
+			k := uint32(band)<<16 | uint32(v)
+			if seen[k] {
+				continue
+			}
+			seen[k] = true
+			list := x.postings[band][v]
+			if n := len(list); n == 0 || list[n-1] != id {
+				x.postings[band][v] = append(list, id)
+			}
+		}
+	}
+}
+
+// candidates lists indexed videos sharing slices (exactly or one bit away)
+// with at least need distinct frames, most shared first. Slices common to
+// over 1% of all videos (black frames, logos) are ignored.
+func (x *ixVIndex) candidates(key string, frames []ixVFrame, max int) []string {
+	sample := ixIndexSample(frames)
+	if len(sample) == 0 || len(x.keys) == 0 {
+		return nil
+	}
+	need := min(3, max1(len(sample)/2))
+	stop := len(x.keys) / 100
+	if stop < 100 {
+		stop = 100
+	}
+	self, hasSelf := x.byKey[key]
+	hits := map[int32]int{}
+	last := map[int32]int{}
+	for qi, f := range sample {
+		for _, h := range []uint64{f.H, f.HF} {
+			for band := 0; band < 4; band++ {
+				v := uint16(h >> (16 * uint(band)))
+				for probe := -1; probe < 16; probe++ {
+					pv := v
+					if probe >= 0 {
+						pv ^= 1 << uint(probe)
+					}
+					list := x.postings[band][pv]
+					if len(list) > stop {
+						continue
+					}
+					for _, id := range list {
+						if hasSelf && id == self {
+							continue
+						}
+						if l, ok := last[id]; ok && l == qi {
+							continue
+						}
+						last[id] = qi
+						hits[id]++
+					}
+				}
+			}
+		}
+	}
+	type cand struct {
+		id   int32
+		hits int
+	}
+	var cs []cand
+	for id, n := range hits {
+		if n >= need {
+			cs = append(cs, cand{id, n})
+		}
+	}
+	sort.Slice(cs, func(i, j int) bool {
+		return cs[i].hits > cs[j].hits || (cs[i].hits == cs[j].hits && x.keys[cs[i].id] < x.keys[cs[j].id])
+	})
+	if len(cs) > max {
+		cs = cs[:max]
+	}
+	out := make([]string, len(cs))
+	for i, c := range cs {
+		out[i] = x.keys[c.id]
+	}
+	return out
+}
+
+func max1(n int) int {
+	if n < 1 {
+		return 1
+	}
+	return n
 }
 
 // ---------- ffmpeg ----------
@@ -225,8 +574,10 @@ var (
 // ixFingerprintVideo is replaceable in tests.
 var ixFingerprintVideo = ixFFmpegFingerprint
 
-// ixFFmpegFingerprint decodes the key frames of one video (on the GPU when
-// hwaccel is set) into 32×32 grey images and hashes them.
+// ixFFmpegFingerprint decodes a video (on the GPU when hwaccel is set),
+// takes two frames a second as 96×96 grey pictures, and hashes the ones on
+// the grid for its length. Frames are read as ffmpeg makes them, so a long
+// video is never held in memory.
 func ixFFmpegFingerprint(ctx context.Context, path, hwaccel string) (float64, []ixVFrame, error) {
 	bin := seekbar.FFmpegPath()
 	if bin == "" {
@@ -234,45 +585,87 @@ func ixFFmpegFingerprint(ctx context.Context, path, hwaccel string) (float64, []
 	}
 	ctx, cancel := context.WithTimeout(ctx, ixVdupMaxDuration)
 	defer cancel()
-	args := []string{"-hide_banner", "-nostdin", "-loglevel", "info", "-skip_frame", "nokey"}
+	args := []string{"-hide_banner", "-nostdin", "-loglevel", "info"}
 	if hwaccel != "" {
 		args = append(args, "-hwaccel", hwaccel)
 	}
-	args = append(args, "-i", path, "-an", "-sn", "-dn", "-fps_mode", "passthrough",
-		"-vf", "scale=32:32:flags=area,format=gray,showinfo", "-f", "rawvideo", "-pix_fmt", "gray", "pipe:1")
+	args = append(args, "-i", path, "-an", "-sn", "-dn",
+		"-vf", fmt.Sprintf("fps=2,scale=%d:%d:flags=area,format=gray,showinfo", ixVSide, ixVSide), "-f", "rawvideo", "-pix_fmt", "gray", "pipe:1")
 	cmd := exec.CommandContext(ctx, bin, args...)
-	var out, errOut bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &errOut
-	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(errOut.String())
-		if i := strings.LastIndex(msg, "\n"); i >= 0 {
-			msg = msg[i+1:]
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return 0, nil, err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return 0, nil, err
+	}
+	if err = cmd.Start(); err != nil {
+		return 0, nil, err
+	}
+	var (
+		pts      []float64
+		duration float64
+		lastLine string
+		wg       sync.WaitGroup
+	)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		sc := bufio.NewScanner(stderr)
+		sc.Buffer(make([]byte, 64*1024), 1024*1024)
+		for sc.Scan() {
+			line := sc.Text()
+			if m := ixPtsRe.FindStringSubmatch(line); m != nil {
+				if t, err := strconv.ParseFloat(m[1], 64); err == nil {
+					pts = append(pts, t)
+				}
+				continue
+			}
+			if duration == 0 {
+				if m := ixDurationRe.FindStringSubmatch(line); m != nil {
+					h, _ := strconv.ParseFloat(m[1], 64)
+					mi, _ := strconv.ParseFloat(m[2], 64)
+					s, _ := strconv.ParseFloat(m[3], 64)
+					duration = h*3600 + mi*60 + s
+				}
+			}
+			if strings.TrimSpace(line) != "" {
+				lastLine = line
+			}
 		}
-		return 0, nil, fmt.Errorf("ffmpeg: %v: %s", err, msg)
+	}()
+	type hashed struct {
+		h, hf uint64
+		ok    bool
 	}
-	stderr := errOut.String()
-	var duration float64
-	if m := ixDurationRe.FindStringSubmatch(stderr); m != nil {
-		h, _ := strconv.ParseFloat(m[1], 64)
-		mi, _ := strconv.ParseFloat(m[2], 64)
-		s, _ := strconv.ParseFloat(m[3], 64)
-		duration = h*3600 + mi*60 + s
-	}
-	var pts []float64
-	for _, m := range ixPtsRe.FindAllStringSubmatch(stderr, -1) {
-		if t, err := strconv.ParseFloat(m[1], 64); err == nil {
-			pts = append(pts, t)
+	var hashes []hashed
+	frame := make([]byte, ixVSide*ixVSide)
+	r := bufio.NewReaderSize(stdout, 1<<20)
+	for {
+		if _, err := io.ReadFull(r, frame); err != nil {
+			break
 		}
+		h, hf, ok := ixFrameHashes(frame, ixVSide)
+		hashes = append(hashes, hashed{h, hf, ok})
 	}
-	raw := out.Bytes()
-	n := min(len(raw)/1024, len(pts))
+	_, _ = io.Copy(io.Discard, r)
+	wg.Wait()
+	if err := cmd.Wait(); err != nil {
+		return 0, nil, fmt.Errorf("ffmpeg: %v: %s", err, strings.TrimSpace(lastLine))
+	}
+	n := min(len(hashes), len(pts))
 	frames := make([]ixVFrame, 0, n)
 	for i := 0; i < n; i++ {
-		if h, ok := ixPHash(raw[i*1024 : (i+1)*1024]); ok {
-			frames = append(frames, ixVFrame{T: float32(pts[i]), H: h})
+		if hashes[i].ok {
+			frames = append(frames, ixVFrame{T: float32(pts[i]), H: hashes[i].h, HF: hashes[i].hf})
 		}
 	}
-	return duration, ixThin(frames, ixVdupMaxFrames), nil
+	length := duration
+	if length <= 0 && n > 0 {
+		length = pts[n-1] + 0.5
+	}
+	return duration, ixThin(ixOnGrid(frames, length), ixVdupMaxFrames), nil
 }
 
 var ixErrNoFFmpeg = errors.New("ffmpeg is not installed")
@@ -296,6 +689,8 @@ var ixVdupState sync.Map // *App -> *ixVdupBox
 
 type ixVdupBox struct {
 	mu        sync.Mutex
+	index     *ixVIndex // candidate index, built on first use
+	after     int64     // the last download ID looked at in this pass
 	st        ixVdupStatus
 	cpuOnly   bool // the GPU decoder failed; use the CPU for the rest of this run
 	gpuErrors int
@@ -375,10 +770,24 @@ func (a *App) ixVdupStep(ctx context.Context) (bool, error) {
 	}
 	var id int64
 	var rel, hash string
+	box.mu.Lock()
+	after := box.after
+	box.mu.Unlock()
 	err := a.db.Reader.QueryRowContext(ctx, `SELECT d.id, d.file_path, COALESCE(d.file_hash,'') FROM downloads d
-		WHERE d.file_type='video' AND d.message_id>0 AND d.file_path IS NOT NULL AND d.file_path<>'' AND (d.status IS NULL OR d.status='completed')
-		AND NOT EXISTS (SELECT 1 FROM ix_vfp v WHERE v.key = CASE WHEN length(d.file_hash)=64 THEN 'h:'||lower(d.file_hash) ELSE 'p:'||replace(d.file_path,char(92),'/') END)
-		ORDER BY d.id LIMIT 1`).Scan(&id, &rel, &hash)
+		WHERE d.id>? AND d.file_type='video' AND d.message_id>0 AND d.file_path IS NOT NULL AND d.file_path<>'' AND (d.status IS NULL OR d.status='completed')
+		AND NOT EXISTS (SELECT 1 FROM ix_vfp v WHERE v.ver>=2 AND v.key = CASE WHEN length(d.file_hash)=64 THEN 'h:'||lower(d.file_hash) ELSE 'p:'||replace(d.file_path,char(92),'/') END)
+		ORDER BY d.id LIMIT 1`, after).Scan(&id, &rel, &hash)
+	if errors.Is(err, sql.ErrNoRows) && after > 0 {
+		box.mu.Lock()
+		box.after = 0
+		box.mu.Unlock()
+		return a.ixVdupStep(ctx)
+	}
+	if err == nil {
+		box.mu.Lock()
+		box.after = id
+		box.mu.Unlock()
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		box.mu.Lock()
 		box.st.Running, box.st.Current, box.st.FFmpeg = false, "", true
@@ -443,106 +852,74 @@ func (a *App) ixVdupStep(ctx context.Context) (bool, error) {
 }
 
 func (a *App) ixVdupSave(ctx context.Context, key, rel string, duration float64, frames []ixVFrame, failure string) error {
-	tx, err := a.db.Writer.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
 	status := "ok"
 	if failure != "" {
 		status = "error"
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO ix_vfp(key,file_path,duration,frames,status,error,updated_at) VALUES(?,?,?,?,?,?,?)
-		ON CONFLICT(key) DO UPDATE SET file_path=excluded.file_path, duration=excluded.duration, frames=excluded.frames, status=excluded.status, error=excluded.error, updated_at=excluded.updated_at`,
-		key, rel, duration, ixPackFrames(frames), status, failure, time.Now().UnixMilli()); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, `DELETE FROM ix_vband WHERE key=?`, key); err != nil {
-		return err
-	}
-	seen := map[[2]int]bool{}
-	for _, f := range frames {
-		for band := 0; band < 4; band++ {
-			v := int((f.H >> (16 * uint(band))) & 0xffff)
-			if seen[[2]int{band, v}] {
-				continue
-			}
-			seen[[2]int{band, v}] = true
-			if _, err = tx.ExecContext(ctx, `INSERT INTO ix_vband(band,v,key) VALUES(?,?,?)`, band, v, key); err != nil {
-				return err
-			}
-		}
-	}
-	return tx.Commit()
+	_, err := a.db.Writer.ExecContext(ctx, `INSERT INTO ix_vfp(key,file_path,duration,frames,status,error,updated_at,ver) VALUES(?,?,?,?,?,?,?,?)
+		ON CONFLICT(key) DO UPDATE SET file_path=excluded.file_path, duration=excluded.duration, frames=excluded.frames, status=excluded.status, error=excluded.error, updated_at=excluded.updated_at, ver=excluded.ver`,
+		key, rel, duration, ixPackFrames(frames), status, failure, time.Now().UnixMilli(), ixVdupVersion)
+	return err
 }
 
-// ixVdupMatch compares a new fingerprint with the videos sharing hash slices.
+// ixVdupIndex builds the in-memory candidate index once per run.
+func (a *App) ixVdupIndex(ctx context.Context) (*ixVIndex, error) {
+	box := a.ixVdup()
+	box.mu.Lock()
+	idx := box.index
+	box.mu.Unlock()
+	if idx != nil {
+		return idx, nil
+	}
+	idx = newIxVIndex()
+	rows, err := a.db.Reader.QueryContext(ctx, `SELECT key, frames FROM ix_vfp WHERE status='ok' AND ver=?`, ixVdupVersion)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var key string
+		var blob []byte
+		if rows.Scan(&key, &blob) == nil {
+			idx.add(key, ixUnpackFrames(blob))
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	box.mu.Lock()
+	box.index = idx
+	box.mu.Unlock()
+	return idx, nil
+}
+
+// ixVdupMatch compares a new fingerprint with the likely matches the index
+// finds, records what it shares with them, and adds it to the index.
 func (a *App) ixVdupMatch(ctx context.Context, key string, duration float64, frames []ixVFrame) error {
 	if len(frames) == 0 {
 		return nil
 	}
-	votes := map[string]int{}
-	seen := map[[2]int]bool{}
-	for _, f := range frames {
-		for band := 0; band < 4; band++ {
-			v := int((f.H >> (16 * uint(band))) & 0xffff)
-			if seen[[2]int{band, v}] {
-				continue
-			}
-			seen[[2]int{band, v}] = true
-			var n int
-			if err := a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM ix_vband WHERE band=? AND v=?`, band, v).Scan(&n); err != nil {
-				return err
-			}
-			if n > ixVdupCommonBand {
-				continue
-			}
-			rows, err := a.db.Reader.QueryContext(ctx, `SELECT key FROM ix_vband WHERE band=? AND v=? AND key<>?`, band, v, key)
-			if err != nil {
-				return err
-			}
-			for rows.Next() {
-				var other string
-				if rows.Scan(&other) == nil {
-					votes[other]++
-				}
-			}
-			rows.Close()
-		}
+	idx, err := a.ixVdupIndex(ctx)
+	if err != nil {
+		return err
 	}
-	need := 2
-	if len(frames) <= 2 {
-		need = 1
-	}
-	type cand struct {
-		key   string
-		votes int
-	}
-	var cands []cand
-	for k, n := range votes {
-		if n >= need {
-			cands = append(cands, cand{k, n})
-		}
-	}
-	sort.Slice(cands, func(i, j int) bool {
-		return cands[i].votes > cands[j].votes || (cands[i].votes == cands[j].votes && cands[i].key < cands[j].key)
-	})
-	if len(cands) > 200 {
-		cands = cands[:200]
-	}
+	box := a.ixVdup()
+	box.mu.Lock()
+	cands := idx.candidates(key, frames, 300)
+	box.mu.Unlock()
 	type found struct {
 		other, kind string
 		m           ixVMatch
 	}
 	var hits []found
-	for _, c := range cands {
+	for _, other := range cands {
 		var blob []byte
 		var dur float64
-		if err := a.db.Reader.QueryRowContext(ctx, `SELECT frames, duration FROM ix_vfp WHERE key=? AND status='ok'`, c.key).Scan(&blob, &dur); err != nil {
+		if err := a.db.Reader.QueryRowContext(ctx, `SELECT frames, duration FROM ix_vfp WHERE key=? AND status='ok'`, other).Scan(&blob, &dur); err != nil {
 			continue
 		}
-		if kind, m := ixVKind(frames, ixUnpackFrames(blob), duration, dur); kind != "" {
-			hits = append(hits, found{c.key, kind, m})
+		if kind, m := ixVCompare(frames, ixUnpackFrames(blob), duration, dur); kind != "" {
+			hits = append(hits, found{other, kind, m})
 		}
 	}
 	tx, err := a.db.Writer.BeginTx(ctx, nil)
@@ -553,17 +930,29 @@ func (a *App) ixVdupMatch(ctx context.Context, key string, duration float64, fra
 	if _, err = tx.ExecContext(ctx, `DELETE FROM ix_vdup WHERE key_a=? OR key_b=?`, key, key); err != nil {
 		return err
 	}
+	now := time.Now().UnixMilli()
 	for _, h := range hits {
-		ka, kb := key, h.other
+		ka, kb, ca, cb, off := key, h.other, h.m.CoverA, h.m.CoverB, h.m.Offset
 		if kb < ka {
-			ka, kb = kb, ka
+			ka, kb, ca, cb, off = kb, ka, cb, ca, -off
 		}
-		if _, err = tx.ExecContext(ctx, `INSERT OR REPLACE INTO ix_vdup(key_a,key_b,kind,score,matched,offset_s,found_at) VALUES(?,?,?,?,?,?,?)`,
-			ka, kb, h.kind, h.m.Score, h.m.Matched, h.m.Offset, time.Now().UnixMilli()); err != nil {
+		if _, err = tx.ExecContext(ctx, `INSERT OR REPLACE INTO ix_vdup(key_a,key_b,kind,score,matched,offset_s,found_at,cover_a,cover_b) VALUES(?,?,?,?,?,?,?,?,?)`,
+			ka, kb, h.kind, h.m.Score, h.m.Matched, off, now, ca, cb); err != nil {
 			return err
 		}
+		if h.kind == "overlap" {
+			if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO ix_msug(key_a,key_b,kind,distance,found_at) VALUES(?,?,'video',?,?)`, ka, kb, h.m.Score, now); err != nil {
+				return err
+			}
+		}
 	}
-	return tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	box.mu.Lock()
+	idx.add(key, frames)
+	box.mu.Unlock()
+	return nil
 }
 
 func (a *App) ixVdupCount(ctx context.Context) {

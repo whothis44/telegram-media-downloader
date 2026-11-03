@@ -661,7 +661,7 @@ func TestIxIndexPagesCategoriesTopicsAndSharedFiles(t *testing.T) {
 	}
 	var manifest map[string]any
 	raw, err := os.ReadFile(filepath.Join(dir, "data", "manifest.json"))
-	if err != nil || json.Unmarshal(raw, &manifest) != nil || manifest["format_version"] != float64(2) || manifest["downloads_root"] == "" {
+	if err != nil || json.Unmarshal(raw, &manifest) != nil || manifest["format_version"] != float64(3) || manifest["downloads_root"] == "" {
 		t.Fatalf("manifest: %s %v", raw, err)
 	}
 	if readme, err := os.ReadFile(filepath.Join(dir, "data", "README.md")); err != nil || !strings.Contains(string(readme), "album_id") {
