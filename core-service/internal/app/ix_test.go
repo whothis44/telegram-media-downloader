@@ -696,9 +696,9 @@ func TestIxIndexPagesCategoriesTopicsAndSharedFiles(t *testing.T) {
 	if m5["text"] != "with raw <tags> & entities" || m5["date_utc"] == "" {
 		t.Fatalf("message 5: %v", m5)
 	}
-	news := readLines("messages/g_103.jsonl.gz")
-	if len(news) != 1 || news[0]["message_id"] != float64(99) || news[0]["file_status"] != "downloaded" {
-		t.Fatalf("file without a captured message: %v", news)
+	stub := readLines("messages/g_103.jsonl.gz")
+	if len(stub) != 1 || stub[0]["message_id"] != float64(99) || stub[0]["file_status"] != "downloaded" {
+		t.Fatalf("file without a captured message: %v", stub)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "data", "state.json")); err != nil {
 		t.Fatal("state.json missing")

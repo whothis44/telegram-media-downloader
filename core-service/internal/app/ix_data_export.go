@@ -508,20 +508,69 @@ func (a *App) ixWriteData(ctx context.Context, fresh, prev, downloads string, pr
 		if err != nil {
 			return err
 		}
-		for i, c := range clusters {
-			type member struct {
-				DownloadID int64   `json:"download_id"`
-				Path       string  `json:"path"`
-				Size       int64   `json:"size"`
-				Duration   float64 `json:"duration_s"`
+		places := a.ixNearPlaces(ctx)
+		type place struct {
+			GroupID   string `json:"group_id"`
+			MessageID int    `json:"message_id"`
+		}
+		type member struct {
+			DownloadID int64   `json:"download_id,omitempty"`
+			Path       string  `json:"path"`
+			SHA256     string  `json:"sha256,omitempty"`
+			Size       int64   `json:"size"`
+			Duration   float64 `json:"duration_s"`
+			Places     []place `json:"places"`
+		}
+		type pair struct {
+			A       int     `json:"a"` // index into members
+			B       int     `json:"b"`
+			Kind    string  `json:"kind"` // same: the same video; clip: one is a part of the other
+			Score   float64 `json:"score"`
+			OffsetS float64 `json:"offset_s"` // where b starts inside a, in seconds
+		}
+		type keyed struct {
+			a, b string
+			p    pair
+		}
+		var allPairs []keyed
+		rows, err := a.db.Reader.QueryContext(ctx, `SELECT key_a,key_b,kind,score,offset_s FROM ix_vdup ORDER BY key_a,key_b`)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var k keyed
+			if rows.Scan(&k.a, &k.b, &k.p.Kind, &k.p.Score, &k.p.OffsetS) == nil {
+				allPairs = append(allPairs, k)
 			}
+		}
+		rows.Close()
+		for i, c := range clusters {
 			out := struct {
 				Cluster int      `json:"cluster"`
 				Kind    string   `json:"kind"`
 				Members []member `json:"members"`
-			}{Cluster: i + 1, Kind: c.Kind}
-			for _, m := range c.Members {
-				out.Members = append(out.Members, member{m.DownloadID, ixNormPath(m.Path), m.Size, m.Duration})
+				Pairs   []pair   `json:"pairs"`
+			}{Cluster: i + 1, Kind: c.Kind, Members: []member{}, Pairs: []pair{}}
+			index := map[string]int{}
+			for j, m := range c.Members {
+				mm := member{DownloadID: m.DownloadID, Path: ixNormPath(m.Path), Size: m.Size, Duration: m.Duration, Places: []place{}}
+				if strings.HasPrefix(m.Key, "h:") {
+					mm.SHA256 = strings.TrimPrefix(m.Key, "h:")
+				}
+				for _, p := range places[m.Key] {
+					mm.Places = append(mm.Places, place{p.GroupID, p.MessageID})
+				}
+				index[m.Key] = j
+				out.Members = append(out.Members, mm)
+			}
+			for _, k := range allPairs {
+				ia, okA := index[k.a]
+				ib, okB := index[k.b]
+				if okA && okB {
+					p := k.p
+					p.A, p.B = ia, ib
+					out.Pairs = append(out.Pairs, p)
+				}
 			}
 			if err := enc.Encode(out); err != nil {
 				return err
