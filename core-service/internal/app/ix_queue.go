@@ -60,6 +60,12 @@ type ixQueueItem struct {
 	Missing    int    `json:"missing,omitempty"`    // files still missing after it
 	// Priority groups get both passes before any other group starts.
 	Priority bool `json:"priority,omitempty"`
+	// A pass that stopped part-way carries on below ResumeFrom (the oldest
+	// message it reached); Carried counts what earlier attempts read, and
+	// PassStartedAt is when the pass first started.
+	ResumeFrom    int   `json:"resumeFrom,omitempty"`
+	Carried       int   `json:"carried,omitempty"`
+	PassStartedAt int64 `json:"passStartedAt,omitempty"`
 }
 
 type ixQueueState struct {
@@ -72,7 +78,8 @@ type ixQueueState struct {
 
 // ixQueueDeps are the backfill operations the queue uses; tests replace them.
 type ixQueueDeps struct {
-	start   func(ctx context.Context, groupID string, messagesOnly bool) (jobID string, err error)
+	start   func(ctx context.Context, groupID string, messagesOnly bool, resumeFrom int) (jobID string, err error)
+	cursor  func(ctx context.Context, jobID string) int // oldest message a backfill reached (0: unknown)
 	job     func(ctx context.Context, jobID string) (historyJob, bool)
 	missing func(ctx context.Context, groupID string) (int, error) // files the library still lacks
 	finish  func(ctx context.Context, item ixQueueItem, job historyJob) error
@@ -84,6 +91,7 @@ func (a *App) ixDeps() ixQueueDeps {
 	return ixQueueDeps{
 		start:   a.ixStartHistory,
 		job:     a.ixHistoryJob,
+		cursor:  a.ixHistoryCursor,
 		missing: a.ixMissingFiles,
 		finish:  a.ixFinishWalk,
 		hold:    a.ixHold,
@@ -224,8 +232,19 @@ func (a *App) ixQueueStep(ctx context.Context, deps ixQueueDeps) error {
 			continue
 		}
 		job, ok := deps.job(ctx, item.JobID)
+		// Where a stopped backfill got to, so the retry carries on from there.
+		keepPlace := func(processed int) {
+			if deps.cursor == nil {
+				return
+			}
+			if c := deps.cursor(ctx, item.JobID); c > 0 && (item.ResumeFrom == 0 || c < item.ResumeFrom) {
+				item.ResumeFrom = c
+				item.Carried += processed
+			}
+		}
 		if !ok {
 			if now.Sub(time.UnixMilli(item.StartedAt)) > ixLostJob {
+				keepPlace(item.Processed)
 				ixRetryLater(&st, i, now, "the backfill disappeared (the server may have restarted)")
 				return save()
 			}
@@ -238,6 +257,7 @@ func (a *App) ixQueueStep(ctx context.Context, deps ixQueueDeps) error {
 			return save()
 		case "done":
 			if job.Cancelled {
+				keepPlace(job.Processed)
 				ixRetryLater(&st, i, now, "the backfill was cancelled")
 				return save()
 			}
@@ -248,8 +268,10 @@ func (a *App) ixQueueStep(ctx context.Context, deps ixQueueDeps) error {
 				}
 			}
 			toFiles := false
+			read := item.Carried + job.Processed
+			item.ResumeFrom, item.Carried, item.PassStartedAt = 0, 0, 0
 			if item.Phase == ixPhaseMessages {
-				item.MessagesAt, item.Messages = now.UnixMilli(), job.Processed
+				item.MessagesAt, item.Messages = now.UnixMilli(), read
 				missing := 0
 				if deps.missing != nil {
 					n, err := deps.missing(ctx, item.GroupID)
@@ -276,6 +298,7 @@ func (a *App) ixQueueStep(ctx context.Context, deps ixQueueDeps) error {
 			if job.Error != nil && *job.Error != "" {
 				reason = *job.Error
 			}
+			keepPlace(job.Processed)
 			ixRetryLater(&st, i, now, reason)
 			return save()
 		}
@@ -328,7 +351,10 @@ func (a *App) ixQueueStep(ctx context.Context, deps ixQueueDeps) error {
 	if item.Phase == "" {
 		item.Phase = ixPhaseMessages
 	}
-	jobID, err := deps.start(ctx, item.GroupID, item.Phase == ixPhaseMessages)
+	if item.ResumeFrom == 0 || item.PassStartedAt == 0 {
+		item.ResumeFrom, item.Carried, item.PassStartedAt = 0, 0, now.UnixMilli()
+	}
+	jobID, err := deps.start(ctx, item.GroupID, item.Phase == ixPhaseMessages, item.ResumeFrom)
 	if err != nil {
 		var permanent ixPermanentError
 		if errors.As(err, &permanent) {
@@ -371,11 +397,15 @@ func ixCall(ctx context.Context, handler http.HandlerFunc, method, path string, 
 // newest down, using Telegram's normal paging; files already in the library
 // are recognised and not downloaded again. messagesOnly records the
 // messages without queueing any download.
-func (a *App) ixStartHistory(ctx context.Context, groupID string, messagesOnly bool) (string, error) {
-	if !messagesOnly {
+func (a *App) ixStartHistory(ctx context.Context, groupID string, messagesOnly bool, resumeFrom int) (string, error) {
+	if !messagesOnly && resumeFrom == 0 {
 		a.ixRequeueGroupFailed(ctx, groupID)
 	}
-	code, out := ixCall(ctx, a.handleHistoryStart, http.MethodPost, "/api/history", map[string]any{"groupId": groupID, "limit": 0, "mode": "pull-older", "minDate": 1, "messagesOnly": messagesOnly}, nil)
+	body := map[string]any{"groupId": groupID, "limit": 0, "mode": "pull-older", "minDate": 1, "messagesOnly": messagesOnly}
+	if resumeFrom > 0 {
+		body["resumeFrom"] = resumeFrom
+	}
+	code, out := ixCall(ctx, a.handleHistoryStart, http.MethodPost, "/api/history", body, nil)
 	if id := toString(out["jobId"]); id != "" && (code == http.StatusOK || toString(out["code"]) == "ALREADY_RUNNING") {
 		return id, nil
 	}
@@ -442,8 +472,12 @@ func (a *App) ixFinishWalk(ctx context.Context, item ixQueueItem, job historyJob
 	}
 	defer tx.Rollback()
 	var marked int64
-	if job.Limit == nil && job.MinDate > 0 && job.MinDate <= 1 && job.StartedAt > 0 {
-		res, err := tx.ExecContext(ctx, `UPDATE ix_messages SET deleted_at=? WHERE group_id=? AND deleted_at=0 AND seen_at<?`, now, group, job.StartedAt)
+	started := job.StartedAt
+	if item.PassStartedAt > 0 && item.PassStartedAt < started {
+		started = item.PassStartedAt // the pass was carried on over several backfills
+	}
+	if job.Limit == nil && job.MinDate > 0 && job.MinDate <= 1 && started > 0 {
+		res, err := tx.ExecContext(ctx, `UPDATE ix_messages SET deleted_at=? WHERE group_id=? AND deleted_at=0 AND seen_at<?`, now, group, started)
 		if err != nil {
 			return err
 		}
@@ -451,7 +485,7 @@ func (a *App) ixFinishWalk(ctx context.Context, item ixQueueItem, job historyJob
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO ix_walks(job_id,group_id,started_at,finished_at,processed,marked_deleted,state) VALUES(?,?,?,?,?,?,?)
 		ON CONFLICT(job_id) DO UPDATE SET finished_at=excluded.finished_at, processed=excluded.processed, marked_deleted=excluded.marked_deleted, state=excluded.state`,
-		job.ID, group, job.StartedAt, now, job.Processed, marked, "done"); err != nil {
+		job.ID, group, started, now, job.Processed, marked, "done"); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -490,4 +524,27 @@ func ixCleanName(name, id string) string {
 		return id
 	}
 	return name
+}
+
+// ixHistoryCursor is the oldest message a backfill has reached: where a
+// walk continues if it has to be started again (0: not known).
+func (a *App) ixHistoryCursor(ctx context.Context, id string) int {
+	if id == "" {
+		return 0
+	}
+	a.historyMu.Lock()
+	if j := a.historyJobs[id]; j != nil {
+		c := j.cursor
+		a.historyMu.Unlock()
+		return c
+	}
+	a.historyMu.Unlock()
+	var payload string
+	if err := a.db.Reader.QueryRowContext(ctx, `SELECT payload FROM tgdl_history_jobs WHERE id=?`, id).Scan(&payload); err == nil {
+		var record historyRecord
+		if json.Unmarshal([]byte(payload), &record) == nil && record.Job.ID == id {
+			return record.Cursor
+		}
+	}
+	return 0
 }

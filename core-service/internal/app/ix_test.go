@@ -159,12 +159,20 @@ func TestIxQueueRescansWholeGroupAndRecordsEveryMessage(t *testing.T) {
 		m.Message = fmt.Sprintf("caption %d", id)
 		return m
 	}
+	var dropped atomic.Bool
+	saved := historyPageRetries
+	historyPageRetries = []time.Duration{time.Millisecond, time.Millisecond}
+	defer func() { historyPageRetries = saved }()
 	page := func(_ context.Context, r telegram.HistoryRequest) (telegram.HistoryPage, error) {
 		minDates.Store(int64(r.MinDate))
 		switch r.OffsetID {
 		case 0:
 			return telegram.HistoryPage{Messages: []tg.MessageClass{ixTestMessage(30, "plain words here"), media(20)}, NextOffset: 20, Entities: &tg.Updates{}}, nil
 		case 20:
+			if !dropped.Swap(true) {
+				// The connection drops once mid-walk: asked again, not failed.
+				return telegram.HistoryPage{}, errors.New("rpcDoRequest: engine forcibly closed: context canceled")
+			}
 			return telegram.HistoryPage{Messages: []tg.MessageClass{media(10)}, NextOffset: 10, Entities: &tg.Updates{}}, nil
 		case 10:
 			return telegram.HistoryPage{Done: true}, nil
@@ -291,7 +299,7 @@ func TestIxQueueRetriesFailuresAtTheBackAndStopsOnPermanentErrors(t *testing.T) 
 	started := []string{}
 	hold := ""
 	deps := ixQueueDeps{
-		start: func(_ context.Context, id string, messagesOnly bool) (string, error) {
+		start: func(_ context.Context, id string, messagesOnly bool, _ int) (string, error) {
 			if !messagesOnly {
 				t.Fatalf("%s: the first pass must record messages only", id)
 			}
@@ -393,7 +401,7 @@ func TestIxQueueSavesEveryGroupsMessagesBeforeFetchingFiles(t *testing.T) {
 	var started []start
 	missing := map[string]int{"a": 5, "b": 0}
 	deps := ixQueueDeps{
-		start: func(_ context.Context, id string, messagesOnly bool) (string, error) {
+		start: func(_ context.Context, id string, messagesOnly bool, _ int) (string, error) {
 			started = append(started, start{id, messagesOnly})
 			jid := fmt.Sprintf("job-%s-%d", id, len(started))
 			jobs[jid] = historyJob{ID: jid, State: "running", GroupID: id}
@@ -845,7 +853,7 @@ func TestIxQueuePriorityGroupsGetBothPassesFirst(t *testing.T) {
 	jobs := map[string]historyJob{}
 	var started []string
 	deps := ixQueueDeps{
-		start: func(_ context.Context, id string, messagesOnly bool) (string, error) {
+		start: func(_ context.Context, id string, messagesOnly bool, _ int) (string, error) {
 			started = append(started, fmt.Sprintf("%s:%v", id, messagesOnly))
 			jid := fmt.Sprintf("job-%d", len(started))
 			jobs[jid] = historyJob{ID: jid, State: "running", GroupID: id}
@@ -893,5 +901,73 @@ func TestIxQueuePriorityGroupsGetBothPassesFirst(t *testing.T) {
 	y := st.Items[ixQueueIndex(&st, "y")]
 	if !y.Priority || y.Phase != ixPhaseFiles || y.Messages != 7 {
 		t.Fatalf("re-added: %+v", y)
+	}
+}
+
+func TestIxQueueCarriesOnAStoppedPassWhereItLeftOff(t *testing.T) {
+	ixBackgroundQueue.Store(false)
+	defer ixBackgroundQueue.Store(true)
+	ctx := context.Background()
+	a, err := newConfiguredTestApp(ctx, Config{DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	now := time.Unix(1_800_000_000, 0)
+	jobs := map[string]historyJob{}
+	var resumes []int
+	var finished ixQueueItem
+	deps := ixQueueDeps{
+		start: func(_ context.Context, id string, _ bool, resumeFrom int) (string, error) {
+			resumes = append(resumes, resumeFrom)
+			jid := fmt.Sprintf("job-%d", len(resumes))
+			jobs[jid] = historyJob{ID: jid, State: "running", GroupID: id}
+			return jid, nil
+		},
+		job:     func(_ context.Context, id string) (historyJob, bool) { j, ok := jobs[id]; return j, ok },
+		cursor:  func(context.Context, string) int { return 4000 },
+		missing: func(context.Context, string) (int, error) { return 0, nil },
+		finish:  func(_ context.Context, item ixQueueItem, _ historyJob) error { finished = item; return nil },
+		now:     func() time.Time { return now },
+	}
+	if _, err = a.ixQueueEdit(ctx, func(st *ixQueueState) error {
+		st.Running = true
+		st.Items = append(st.Items, ixQueueItem{GroupID: "g", Name: "g", State: "waiting", Phase: ixPhaseMessages})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	step := func() ixQueueState {
+		t.Helper()
+		if err := a.ixQueueStep(ctx, deps); err != nil {
+			t.Fatal(err)
+		}
+		st, _ := a.ixLoadQueue(ctx)
+		return st
+	}
+	firstStart := now.UnixMilli()
+	step()
+	msg := "rpcDoRequest: engine forcibly closed: context canceled"
+	jobs["job-1"] = historyJob{ID: "job-1", State: "error", Error: &msg, Processed: 600}
+	now = now.Add(time.Minute)
+	st := step()
+	if it := st.Items[0]; it.ResumeFrom != 4000 || it.Carried != 600 || it.PassStartedAt != firstStart || it.State != "waiting" {
+		t.Fatalf("after the stop: %+v", it)
+	}
+	now = now.Add(2 * time.Minute)
+	step() // retry, carrying on
+	jobs["job-2"] = historyJob{ID: "job-2", State: "done", Processed: 150}
+	st = step()
+	if fmt.Sprint(resumes) != "[0 4000]" {
+		t.Fatalf("resumes=%v", resumes)
+	}
+	if it := st.Items[0]; it.State != "done" || it.Messages != 750 || it.ResumeFrom != 0 {
+		t.Fatalf("done: %+v", it)
+	}
+	if finished.PassStartedAt != firstStart {
+		t.Fatalf("deletions must be judged from the pass's first start: %+v", finished)
+	}
+	if !historyConnectionLost(errors.New(msg)) || historyConnectionLost(errors.New("rpc error code 420: FLOOD_WAIT_30")) {
+		t.Fatal("connection-lost detection")
 	}
 }

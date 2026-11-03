@@ -128,6 +128,8 @@ func (a *App) handleHistoryStart(w http.ResponseWriter, r *http.Request) {
 		MinDate    any `json:"minDate"`
 		// Archive: record messages only, without queueing any download.
 		MessagesOnly bool `json:"messagesOnly"`
+		// Archive: carry on a whole-history walk below this message ID.
+		ResumeFrom any `json:"resumeFrom"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
 		writeJSONError(w, 400, "Invalid JSON body")
@@ -210,12 +212,16 @@ func (a *App) handleHistoryStart(w http.ResponseWriter, r *http.Request) {
 	if offset > 0 {
 		mode = "rescan"
 	}
+	cursor := offset
+	if resume := max(0, int(number(body.ResumeFrom, 0))); resume > 0 && offset == 0 {
+		cursor = resume // the same walk, continued: mode unchanged
+	}
 	buf := make([]byte, 6)
 	if _, err = rand.Read(buf); err != nil {
 		writeJSONError(w, 500, err.Error())
 		return
 	}
-	j := &historyJob{ID: hex.EncodeToString(buf), State: "running", Group: id, GroupID: id, StartedAt: time.Now().UnixMilli(), Mode: mode, OffsetDate: offsetDate, MinDate: minDate, MessagesOnly: body.MessagesOnly, query: id, cursor: offset}
+	j := &historyJob{ID: hex.EncodeToString(buf), State: "running", Group: id, GroupID: id, StartedAt: time.Now().UnixMilli(), Mode: mode, OffsetDate: offsetDate, MinDate: minDate, MessagesOnly: body.MessagesOnly, query: id, cursor: cursor}
 	if limit != 0 {
 		j.Limit = &limit
 	}

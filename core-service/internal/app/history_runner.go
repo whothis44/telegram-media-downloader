@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"strings"
 	"time"
 
 	"github.com/botnick/telegram-media-downloader/core-service/internal/engine"
@@ -129,6 +132,16 @@ func (a *App) runHistory(ctx context.Context, id string) error {
 			limit = min(limit, *j.Limit-j.Processed)
 		}
 		page, err := session.Page(dialog, telegram.HistoryRequest{OffsetID: j.cursor, MinID: j.minID, Limit: limit, OffsetDate: int(j.OffsetDate), MinDate: int(j.MinDate)})
+		// A connection that dropped mid-request is replaced by the client;
+		// ask again instead of ending the whole walk.
+		for try := 0; err != nil && try < len(historyPageRetries) && ctx.Err() == nil && session.Err() == nil && historyConnectionLost(err); try++ {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(historyPageRetries[try]):
+			}
+			page, err = session.Page(dialog, telegram.HistoryRequest{OffsetID: j.cursor, MinID: j.minID, Limit: limit, OffsetDate: int(j.OffsetDate), MinDate: int(j.MinDate)})
+		}
 		if err != nil {
 			return err
 		}
@@ -487,4 +500,23 @@ func (a *App) startHistoryDrain(restart bool) {
 		a.historyDrain = false
 		a.historyMu.Unlock()
 	}
+}
+
+// historyPageRetries are the waits before asking again for a history page
+// whose connection dropped.
+var historyPageRetries = []time.Duration{3 * time.Second, 10 * time.Second, 30 * time.Second, time.Minute, 2 * time.Minute}
+
+// historyConnectionLost: the request died with its connection rather than
+// being answered by Telegram.
+func historyConnectionLost(err error) bool {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	text := err.Error()
+	for _, mark := range []string{"engine forcibly closed", "engine was closed", "connection dead", "broken pipe", "connection reset", "use of closed network connection"} {
+		if strings.Contains(text, mark) {
+			return true
+		}
+	}
+	return false
 }
