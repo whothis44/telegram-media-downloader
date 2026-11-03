@@ -183,6 +183,7 @@ func (a *App) handleIxStatus(w http.ResponseWriter, r *http.Request) {
 		"freeze":    a.ixFreeze(ctx),
 		"held":      a.ixHeldStatus(ctx),
 		"fixity":    a.ixFixityStatus(ctx),
+		"ml":        a.ixMLStatusNow(ctx),
 		"pictures":  a.ixMediaStatus(),
 	}
 	if exportErr != nil {

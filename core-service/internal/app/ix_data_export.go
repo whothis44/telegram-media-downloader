@@ -29,7 +29,7 @@ import (
 // both decoded (raw) and as the original bytes (tl_base64). It is written
 // with the index, into its data folder; see ixDataReadme for the format.
 
-const ixDataFormat = 3
+const ixDataFormat = 4
 
 type ixDataFile struct {
 	DownloadID int64  `json:"download_id"`
@@ -712,7 +712,7 @@ func (a *App) ixWriteData(ctx context.Context, fresh, prev, downloads string, pr
 		"files": map[string]string{
 			"groups": "groups.jsonl", "files": "files.jsonl", "peers": "peers.jsonl", "topics": "topics.jsonl",
 			"near_duplicates": "near_duplicates.jsonl", "messages": "messages/<group folder>.jsonl.gz", "readme": "README.md",
-			"posts": "posts.jsonl", "families": "families.jsonl", "media_clusters": "media_clusters.jsonl", "covered": "covered.jsonl",
+			"posts": "posts.jsonl", "families": "families.jsonl", "media_clusters": "media_clusters.jsonl", "sets": "sets.jsonl", "covered": "covered.jsonl",
 			"entities": "entities.jsonl", "checksums": "manifest-sha256.txt",
 		},
 	}
@@ -747,7 +747,7 @@ func ixCopyFile(src, dst string) error {
 
 const ixDataReadme = "# Telegram archive: data files\n\n" +
 	"Everything the archive knows, in plain files for other tools. Written with the index (nightly, or with " +
-	"\"Write the index to the NAS now\"). Format version 3; `manifest.json` says which version a folder holds.\n\n" +
+	"\"Write the index to the NAS now\"). Format version 4; `manifest.json` says which version a folder holds.\n\n" +
 	"All files are UTF-8 [JSON Lines](https://jsonlines.org/): one JSON object per line. Message files are gzip-compressed.\n\n" +
 	"## Files\n\n" +
 	"| File | One line per |\n|---|---|\n" +
@@ -761,6 +761,7 @@ const ixDataReadme = "# Telegram archive: data files\n\n" +
 	"| `posts.jsonl` | post (an album counts once): `post` (`<group_id>:<first message_id>`), `group_id`, `message_ids`, `album_id`, `date`, `original_date` (a forward's first date), `family`, `role` (`original`, `repost`, `adds`), `files` (`message_id`, `cluster`, `sha256` or `path`, `status`) |\n" +
 	"| `families.jsonl` | repost family: one original post and every repost of it: `family`, `lead_post`, `first_date`, `chats`, `merged` (later posts added files), `posts` (`post`, `group_id`, `date`, `role`), `files` (the merged album in order: `cluster`, `best` file, `introduced_by` post) |\n" +
 	"| `media_clusters.jsonl` | set of files that are the same picture or video (2 files or more): `cluster`, `kind`, `generic` (appears in many unrelated posts: a logo or sticker), `best` (the copy shown: most pixels, then most bytes), `members` (`group_id`, `message_id`, `sha256`, `path`, `status`, `matched_by`) |\n" +
+	"| `sets.jsonl` | media set: posts by different people or chats that share pictures or videos although none holds them all (each family is one post and its reposts): `set`, `anchor_post` (its first post: names it across exports), `first_date`, `last_date`, `chats`, `families`, `posts`, `files` (`cluster`, `best` file, `role`: `core` = in two or more of its families, `member` = in one, `loose` = in one but unlike the core pictures (only when image recognition compared them), `elsewhere` = belongs to `other_set`; `in_families`, `likeness` = cosine to the closest core file, 0 when not compared; `placed_by_person`) |\n" +
 	"| `covered.jsonl` | file not downloaded because the library has it: `group_id`, `message_id`, `how` (`telegram-hashes` or `sampled-parts`: the same bytes as `of_path`, checked on Telegram; `held`: a probable copy of `like` waiting at the back of the queue), `at` |\n" +
 	"| `entities.jsonl` | link, @username, e-mail, phone, wallet or IBAN found in message text: `kind`, `value`, `count`, `chats`, `first`, `last`, `refs` (up to 200 messages: `group`, `msg`, `date`); wallets and IBANs pass their checksums |\n" +
 	"| `manifest-sha256.txt` | `<sha256>  <path>` per stored file (the `sha256sum -c` format, run from the downloads folder) |\n\n" +
@@ -788,7 +789,7 @@ const ixDataReadme = "# Telegram archive: data files\n\n" +
 	"## Duplicates\n\n" +
 	"- Exactly the same file: equal `sha256`, or equal `telegram_file` (the same Telegram upload, for example forwarded to several chats; `kind:id:size`).\n" +
 	"- Same video, different file (re-encoded, resized or cut): `near_duplicates.jsonl`.\n" +
-	"- Same picture or video in any form, folded for viewing: `media_clusters.jsonl`; posts that repeat earlier ones: `families.jsonl`. `family` and `cluster` numbers belong to one export.\n"
+	"- Same picture or video in any form, folded for viewing: `media_clusters.jsonl`; posts that repeat earlier ones: `families.jsonl`; posts that overlap in part: `sets.jsonl`. `family`, `cluster` and `set` numbers belong to one export.\n"
 
 // ixGoneRanges lists a chat's message numbers confirmed gone, as ranges.
 func (a *App) ixGoneRanges(ctx context.Context, groupID string) []string {

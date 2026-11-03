@@ -108,6 +108,8 @@ type ixModel struct {
 	GroupCat  map[string]string
 	Groups    []string
 	Suggest   map[string]ixCatSuggest // a category per chat, from what it posts
+	Sets      []ixMSet                // families that share pictures, oldest first
+	FamSet    []int32                 // family -> set (-1: none)
 }
 
 type ixModelBox struct {
@@ -164,6 +166,9 @@ func (a *App) ixModelStamp(ctx context.Context) string {
 		`SELECT COUNT(*)||'/'||COALESCE(MAX(found_at),0) FROM ix_vdup`,
 		`SELECT COUNT(*)||'/'||COALESCE(MAX(decided_at),0) FROM ix_org_pairs`,
 		`SELECT COUNT(*) FROM ix_org_keeper`,
+		`SELECT COUNT(*)||'/'||COALESCE(MAX(at),0) FROM ix_org_set_posts`,
+		`SELECT COUNT(*)||'/'||COALESCE(MAX(at),0) FROM ix_org_set_items`,
+		`SELECT COUNT(*)||'/'||COALESCE(MAX(at),0) FROM ix_emb`,
 		`SELECT COUNT(*)||'/'||COALESCE(MAX(released_at),0)||'/'||COALESCE(MAX(held_at),0) FROM ix_held`,
 	} {
 		var s string
@@ -479,6 +484,7 @@ func (a *App) ixBuildModel(ctx context.Context) (*ixModel, error) {
 	}
 	ixAssignFamilies(m)
 	m.Suggest = ixContentSuggestions(m)
+	ixAssignSets(m, a.ixLoadSetFixes(ctx), a.ixEmbSim())
 	m.Built = time.Now()
 	m.Took = time.Since(start)
 	return m, nil

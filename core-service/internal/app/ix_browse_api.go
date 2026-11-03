@@ -43,6 +43,7 @@ func registerIxBrowseRoutes(mux *http.ServeMux, a *App) {
 	mux.Handle("POST /api/ix/subst/fetch", h(a.handleIxSubstFetch))
 	mux.Handle("POST /api/ix/freeze/check", h(a.handleIxFreezeCheck))
 	mux.Handle("GET /api/ix/diagnostics", h(a.handleIxDiagnostics))
+	registerIxSetRoutes(mux, a)
 }
 
 func (a *App) handleIxBrowsePage(w http.ResponseWriter, _ *http.Request) {
@@ -54,22 +55,26 @@ func (a *App) handleIxBrowsePage(w http.ResponseWriter, _ *http.Request) {
 // ---------- JSON shapes ----------
 
 type ixJItem struct {
-	ID     int64    `json:"id,omitempty"`
-	Key    string   `json:"key,omitempty"`
-	Type   string   `json:"type"`
-	W      int      `json:"w,omitempty"`
-	H      int      `json:"h,omitempty"`
-	Dur    float64  `json:"dur,omitempty"`
-	Size   int64    `json:"size,omitempty"`
-	Status string   `json:"status"`
-	Group  string   `json:"group"`
-	Msg    int      `json:"msg"`
-	Name   string   `json:"name,omitempty"`
-	Thumb  string   `json:"thumb"`
-	Src    string   `json:"src,omitempty"`
-	Copies int      `json:"copies,omitempty"` // files in its duplicate set
-	New    bool     `json:"new,omitempty"`    // in a merged album: brought by a later post
-	Like   *ixJItem `json:"like,omitempty"`   // held: the saved copy it probably is
+	ID       int64    `json:"id,omitempty"`
+	Key      string   `json:"key,omitempty"`
+	Type     string   `json:"type"`
+	W        int      `json:"w,omitempty"`
+	H        int      `json:"h,omitempty"`
+	Dur      float64  `json:"dur,omitempty"`
+	Size     int64    `json:"size,omitempty"`
+	Status   string   `json:"status"`
+	Group    string   `json:"group"`
+	Msg      int      `json:"msg"`
+	Name     string   `json:"name,omitempty"`
+	Thumb    string   `json:"thumb"`
+	Src      string   `json:"src,omitempty"`
+	Copies   int      `json:"copies,omitempty"`   // files in its duplicate set
+	New      bool     `json:"new,omitempty"`      // in a merged album: brought by a later post
+	Like     *ixJItem `json:"like,omitempty"`     // held: the saved copy it probably is
+	Role     string   `json:"role,omitempty"`     // in a media set: core, member, loose, elsewhere
+	Sim      float32  `json:"sim,omitempty"`      // likeness (image recognition), 0 when not compared
+	Fixed    bool     `json:"fixed,omitempty"`    // a person placed it
+	OtherSet int32    `json:"otherSet,omitempty"` // elsewhere: that set's ID + 1
 }
 
 type ixJPost struct {
@@ -90,21 +95,23 @@ type ixJPost struct {
 }
 
 type ixJCard struct {
-	Kind      string    `json:"kind"` // family, post, media
-	ID        int64     `json:"id"`
-	Date      int64     `json:"date"`
-	Group     string    `json:"group,omitempty"`
-	GroupName string    `json:"groupName,omitempty"`
-	Msg       int       `json:"msg,omitempty"`
-	Caption   string    `json:"caption,omitempty"`
-	Items     []ixJItem `json:"items"`
-	More      int       `json:"more,omitempty"`
-	Posts     int       `json:"posts,omitempty"` // posts in its family
-	Chats     int       `json:"chats,omitempty"`
-	Merged    bool      `json:"merged,omitempty"`
-	Role      string    `json:"role,omitempty"`
-	Family    int32     `json:"family"`
-	Deleted   bool      `json:"deleted,omitempty"`
+	Kind      string         `json:"kind"` // family, post, media
+	ID        int64          `json:"id"`
+	Date      int64          `json:"date"`
+	Group     string         `json:"group,omitempty"`
+	GroupName string         `json:"groupName,omitempty"`
+	Msg       int            `json:"msg,omitempty"`
+	Caption   string         `json:"caption,omitempty"`
+	Items     []ixJItem      `json:"items"`
+	More      int            `json:"more,omitempty"`
+	Posts     int            `json:"posts,omitempty"` // posts in its family
+	Chats     int            `json:"chats,omitempty"`
+	Merged    bool           `json:"merged,omitempty"`
+	Role      string         `json:"role,omitempty"`
+	Family    int32          `json:"family"`
+	Deleted   bool           `json:"deleted,omitempty"`
+	Families  int            `json:"families,omitempty"` // a media set's families
+	Roles     map[string]int `json:"roles,omitempty"`
 }
 
 func ixPathURL(rel string) string {
@@ -273,7 +280,7 @@ func (a *App) handleIxBrowseInfo(w http.ResponseWriter, r *http.Request) {
 		"posts": len(m.Posts), "families": len(m.Families), "items": len(m.Items), "clusters": len(m.Clusters),
 		"repostPosts": dupPosts, "mergedAlbums": merged, "generic": generic, "held": held, "missing": missing,
 		"groups": groups, "categories": ixSortedKeys(cats), "collections": colls, "review": review,
-		"media": a.ixMediaStatus(), "videos": a.ixVdupStatus(),
+		"media": a.ixMediaStatus(), "videos": a.ixVdupStatus(), "sets": len(m.Sets), "ml": a.ixMLStatusNow(ctx),
 	})
 }
 
@@ -304,7 +311,7 @@ func ixParseFeed(r *http.Request) ixFeedQuery {
 	if f.Limit <= 0 || f.Limit > 200 {
 		f.Limit = 60
 	}
-	if f.View != "posts" && f.View != "media" {
+	if f.View != "posts" && f.View != "media" && f.View != "sets" {
 		f.View = "families"
 	}
 	return f
@@ -440,6 +447,9 @@ func (a *App) handleIxBrowseFeed(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	switch f.View {
+	case "sets":
+		list := m.ixSetFeed(f, hits)
+		page(len(list), func(i int) ixJCard { return m.setCard(list[i]) })
 	case "posts":
 		var list []int32
 		for pi := range m.Posts {

@@ -15,9 +15,10 @@
     "peers": "peers.jsonl",
     "posts": "posts.jsonl",
     "readme": "README.md",
+    "sets": "sets.jsonl",
     "topics": "topics.jsonl"
   },
   "format": "telegram-archive",
-  "format_version": 3,
+  "format_version": 4,
   "groups": 4
 }

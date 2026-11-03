@@ -245,6 +245,39 @@ CREATE TABLE IF NOT EXISTS ix_moves (
 );
 `
 
+// ixSchema7: sets (posts that share pictures although none holds them all)
+// with a person's corrections, and image embeddings from an optional image
+// recognition service.
+const ixSchema7 = `
+CREATE TABLE IF NOT EXISTS ix_org_set_posts ( -- a post taken out of sets, or tied to another
+	post  TEXT PRIMARY KEY, -- <group>:<message>
+	mode  TEXT NOT NULL,    -- alone, tie
+	other TEXT NOT NULL DEFAULT '',
+	at    INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS ix_org_set_items ( -- a file said to belong to a set, or not
+	anchor   TEXT NOT NULL, -- the set's first post
+	key      TEXT NOT NULL,
+	decision TEXT NOT NULL, -- in, out
+	at       INTEGER NOT NULL DEFAULT 0,
+	PRIMARY KEY (anchor, key)
+);
+CREATE TABLE IF NOT EXISTS ix_emb ( -- image embeddings (int8, L2-normalised before scaling)
+	key   TEXT PRIMARY KEY,
+	model TEXT NOT NULL,
+	dim   INTEGER NOT NULL,
+	vec   BLOB NOT NULL,
+	at    INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS ix_emb_err (
+	key   TEXT PRIMARY KEY,
+	model TEXT NOT NULL,
+	error TEXT NOT NULL DEFAULT '',
+	tries INTEGER NOT NULL DEFAULT 0,
+	at    INTEGER NOT NULL DEFAULT 0
+);
+`
+
 // ixAddColumns adds the columns a table lacks.
 func ixAddColumns(ctx context.Context, db *sql.DB, table string, cols [][2]string) error {
 	for _, col := range cols {
@@ -266,6 +299,9 @@ func ixEnsureSchema(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	if _, err := db.ExecContext(ctx, ixSchema6); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, ixSchema7); err != nil {
 		return err
 	}
 	if err := ixAddColumns(ctx, db, "ix_moves", [][2]string{{"rows", "TEXT NOT NULL DEFAULT ''"}, {"src_stored", "TEXT NOT NULL DEFAULT ''"}}); err != nil {
