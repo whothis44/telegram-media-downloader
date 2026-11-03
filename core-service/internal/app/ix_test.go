@@ -1,6 +1,8 @@
 package app
 
 import (
+	"bufio"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -580,6 +582,13 @@ func TestIxIndexPagesCategoriesTopicsAndSharedFiles(t *testing.T) {
 		t.Fatalf("sha256: %s", sums)
 	}
 
+	// One message recorded from Telegram, with its full object.
+	full := ixTestMessage(5, "with raw <tags> & entities")
+	full.SetGroupedID(77)
+	if err = a.ixRecordHistoryPage(ctx, "-1000000000101", telegram.HistoryPage{Messages: []tg.MessageClass{full}}); err != nil {
+		t.Fatal(err)
+	}
+
 	// The static copy: written next to the downloads folder, linking to it.
 	if err = os.MkdirAll(a.downloadsDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -610,6 +619,83 @@ func TestIxIndexPagesCategoriesTopicsAndSharedFiles(t *testing.T) {
 	if st := a.ixExportStatus(); st.Running || st.Error != "" || st.Files < 10 {
 		t.Fatalf("status: %+v", st)
 	}
+
+	// The data files for other tools.
+	readLines := func(name string) []map[string]any {
+		t.Helper()
+		f, err := os.Open(filepath.Join(dir, "data", filepath.FromSlash(name)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		var r io.Reader = f
+		if strings.HasSuffix(name, ".gz") {
+			zr, err := gzip.NewReader(f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r = zr
+		}
+		var out []map[string]any
+		sc := bufio.NewScanner(r)
+		sc.Buffer(make([]byte, 1<<20), 1<<24)
+		for sc.Scan() {
+			var m map[string]any
+			if err := json.Unmarshal(sc.Bytes(), &m); err != nil {
+				t.Fatalf("%s: %v: %s", name, err, sc.Text())
+			}
+			out = append(out, m)
+		}
+		return out
+	}
+	var manifest map[string]any
+	raw, err := os.ReadFile(filepath.Join(dir, "data", "manifest.json"))
+	if err != nil || json.Unmarshal(raw, &manifest) != nil || manifest["format_version"] != float64(1) || manifest["downloads_root"] == "" {
+		t.Fatalf("manifest: %s %v", raw, err)
+	}
+	if readme, err := os.ReadFile(filepath.Join(dir, "data", "README.md")); err != nil || !strings.Contains(string(readme), "album_id") {
+		t.Fatal("data README missing")
+	}
+	if gs := readLines("groups.jsonl"); len(gs) != 3 || gs[0]["messages_file"] == "" {
+		t.Fatalf("groups: %v", gs)
+	}
+	if fs := readLines("files.jsonl"); len(fs) != 4 {
+		t.Fatalf("files: %v", fs)
+	}
+	msgs := map[float64]map[string]any{}
+	for _, m := range readLines("messages/g_101.jsonl.gz") {
+		msgs[m["message_id"].(float64)] = m
+	}
+	if len(msgs) != 5 {
+		t.Fatalf("g_101 messages: %v", msgs)
+	}
+	m3, m4, m2, m5 := msgs[3], msgs[4], msgs[2], msgs[5]
+	if m3["album_id"] != "77" || m4["album_id"] != "77" || m3["file_status"] != "downloaded" || m4["file_status"] != "missing" {
+		t.Fatalf("album/status: %v / %v", m3, m4)
+	}
+	if files := m3["files"].([]any); len(files) != 1 || files[0].(map[string]any)["sha256"] != strings.Repeat("cd", 32) || files[0].(map[string]any)["path"] != "sports-1/images/a.jpg" {
+		t.Fatalf("files of 3: %v", m3["files"])
+	}
+	if m2["deleted_at"] == nil || m2["reply_to"] != float64(1) {
+		t.Fatalf("deleted reply: %v", m2)
+	}
+	r5, _ := m5["raw"].(map[string]any)
+	if r5 == nil || r5["_"] != "message" || r5["message"] != "with raw <tags> & entities" || r5["grouped_id"] != float64(77) || m5["tl_base64"] == "" {
+		t.Fatalf("raw message: %v", m5)
+	}
+	if peer, _ := r5["peer_id"].(map[string]any); peer == nil || peer["_"] != "peerChannel" || peer["channel_id"] != float64(42) {
+		t.Fatalf("raw peer: %v", r5["peer_id"])
+	}
+	if m5["text"] != "with raw <tags> & entities" || m5["date_utc"] == "" {
+		t.Fatalf("message 5: %v", m5)
+	}
+	news := readLines("messages/g_103.jsonl.gz")
+	if len(news) != 1 || news[0]["message_id"] != float64(99) || news[0]["file_status"] != "downloaded" {
+		t.Fatalf("file without a captured message: %v", news)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "data", "state.json")); err != nil {
+		t.Fatal("state.json missing")
+	}
 }
 
 func TestIxSmallRules(t *testing.T) {
@@ -632,6 +718,11 @@ func TestIxSmallRules(t *testing.T) {
 	}
 	if got := ixSuggestCategory("sports-3"); got != "sports" {
 		t.Fatalf("suggest: %q", got)
+	}
+	for in, want := range map[string]string{"PeerID": "peer_id", "TTLPeriod": "ttl_period", "GroupedID": "grouped_id", "FwdFrom": "fwd_from", "Message": "message", "ReplyToMsgID": "reply_to_msg_id"} {
+		if got := ixSnake(in); got != want {
+			t.Errorf("snake %s: %s", in, got)
+		}
 	}
 	if !ixNatLess("sports-2", "Sports-10") || ixNatLess("b", "a") {
 		t.Fatal("natural order")
