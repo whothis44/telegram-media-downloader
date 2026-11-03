@@ -148,13 +148,16 @@ type ixDownloadStats struct {
 
 // ixPace is the download pacing of all running accounts together.
 type ixPace struct {
-	Off       bool       `json:"off"`     // pacing switched off in settings
-	Speed     float64    `json:"speed"`   // bytes a second, last 10 s
-	Speed5m   float64    `json:"speed5m"` // last 5 minutes
-	Window    int        `json:"window"`  // file parts allowed in flight
-	Floods1h  int        `json:"floods1h"`
-	Floods24h int        `json:"floods24h"`
-	DCs       []ixPaceDC `json:"dcs"`
+	Off       bool    `json:"off"`     // pacing switched off in settings
+	Speed     float64 `json:"speed"`   // bytes a second, last 10 s
+	Speed5m   float64 `json:"speed5m"` // last 5 minutes
+	Window    int     `json:"window"`  // file parts allowed in flight
+	Floods1h  int     `json:"floods1h"`
+	Floods24h int     `json:"floods24h"`
+	// Premium waits: Telegram's speed limit for accounts without Premium.
+	Premium1h  int        `json:"premium1h"`
+	Premium24h int        `json:"premium24h"`
+	DCs        []ixPaceDC `json:"dcs"`
 }
 
 type ixPaceDC struct {
@@ -180,6 +183,8 @@ func (a *App) ixPaceNow() ixPace {
 		p.Window += s.Window
 		p.Floods1h += s.Floods1h
 		p.Floods24h += s.Floods24h
+		p.Premium1h += s.Premium1h
+		p.Premium24h += s.Premium24h
 		for _, d := range s.DCs {
 			x := ixPaceDC{DCPace: d}
 			if len(all) > 1 {

@@ -11,6 +11,7 @@ import (
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 )
 
 // paceSim drives a pacer against a simulated Telegram: a datacenter that
@@ -371,5 +372,42 @@ func TestUnpacedPartsGoAsBefore(t *testing.T) {
 	defer g.mu.Unlock()
 	if g.until.IsZero() || !g.filesUntil.IsZero() {
 		t.Fatal("a file flood did not close the account gate")
+	}
+}
+
+func TestPremiumWaitsKeepTheWindowAndPauseTries(t *testing.T) {
+	p := newDownloadPacer("")
+	clock := time.Unix(1_800_000_000, 0)
+	p.now = func() time.Time { return clock }
+	p.mu.Lock()
+	d := p.dcLocked(4)
+	d.window, d.trial, d.trialFrom, d.trialLeft = 9, 1, 8, 2
+	d.waited, d.lastUse = true, clock
+	p.mu.Unlock()
+	p.flood(4, true)
+	clock = clock.Add(paceInterval)
+	p.tick()
+	p.mu.Lock()
+	w, trial, ceiling, hold := d.window, d.trial, d.ceiling, d.holdUntil
+	p.mu.Unlock()
+	if w != 8 || trial != 0 || ceiling != 0 || !hold.After(clock) {
+		t.Fatalf("window %d trial %d ceiling %d hold %v", w, trial, ceiling, hold)
+	}
+	st := p.stats()
+	if st.Premium1h != 1 || st.Floods1h != 0 || st.DCs[0].Premium1h != 1 {
+		t.Fatalf("stats %+v", st)
+	}
+}
+
+func TestFloodGuardTellsPremiumWaitsApart(t *testing.T) {
+	withFastFlood(t)
+	g := newFloodGuard()
+	var kinds []bool
+	next := &scriptedInvoker{errs: []error{floodErr(1), &tgerr.Error{Code: 420, Type: "FLOOD_PREMIUM_WAIT", Argument: 1}}}
+	if err := g.invokeFiles(context.Background(), next, nil, nil, func(_ time.Duration, premium bool) { kinds = append(kinds, premium) }); err != nil {
+		t.Fatal(err)
+	}
+	if len(kinds) != 2 || kinds[0] || !kinds[1] {
+		t.Fatalf("kinds %v", kinds)
 	}
 }
