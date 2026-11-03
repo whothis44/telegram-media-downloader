@@ -165,6 +165,17 @@
           "type": "string",
           "contentEncoding": "base64",
           "description": "messages.chatFull as Telegram sent it."
+        },
+        "type": {
+          "enum": [
+            "channel",
+            "supergroup",
+            "forum",
+            "group"
+          ]
+        },
+        "forum": {
+          "type": "boolean"
         }
       }
     },
@@ -212,6 +223,26 @@
         "created_at": {
           "type": "string",
           "description": "When it was downloaded, UTC, \"YYYY-MM-DD HH:MM:SS\"."
+        },
+        "mime": {
+          "type": "string"
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "duration_s": {
+          "type": "number",
+          "minimum": 0
+        },
+        "thumb_stripped_base64": {
+          "type": "string",
+          "contentEncoding": "base64",
+          "description": "Telegram's tiny stripped preview: a JPEG body without its standard header (core.telegram.org/api/files#stripped-thumbnails)."
         }
       }
     },
@@ -319,6 +350,26 @@
                 },
                 "telegram_file": {
                   "$ref": "#/$defs/telegramFile"
+                },
+                "mime": {
+                  "type": "string"
+                },
+                "width": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "height": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "duration_s": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "thumb_stripped_base64": {
+                  "type": "string",
+                  "contentEncoding": "base64",
+                  "description": "Telegram's tiny stripped preview: a JPEG body without its standard header (core.telegram.org/api/files#stripped-thumbnails)."
                 }
               }
             }
@@ -537,6 +588,9 @@
                     }
                   }
                 }
+              },
+              "telegram_file": {
+                "$ref": "#/$defs/telegramFile"
               }
             }
           }

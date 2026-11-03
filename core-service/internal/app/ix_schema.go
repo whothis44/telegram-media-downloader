@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS ix_vdup (
 CREATE TABLE IF NOT EXISTS ix_group_info (
 	group_id     TEXT PRIMARY KEY,
 	title        TEXT    NOT NULL DEFAULT '',
+	kind         TEXT    NOT NULL DEFAULT '', -- channel, supergroup, forum or group
 	about        TEXT    NOT NULL DEFAULT '',
 	username     TEXT    NOT NULL DEFAULT '',
 	members      INTEGER NOT NULL DEFAULT 0,

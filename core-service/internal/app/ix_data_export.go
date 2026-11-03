@@ -17,6 +17,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/botnick/telegram-media-downloader/core-service/internal/telegram"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/version"
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
@@ -39,6 +40,27 @@ type ixDataFile struct {
 	SHA256     string `json:"sha256,omitempty"`
 	TgFile     string `json:"telegram_file,omitempty"` // kind:id:size, as media.telegram_file
 	CreatedAt  string `json:"created_at,omitempty"`
+	ixDataFacts
+}
+
+// ixDataFacts describes a picture or video: what a browser shows before
+// the file itself is opened.
+type ixDataFacts struct {
+	Mime      string  `json:"mime,omitempty"`
+	Width     int     `json:"width,omitempty"`
+	Height    int     `json:"height,omitempty"`
+	DurationS float64 `json:"duration_s,omitempty"`
+	// Telegram's "stripped" thumbnail: a tiny JPEG body without its standard
+	// header (see core.telegram.org/api/files#stripped-thumbnails).
+	ThumbStripped string `json:"thumb_stripped_base64,omitempty"`
+}
+
+func ixFactsOf(f telegram.MediaFacts) ixDataFacts {
+	out := ixDataFacts{Mime: f.Mime, Width: f.Width, Height: f.Height, DurationS: float64(f.DurationMs) / 1000}
+	if len(f.Thumb) > 0 {
+		out.ThumbStripped = base64.StdEncoding.EncodeToString(f.Thumb)
+	}
+	return out
 }
 
 type ixDataEdit struct {
@@ -58,6 +80,7 @@ type ixDataMedia struct {
 	Name   string `json:"name,omitempty"`
 	Size   int64  `json:"size,omitempty"`
 	TgFile string `json:"telegram_file,omitempty"`
+	ixDataFacts
 }
 
 type ixDataMessage struct {
@@ -222,7 +245,8 @@ func (a *App) ixDataVersion(ctx context.Context, meta ixGroupMeta) string {
 // ixGroupFiles reads a group's downloaded files, by message.
 func (a *App) ixGroupFiles(ctx context.Context, groupID string) (map[int][]ixDataFile, []ixDataFile, error) {
 	rows, err := a.db.Reader.QueryContext(ctx, `SELECT id,message_id,COALESCE(file_name,''),COALESCE(file_size,0),COALESCE(file_type,''),file_path,COALESCE(file_hash,''),
-		COALESCE(telegram_media_kind,''),COALESCE(telegram_media_id,''),COALESCE(telegram_media_size,0),COALESCE(CAST(created_at AS TEXT),'')
+		COALESCE(telegram_media_kind,''),COALESCE(telegram_media_id,''),COALESCE(telegram_media_size,0),COALESCE(CAST(created_at AS TEXT),''),
+		COALESCE(telegram_mime,''),COALESCE(media_width,0),COALESCE(media_height,0),COALESCE(media_duration_ms,0),telegram_thumb
 		FROM downloads WHERE group_id=? AND message_id>0 AND file_type IS NOT 'stories' AND file_path IS NOT NULL AND file_path<>'' AND (status IS NULL OR status='completed') ORDER BY message_id,id`, groupID)
 	if err != nil {
 		return nil, nil, err
@@ -234,9 +258,15 @@ func (a *App) ixGroupFiles(ctx context.Context, groupID string) (map[int][]ixDat
 		var f ixDataFile
 		var msg int
 		var kind, id string
-		var size int64
-		if err := rows.Scan(&f.DownloadID, &msg, &f.Name, &f.Size, &f.Type, &f.Path, &f.SHA256, &kind, &id, &size, &f.CreatedAt); err != nil {
+		var size, durationMs int64
+		var thumb []byte
+		if err := rows.Scan(&f.DownloadID, &msg, &f.Name, &f.Size, &f.Type, &f.Path, &f.SHA256, &kind, &id, &size, &f.CreatedAt,
+			&f.Mime, &f.Width, &f.Height, &durationMs, &thumb); err != nil {
 			return nil, nil, err
+		}
+		f.DurationS = float64(durationMs) / 1000
+		if len(thumb) > 0 {
+			f.ThumbStripped = base64.StdEncoding.EncodeToString(thumb)
 		}
 		if f.Path = ixNormPath(f.Path); f.Path == "" {
 			continue
@@ -324,6 +354,9 @@ func (a *App) ixWriteGroupMessages(ctx context.Context, meta ixGroupMeta, files 
 				var msg tg.Message
 				if msg.Decode(&bin.Buffer{Buf: tl}) == nil {
 					m.Raw = ixTL(&msg)
+					if att, err := telegram.MessageAttachment(&msg); err == nil && m.Media != nil {
+						m.Media.ixDataFacts = ixFactsOf(att.Facts)
+					}
 				}
 			}
 		}
@@ -347,7 +380,7 @@ func (a *App) ixWriteGroupMessages(ctx context.Context, meta ixGroupMeta, files 
 	sort.Ints(orphans)
 	for _, id := range orphans {
 		m := ixDataMessage{GroupID: meta.ID, ChatID: chat, MessageID: id, Files: files[id], FileStatus: "downloaded"}
-		m.Media = &ixDataMedia{Type: m.Files[0].Type, Name: m.Files[0].Name, Size: m.Files[0].Size, TgFile: m.Files[0].TgFile}
+		m.Media = &ixDataMedia{Type: m.Files[0].Type, Name: m.Files[0].Name, Size: m.Files[0].Size, TgFile: m.Files[0].TgFile, ixDataFacts: m.Files[0].ixDataFacts}
 		if err := enc.Encode(m); err != nil {
 			return n, err
 		}
@@ -387,6 +420,8 @@ type ixDataGroup struct {
 	File       string         `json:"messages_file"`
 	// From Telegram's chat details, as last read.
 	Title      string `json:"telegram_title,omitempty"`
+	Kind       string `json:"type,omitempty"` // channel, supergroup, forum or group
+	Forum      bool   `json:"forum,omitempty"`
 	About      string `json:"about,omitempty"`
 	Username   string `json:"username,omitempty"`
 	Members    int    `json:"members,omitempty"`
@@ -469,8 +504,9 @@ func (a *App) ixWriteData(ctx context.Context, fresh, prev, downloads string, pr
 		g := ixDataGroup{GroupID: meta.ID, ChatID: ixBare(meta.ID), Name: meta.Name, Category: meta.Category, Configured: meta.Configured,
 			Filters: normalizedGroupFilters(meta.Filters), Messages: n, Files: len(files), LastWalk: walks[meta.ID], File: name}
 		var info []byte
-		_ = a.db.Reader.QueryRowContext(ctx, `SELECT title, about, username, members, pinned_id, linked_group, tg_count, tg_count_at, finished_at, tl FROM ix_group_info WHERE group_id=?`, meta.ID).
-			Scan(&g.Title, &g.About, &g.Username, &g.Members, &g.PinnedID, &g.Linked, &g.TgCount, &g.TgCountAt, &g.FinishedAt, &info)
+		_ = a.db.Reader.QueryRowContext(ctx, `SELECT title, kind, about, username, members, pinned_id, linked_group, tg_count, tg_count_at, finished_at, tl FROM ix_group_info WHERE group_id=?`, meta.ID).
+			Scan(&g.Title, &g.Kind, &g.About, &g.Username, &g.Members, &g.PinnedID, &g.Linked, &g.TgCount, &g.TgCountAt, &g.FinishedAt, &info)
+		g.Forum = g.Kind == "forum"
 		if len(info) > 0 {
 			g.InfoBase64 = base64.StdEncoding.EncodeToString(info)
 		}
@@ -564,6 +600,7 @@ func (a *App) ixWriteData(ctx context.Context, fresh, prev, downloads string, pr
 			DownloadID int64   `json:"download_id,omitempty"`
 			Path       string  `json:"path"`
 			SHA256     string  `json:"sha256,omitempty"`
+			TgFile     string  `json:"telegram_file,omitempty"`
 			Size       int64   `json:"size"`
 			Duration   float64 `json:"duration_s"`
 			Places     []place `json:"places"`
@@ -601,6 +638,9 @@ func (a *App) ixWriteData(ctx context.Context, fresh, prev, downloads string, pr
 			index := map[string]int{}
 			for j, m := range c.Members {
 				mm := member{DownloadID: m.DownloadID, Path: ixNormPath(m.Path), Size: m.Size, Duration: m.Duration, Places: []place{}}
+				if m.DownloadID > 0 {
+					_ = a.db.Reader.QueryRowContext(ctx, `SELECT CASE WHEN COALESCE(telegram_media_id,'')<>'' THEN telegram_media_kind||':'||telegram_media_id||':'||COALESCE(telegram_media_size,0) ELSE '' END FROM downloads WHERE id=?`, m.DownloadID).Scan(&mm.TgFile)
+				}
 				if strings.HasPrefix(m.Key, "h:") {
 					mm.SHA256 = strings.TrimPrefix(m.Key, "h:")
 				}
@@ -679,12 +719,12 @@ const ixDataReadme = "# Telegram archive: data files\n\n" +
 	"## Files\n\n" +
 	"| File | One line per |\n|---|---|\n" +
 	"| `manifest.json` | (one object) export time, app version, `downloads_root`: the downloads folder as the server saw it |\n" +
-	"| `groups.jsonl` | chat: `group_id`, `chat_id`, `name`, `category`, `download_settings`, counts, `messages_file`; from Telegram's chat details: `telegram_title`, `about`, `username`, `members`, `pinned_message_id`, `discussion_group_id`, `telegram_message_count` (what Telegram says the chat holds; compare with `messages`), `info_tl_base64`; `finished_at` when marked finished |\n" +
+	"| `groups.jsonl` | chat: `group_id`, `chat_id`, `name`, `category`, `download_settings`, counts, `messages_file`; from Telegram's chat details: `telegram_title`, `type` (channel, supergroup, forum, group), `forum`, `about`, `username`, `members`, `pinned_message_id`, `discussion_group_id`, `telegram_message_count` (what Telegram says the chat holds; compare with `messages`), `info_tl_base64`; `finished_at` when marked finished |\n" +
 	"| `messages/g_<chat_id>.jsonl.gz` | message of that chat, oldest first |\n" +
-	"| `files.jsonl` | downloaded file: `group_id`, `download_id`, `path`, `size`, `type`, `sha256`, `telegram_file`, `created_at` |\n" +
+	"| `files.jsonl` | downloaded file: `group_id`, `download_id`, `path`, `size`, `type`, `sha256`, `telegram_file`, `created_at`, and when known `mime`, `width`, `height`, `duration_s`, `thumb_stripped_base64` |\n" +
 	"| `peers.jsonl` | sender or source: `peer_id` (`user:<id>`, `channel:<id>`, `chat:<id>`), `name`, `username` |\n" +
 	"| `topics.jsonl` | forum topic: `group_id`, `topic_id`, `title` |\n" +
-	"| `near_duplicates.jsonl` | set of videos that look the same (re-encodes, clips): `kind` (`same`, `mixed`), `members` |\n\n" +
+	"| `near_duplicates.jsonl` | set of videos that look the same (re-encodes, clips): `kind` (`same`, `mixed`); `members` (largest first: `download_id`, `path`, `sha256`, `telegram_file`, `size`, `duration_s`, `places` = the messages it appears in); `pairs` (`a`, `b` = member indexes, `kind` `same` or `clip`, `score`, `offset_s` = where the clip starts) |\n\n" +
 	"## IDs\n\n" +
 	"- `group_id` is the downloader's marked chat ID (channels and supergroups: `-100` followed by `chat_id`). `chat_id` is Telegram's own ID.\n" +
 	"- A message is identified by (`group_id`, `message_id`).\n" +
@@ -694,7 +734,7 @@ const ixDataReadme = "# Telegram archive: data files\n\n" +
 	"- `sender` and `forwarded_from` are `peer_id`s (see `peers.jsonl`); `forwarded_from` can also be a plain name, or `hidden`.\n\n" +
 	"## Messages\n\n" +
 	"`date`, `edit_date`, `forwarded_date`: Unix seconds (UTC). `first_seen`, `last_seen`, `deleted_at`, `recorded_at`: Unix milliseconds, when the archive saw it.\n\n" +
-	"- `media`: what the message carries on Telegram (`type`: photo, video, document, audio, voice, gif, sticker...; `name`; `size` in bytes; `telegram_file`), or null.\n" +
+	"- `media`: what the message carries on Telegram (`type`: photo, video, document, audio, voice, gif, sticker...; `name`; `size` in bytes; `telegram_file`; `mime`, `width`, `height`, `duration_s`; `thumb_stripped_base64`: Telegram's tiny \"stripped\" preview, a JPEG body without its standard header, see core.telegram.org/api/files#stripped-thumbnails), or null.\n" +
 	"- `file_status`: `downloaded` (see `files`), `missing` (wanted but not downloaded), `not_wanted` (switched off for the chat), `no_media`.\n" +
 	"- `files`: the downloaded file(s), same fields as `files.jsonl`.\n" +
 	"- `edits`: earlier versions of the text, as they were seen.\n" +

@@ -178,7 +178,7 @@ func TestIxDataSample(t *testing.T) {
 	m = post(forum, 202, 2400, "Thanks! Bringing a saw on Sunday.")
 	m.FromID, m.ReplyTo = user(1002), &tg.MessageReplyHeader{ForumTopic: true, ReplyToMsgID: 201, ReplyToTopID: 14}
 	add(forum, m)
-	m = post(forum, 203, 3000, "Same recap the club posted, for anyone not in the channel.")
+	m = post(forum, 203, 9000, "Same recap the club posted, for anyone not in the channel.")
 	m.FromID, m.ReplyTo = user(1001), &tg.MessageReplyHeader{ForumTopic: true, ReplyToMsgID: 14}
 	m.FwdFrom = tg.MessageFwdHeader{FromID: &tg.PeerChannel{ChannelID: 1811230001}, Date: day + 7200, ChannelPost: 105}
 	m.Media = video(5200000000000000105, 48_211_337, 94.5, "spring-ride-recap.mp4") // the very same Telegram file
@@ -256,13 +256,17 @@ func TestIxDataSample(t *testing.T) {
 		t.Helper()
 		att := media[group+"/"+ixItoa(int64(message))]
 		h := hash(path)
-		var tk, tid any
-		var tsize any
-		if att.Identity.ID != "" {
+		var tk, tid, tsize, mime, w, hgt, dur, thumb any
+		if att.Identity.ID != "" { // downloaded by the current downloader: Telegram's facts are kept
 			tk, tid, tsize = att.Identity.Kind, att.Identity.ID, att.Identity.Size
+			mime, w, hgt, dur = att.Facts.Mime, att.Facts.Width, att.Facts.Height, att.Facts.DurationMs
+			if len(att.Facts.Thumb) > 0 {
+				thumb = att.Facts.Thumb
+			}
 		}
-		exec(`INSERT INTO downloads(group_id,group_name,message_id,file_name,file_size,file_type,file_path,status,created_at,file_hash,telegram_media_kind,telegram_media_id,telegram_media_size)
-			VALUES(?,?,?,?,?,?,?,'completed',?,?,?,?,?)`, group, "", message, filepath.Base(path), size, kind, path, at, h, tk, tid, tsize)
+		exec(`INSERT INTO downloads(group_id,group_name,message_id,file_name,file_size,file_type,file_path,status,created_at,file_hash,telegram_media_kind,telegram_media_id,telegram_media_size,
+			telegram_mime,media_width,media_height,media_duration_ms,telegram_thumb)
+			VALUES(?,?,?,?,?,?,?,'completed',?,?,?,?,?,?,?,?,?,?)`, group, "", message, filepath.Base(path), size, kind, path, at, h, tk, tid, tsize, mime, w, hgt, dur, thumb)
 		return h
 	}
 	file(club, 102, "Riverside Cycling Club/images/2026-03-14_102.jpg", "photo", 412000, "2026-03-14 13:01:07")
@@ -277,8 +281,10 @@ func TestIxDataSample(t *testing.T) {
 			file(club, 120+i, fmt.Sprintf("Riverside Cycling Club/videos/finish-line-%d.mp4", i-6), "video", 6_000_000+int64(i)*250_000, "2026-03-14 17:11:00")
 		}
 	}
-	exec(`INSERT INTO downloads(group_id,group_name,message_id,file_name,file_size,file_type,file_path,status,created_at,file_hash,telegram_media_kind,telegram_media_id,telegram_media_size)
-		SELECT ?,'',203,file_name,file_size,file_type,file_path,'completed','2026-03-14 12:51:02',file_hash,telegram_media_kind,telegram_media_id,telegram_media_size FROM downloads WHERE group_id=? AND message_id=105`, forum, club)
+	exec(`INSERT INTO downloads(group_id,group_name,message_id,file_name,file_size,file_type,file_path,status,created_at,file_hash,telegram_media_kind,telegram_media_id,telegram_media_size,
+			telegram_mime,media_width,media_height,media_duration_ms,telegram_thumb)
+		SELECT ?,'',203,file_name,file_size,file_type,file_path,'completed','2026-03-14 14:31:02',file_hash,telegram_media_kind,telegram_media_id,telegram_media_size,
+			telegram_mime,media_width,media_height,media_duration_ms,telegram_thumb FROM downloads WHERE group_id=? AND message_id=105`, forum, club)
 	clip := file(forum, 204, "Trail Builders Forum/videos/descent-clip.mp4", "video", 9_870_112, "2026-03-14 13:00:40")
 	file(forum, 301, "Trail Builders Forum/documents/voice_5500000000000000301.ogg", "document", 61_440, "2026-03-14 13:31:00")
 	// Ottawa Maker Space: downloaded by the downloader before the archive
@@ -327,17 +333,17 @@ func TestIxDataSample(t *testing.T) {
 	// Chat details as Telegram gives them, the message count, and one chat
 	// marked finished.
 	for _, g := range []struct {
-		id, title, about, username, linked string
-		members, pinned, count             int
-		finished                           int64
+		id, title, kind, about, username, linked string
+		members, pinned, count                   int
+		finished                                 int64
 	}{
-		{club, "Riverside Cycling Club", "Group rides every Saturday, 9:00 at the boathouse. Routes, photos and ride reports.", "riversidecc", discussion, 412, 101, 21, 0},
-		{forum, "Trail Builders Forum", "Trail work days, conditions and repairs.", "", "", 88, 0, 10, 0},
-		{discussion, "Riverside Cycling Club chat", "", "", "", 97, 0, 2, 0},
-		{makers, "Ottawa Maker Space", "", "", "", 230, 0, 0, seen + 3_600_000},
+		{club, "Riverside Cycling Club", "channel", "Group rides every Saturday, 9:00 at the boathouse. Routes, photos and ride reports.", "riversidecc", discussion, 412, 101, 21, 0},
+		{forum, "Trail Builders Forum", "forum", "Trail work days, conditions and repairs.", "", "", 88, 0, 10, 0},
+		{discussion, "Riverside Cycling Club chat", "supergroup", "", "", "", 97, 0, 2, 0},
+		{makers, "Ottawa Maker Space", "supergroup", "", "", "", 230, 0, 0, seen + 3_600_000},
 	} {
-		exec(`INSERT INTO ix_group_info(group_id,title,about,username,members,pinned_id,linked_group,info_at,tg_count,tg_count_at,finished_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-			g.id, g.title, g.about, g.username, g.members, g.pinned, g.linked, seen, g.count, seen, g.finished)
+		exec(`INSERT INTO ix_group_info(group_id,title,kind,about,username,members,pinned_id,linked_group,info_at,tg_count,tg_count_at,finished_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+			g.id, g.title, g.kind, g.about, g.username, g.members, g.pinned, g.linked, seen, g.count, seen, g.finished)
 	}
 
 	exec(`INSERT INTO ix_walks(job_id,group_id,started_at,finished_at,processed,marked_deleted,state) VALUES('sample-1',?,?,?,10,1,'done'),('sample-2',?,?,?,13,0,'done')`,

@@ -14,6 +14,7 @@ import (
 // that holds the comments on its posts.
 type ChatInfo struct {
 	Title    string
+	Kind     string // channel, supergroup, forum or group
 	About    string
 	Username string
 	Members  int
@@ -52,6 +53,14 @@ func (a *Account) ChatInfo(ctx context.Context, dialog Dialog) (ChatInfo, error)
 			switch {
 			case c.ID == peer.ChannelID:
 				info.Title, info.Username = c.Title, c.Username
+				switch {
+				case c.Forum:
+					info.Kind = "forum"
+				case c.Megagroup:
+					info.Kind = "supergroup"
+				default:
+					info.Kind = "channel"
+				}
 			case hasLinked && c.ID == linked:
 				hash, _ := c.GetAccessHash()
 				info.Linked = &Dialog{peer: &tg.InputPeerChannel{ChannelID: c.ID, AccessHash: hash}, ID: strconv.FormatInt(-1000000000000-c.ID, 10), Name: c.Title, Username: c.Username, Type: "supergroup"}
@@ -70,7 +79,7 @@ func (a *Account) ChatInfo(ctx context.Context, dialog Dialog) (ChatInfo, error)
 		info.PinnedID, _ = cf.GetPinnedMsgID()
 		for _, raw := range full.Chats {
 			if c, ok := raw.(*tg.Chat); ok && c.ID == peer.ChatID {
-				info.Title, info.Members = c.Title, c.ParticipantsCount
+				info.Title, info.Members, info.Kind = c.Title, c.ParticipantsCount, "group"
 			}
 		}
 	default:
