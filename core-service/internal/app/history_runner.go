@@ -170,6 +170,9 @@ func (a *App) runHistory(ctx context.Context, id string) error {
 				pause := time.Duration(0)
 				if longEvery > 0 && current.Processed%longEvery == 0 {
 					pause = 60 * time.Second
+					if current.MessagesOnly {
+						pause = 10 * time.Second // reads only: one page per short pause already
+					}
 				} else if shortEvery > 0 && current.Processed%shortEvery == 0 {
 					pause = 2 * time.Second
 				}

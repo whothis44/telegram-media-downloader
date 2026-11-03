@@ -383,7 +383,7 @@ func TestIxQueueRetriesFailuresAtTheBackAndStopsOnPermanentErrors(t *testing.T) 
 	}
 }
 
-func TestIxQueueSavesEveryGroupsMessagesBeforeFetchingFiles(t *testing.T) {
+func TestIxQueueRunsMessagesAndFilesInTwoLanes(t *testing.T) {
 	ixBackgroundQueue.Store(false)
 	defer ixBackgroundQueue.Store(true)
 	ctx := context.Background()
@@ -394,16 +394,12 @@ func TestIxQueueSavesEveryGroupsMessagesBeforeFetchingFiles(t *testing.T) {
 	defer a.Close()
 	now := time.Unix(1_800_000_000, 0)
 	jobs := map[string]historyJob{}
-	type start struct {
-		id           string
-		messagesOnly bool
-	}
-	var started []start
+	var started []string
 	missing := map[string]int{"a": 5, "b": 0}
 	deps := ixQueueDeps{
 		start: func(_ context.Context, id string, messagesOnly bool, _ int) (string, error) {
-			started = append(started, start{id, messagesOnly})
-			jid := fmt.Sprintf("job-%s-%d", id, len(started))
+			started = append(started, fmt.Sprintf("%s:%v", id, messagesOnly))
+			jid := fmt.Sprintf("job-%d", len(started))
 			jobs[jid] = historyJob{ID: jid, State: "running", GroupID: id}
 			return jid, nil
 		},
@@ -431,40 +427,33 @@ func TestIxQueueSavesEveryGroupsMessagesBeforeFetchingFiles(t *testing.T) {
 		}
 		return st
 	}
-	finish := func(processed int) {
-		last := started[len(started)-1]
-		jid := fmt.Sprintf("job-%s-%d", last.id, len(started))
-		j := jobs[jid]
-		j.State, j.Processed, j.Downloaded = "done", processed, 1
-		jobs[jid] = j
+	finishAll := func(processed int) {
+		for id, j := range jobs {
+			if j.State == "running" {
+				j.State, j.Processed, j.Downloaded = "done", processed, 1
+				jobs[id] = j
+			}
+		}
 	}
-	step() // a: messages
-	finish(40)
-	st := step() // a's messages saved, 5 files missing: files pass later; b's messages next
-	if st.Items[0].Phase != ixPhaseFiles || st.Items[0].State != "waiting" || st.Items[0].Messages != 40 || st.Items[0].Missing != 5 || st.Items[0].MessagesAt == 0 {
-		t.Fatalf("after a's messages: %+v", st.Items[0])
+	st := step() // one messages pass at a time: a
+	if st.Items[0].State != "running" || st.Items[1].State != "waiting" {
+		t.Fatalf("start: %+v", st.Items)
 	}
-	st = step()
-	if st.Items[1].State != "running" || st.Items[0].State != "waiting" {
-		t.Fatalf("b's messages must come before a's files: %+v", st.Items)
+	finishAll(40)
+	st = step() // a's messages saved: b's messages and a's files run side by side
+	if it := st.Items[0]; it.Phase != ixPhaseFiles || it.State != "running" || it.Messages != 40 || it.Missing != 5 || it.MessagesAt == 0 {
+		t.Fatalf("a: %+v", it)
 	}
-	finish(7)
-	st = step() // b: nothing missing, done after one pass
-	if st.Items[1].State != "done" || st.Items[1].Messages != 7 {
+	if st.Items[1].State != "running" {
 		t.Fatalf("b: %+v", st.Items[1])
 	}
-	st = step() // now a's files
-	if st.Items[0].State != "running" {
-		t.Fatalf("a's files: %+v", st.Items[0])
-	}
-	finish(40)
+	finishAll(7)
 	st = step()
-	if st.Items[0].State != "done" || st.Items[0].Missing != 5 || st.Items[0].Downloaded != 1 {
-		t.Fatalf("a done: %+v", st.Items[0])
+	if st.Items[0].State != "done" || st.Items[0].Downloaded != 1 || st.Items[1].State != "done" || st.Items[1].Messages != 7 || st.Running {
+		t.Fatalf("done: %+v", st)
 	}
-	want := []start{{"a", true}, {"b", true}, {"a", false}}
-	if fmt.Sprint(started) != fmt.Sprint(want) {
-		t.Fatalf("starts=%v want %v", started, want)
+	if want := "a:true b:true a:false"; strings.Join(started, " ") != want {
+		t.Fatalf("starts=%v want %s", started, want)
 	}
 }
 
@@ -840,7 +829,7 @@ func TestIxDownloadStatsExplainFailures(t *testing.T) {
 	}
 }
 
-func TestIxQueuePriorityGroupsGetBothPassesFirst(t *testing.T) {
+func TestIxQueuePriorityGroupsGoFirstInEachLane(t *testing.T) {
 	ixBackgroundQueue.Store(false)
 	defer ixBackgroundQueue.Store(true)
 	ctx := context.Background()
@@ -877,13 +866,15 @@ func TestIxQueuePriorityGroupsGetBothPassesFirst(t *testing.T) {
 		if err := a.ixQueueStep(ctx, deps); err != nil {
 			t.Fatal(err)
 		}
-		j := jobs[fmt.Sprintf("job-%d", len(started))]
-		if j.State == "running" {
-			j.State, j.Processed = "done", 5
-			jobs[j.ID] = j
+		for id, j := range jobs {
+			if j.State == "running" {
+				j.State, j.Processed = "done", 5
+				jobs[id] = j
+			}
 		}
 	}
-	if want := "p:true p:false x:true x:false"; strings.Join(started, " ") != want {
+	// The priority group goes first in each lane.
+	if want := "p:true x:true p:false x:false"; strings.Join(started, " ") != want {
 		t.Fatalf("order %v, want %s", started, want)
 	}
 	// Re-adding a queued group keeps its progress and only raises priority.
