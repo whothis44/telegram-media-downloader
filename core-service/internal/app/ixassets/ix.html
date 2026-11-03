@@ -165,14 +165,14 @@ function viewRescan() {
 <button class="b" data-act="q-clear-finished" ${counts.done + counts.failed ? '' : 'disabled'}>Remove finished</button><button class="b" data-act="q-clear" ${items.length ? '' : 'disabled'}>Clear queue</button>
 <span class="muted">Retries: ${q.maxAttempts ? 'up to ' + q.maxAttempts : 'unlimited'}</span></div>`;
   if (items.length) {
-    h += `<div class="list" style="margin-bottom:12px"><table><tr><th>#</th><th>Group</th><th>Step</th><th>Messages saved</th><th>Files missing</th><th>Files queued</th><th>Tries</th><th></th></tr>`;
+    h += `<div class="list" style="margin-bottom:12px"><table><tr><th>#</th><th>Group</th><th>Step</th><th>Messages saved</th><th>Files missing</th><th title="New downloads this group's files pass has added to the download queue">Files queued</th><th>Tries</th><th></th></tr>`;
     items.forEach((it, i) => {
       const when = (it.state === 'waiting' && it.nextAt > Date.now() ? ` · retry ${esc(fmtTime(it.nextAt))}` : '') + (it.resumeFrom && it.state !== 'done' ? ` · continues below message #${it.resumeFrom}` : '');
       const files = it.phase === 'files';
       const label = { waiting: files ? 'files: waiting' : 'messages: waiting', running: files ? 'fetching files' : 'saving messages', done: 'done', failed: 'failed' }[it.state] || it.state;
       const msgs = it.messagesAt ? it.messages : (it.state === 'running' && !files) || (it.state === 'done' && !it.phase) ? (it.carried || 0) + it.processed : it.carried ? it.carried : null;
       const missing = it.messagesAt ? it.missing : null;
-      h += `<tr><td class="n">${i + 1}</td><td>${it.priority ? '<b title="Goes first, files included">★</b> ' : ''}${esc(it.name)}${it.error ? `<div class="muted bad">${esc(it.error)}</div>` : ''}</td><td><span class="pill ${esc(it.state)}">${esc(label)}</span><span class="muted">${when}</span></td><td class="n">${msgs === null ? '<span class="muted">–</span>' : fmtNum(msgs)}</td><td class="n">${missing === null ? '<span class="muted">–</span>' : fmtNum(missing)}</td><td class="n">${files || !it.phase ? fmtNum(it.downloaded) : '<span class="muted">–</span>'}</td><td class="n">${it.attempts || 0}</td>
+      h += `<tr><td class="n">${i + 1}</td><td>${it.priority ? '<b title="Goes first, files included">★</b> ' : ''}${esc(it.name)}${it.error ? `<div class="muted bad">${esc(it.error)}</div>` : ''}</td><td><span class="pill ${esc(it.state)}">${esc(label)}</span><span class="muted">${when}</span></td><td class="n">${msgs === null ? '<span class="muted">–</span>' : fmtNum(msgs)}</td><td class="n">${missing === null ? '<span class="muted">–</span>' : fmtNum(missing)}</td><td class="n">${(files && it.state !== 'waiting') || !it.phase ? fmtNum(it.downloaded) : '<span class="muted">–</span>'}</td><td class="n">${it.attempts || 0}</td>
 <td>${it.state === 'running' || it.state === 'waiting' ? `<button class="mini" data-act="q-priority" data-id="${esc(it.groupId)}" data-on="${it.priority ? '' : '1'}">${it.priority ? 'Normal order' : '★ First'}</button>` : `<button class="mini" data-act="q-retry" data-id="${esc(it.groupId)}">Run again</button>`}<button class="mini" data-act="q-remove" data-id="${esc(it.groupId)}">${it.state === 'running' ? 'Stop' : 'Remove'}</button></td></tr>`;
     });
     h += `</table></div>`;
