@@ -216,9 +216,15 @@ func (a *App) ixGroups(ctx context.Context) ([]ixGroupMeta, error) {
 		}
 		out = append(out, ixGroupMeta{ID: id, Name: name, Category: ixCategoryOf(g), Filters: filters, Configured: true})
 	}
-	rows, err := a.db.Reader.QueryContext(ctx, `SELECT group_id, MAX(name) FROM (
-		SELECT group_id, COALESCE(group_name,'') AS name FROM downloads WHERE message_id>0 AND file_type IS NOT 'stories' GROUP BY group_id
-		UNION ALL SELECT group_id, '' FROM ix_messages GROUP BY group_id) GROUP BY group_id`)
+	// A chat known only from old files or from the archive (a channel's
+	// discussion group, say) is named as the downloader or Telegram last
+	// named it.
+	rows, err := a.db.Reader.QueryContext(ctx, `SELECT g.group_id, COALESCE(NULLIF(MAX(g.name),''), i.title,
+			(SELECT p.name FROM ix_peers p WHERE p.name<>'' AND p.peer_id IN ('channel:'||(-1000000000000-CAST(g.group_id AS INTEGER)), 'chat:'||(-CAST(g.group_id AS INTEGER))) LIMIT 1), '')
+		FROM (SELECT group_id, COALESCE(group_name,'') AS name FROM downloads WHERE message_id>0 AND file_type IS NOT 'stories' GROUP BY group_id
+			UNION ALL SELECT group_id, '' FROM ix_messages GROUP BY group_id) g
+		LEFT JOIN ix_group_info i ON i.group_id=g.group_id AND i.title<>''
+		GROUP BY g.group_id`)
 	if err != nil {
 		return nil, err
 	}

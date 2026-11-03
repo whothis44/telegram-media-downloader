@@ -23,6 +23,7 @@ type HistoryPage struct {
 	Entities   *tg.Updates
 	NextOffset int
 	Done       bool
+	Count      int // messages Telegram reports for the whole chat (or thread)
 }
 
 func (a *Account) HistoryPage(ctx context.Context, dialog Dialog, request HistoryRequest) (HistoryPage, error) {
@@ -62,6 +63,7 @@ func fetchHistoryPage(ctx context.Context, api historyAPI, dialog Dialog, reques
 		return page, err
 	}
 	page.Entities = &tg.Updates{Users: users, Chats: chats}
+	page.Count = historyCount(result)
 	page.Messages = make([]tg.MessageClass, 0, len(raw))
 	_, page.Done = result.(*tg.MessagesMessages)
 	if len(raw) == 0 {

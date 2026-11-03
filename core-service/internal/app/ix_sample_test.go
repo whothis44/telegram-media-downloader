@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -70,6 +71,7 @@ func TestIxDataSample(t *testing.T) {
 		{"user:1003", "Priya Natarajan", "priya_n"},
 		{"channel:1811230001", "Riverside Cycling Club", "riversidecc"},
 		{"channel:1811239999", "Velo Weekly", "veloweekly"},
+		{"channel:1811230004", "Riverside Cycling Club chat", ""},
 	} {
 		kind := strings.SplitN(p[0], ":", 2)[0]
 		exec(`INSERT INTO ix_peers(peer_id,kind,name,username,updated_at) VALUES(?,?,?,?,?)`, p[0], kind, p[1], p[2], seen)
@@ -131,6 +133,7 @@ func TestIxDataSample(t *testing.T) {
 	}
 	m = post(club, 105, 7200, "Ride recap video, 4K on the club drive.")
 	m.Media, m.Views = video(5200000000000000105, 48_211_337, 94.5, "spring-ride-recap.mp4"), 1702
+	m.Replies = tg.MessageReplies{Comments: true, Replies: 2, ChannelID: 1811230004} // comments live in the club's discussion group
 	add(club, m)
 	m = post(club, 106, 9000, "Route map for Sunday (GPX inside).")
 	m.Media, m.Views = document(5300000000000000106, 182_044, "application/gpx+xml", &tg.DocumentAttributeFilename{FileName: "sunday-route.gpx"}), 940
@@ -148,6 +151,20 @@ func TestIxDataSample(t *testing.T) {
 	m = post(club, 110, 16200, "")
 	m.Media = document(5400000000000000110, 23_018, "application/x-tgsticker", &tg.DocumentAttributeSticker{Alt: "👍", Stickerset: &tg.InputStickerSetEmpty{}})
 	add(club, m) // stickers are off for this chat: "not_wanted"
+	// One post of 7 photos and 3 videos: one album, caption on the first item.
+	for i := 0; i < 10; i++ {
+		m = post(club, 120+i, 18000, "")
+		if i == 0 {
+			m.Message = "Season opener, all of it: 7 photos and 3 clips from the finish line."
+		}
+		if i < 7 {
+			m.Media = photo(5100000000000000120+int64(i), 300000+i*7000)
+		} else {
+			m.Media = video(5200000000000000120+int64(i), 6_000_000+int64(i)*250_000, 12+float64(i), fmt.Sprintf("finish-line-%d.mp4", i-6))
+		}
+		m.GroupedID, m.PostAuthor, m.Views = 3711000000000000120, "Maya Chen", 2210
+		add(club, m)
+	}
 
 	// Trail Builders Forum: topics, replies, people.
 	// Topics 14 and 27 were opened by service messages (only their titles
@@ -161,7 +178,7 @@ func TestIxDataSample(t *testing.T) {
 	m = post(forum, 202, 2400, "Thanks! Bringing a saw on Sunday.")
 	m.FromID, m.ReplyTo = user(1002), &tg.MessageReplyHeader{ForumTopic: true, ReplyToMsgID: 201, ReplyToTopID: 14}
 	add(forum, m)
-	m = post(forum, 203, 3000, "Same recap the club posted, for anyone not in the channel.")
+	m = post(forum, 203, 9000, "Same recap the club posted, for anyone not in the channel.")
 	m.FromID, m.ReplyTo = user(1001), &tg.MessageReplyHeader{ForumTopic: true, ReplyToMsgID: 14}
 	m.FwdFrom = tg.MessageFwdHeader{FromID: &tg.PeerChannel{ChannelID: 1811230001}, Date: day + 7200, ChannelPost: 105}
 	m.Media = video(5200000000000000105, 48_211_337, 94.5, "spring-ride-recap.mp4") // the very same Telegram file
@@ -182,6 +199,34 @@ func TestIxDataSample(t *testing.T) {
 	m.FromID = user(1001)
 	add(forum, m) // no topic mark: General
 
+	// System notices, as Telegram sends them: a pin, and the forum topics
+	// being opened (the posts in a topic "reply" to its opener).
+	type notice struct {
+		group string
+		m     *tg.MessageService
+	}
+	pin := &tg.MessageService{ID: 111, Date: day + 20000, PeerID: in(club), Action: &tg.MessageActionPinMessage{}}
+	pin.SetReplyTo(&tg.MessageReplyHeader{ReplyToMsgID: 101})
+	topicOpen := func(id, at int, title string) *tg.MessageService {
+		n := &tg.MessageService{ID: id, Date: day + at, PeerID: in(forum), Action: &tg.MessageActionTopicCreate{Title: title, IconColor: 0x6FB9F0}}
+		n.SetFromID(user(1003))
+		return n
+	}
+	notices := []notice{{club, pin}, {forum, topicOpen(14, 60, "Trail reports")}, {forum, topicOpen(27, 4000, "Tools & repairs")}}
+	for _, x := range notices {
+		var buf bin.Buffer
+		if err := x.m.Encode(&buf); err != nil {
+			t.Fatal(err)
+		}
+		var decoded tg.MessageService
+		if err := decoded.Decode(&buf); err != nil {
+			t.Fatal(err)
+		}
+		row := ixRowFromService(&decoded)
+		exec(`INSERT INTO ix_messages(group_id,message_id,date,text,sender_id,reply_to,topic_id,tl,first_seen,seen_at,service) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+			x.group, row.MessageID, row.Date, row.Text, row.SenderID, row.ReplyTo, row.TopicID, row.TL, seen, seen, row.Service)
+	}
+
 	media := map[string]telegram.Attachment{}
 	for _, x := range msgs {
 		// Through Telegram's own encoding, exactly as recorded live.
@@ -194,9 +239,9 @@ func TestIxDataSample(t *testing.T) {
 			t.Fatal(err)
 		}
 		row := ixRowFromMessage(&decoded)
-		exec(`INSERT INTO ix_messages(group_id,message_id,date,edit_date,text,grouped_id,sender_id,post_author,fwd_from,fwd_date,reply_to,topic_id,media_type,media_name,media_size,media_key,views,tl,first_seen,seen_at,deleted_at)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, x.group, row.MessageID, row.Date, row.EditDate, row.Text, row.GroupedID, row.SenderID, row.PostAuthor,
-			row.FwdFrom, row.FwdDate, row.ReplyTo, row.TopicID, row.MediaType, row.MediaName, row.MediaSize, row.MediaKey, row.Views, row.TL, seen, seen, x.deleted)
+		exec(`INSERT INTO ix_messages(group_id,message_id,date,edit_date,text,grouped_id,sender_id,post_author,fwd_from,fwd_date,reply_to,topic_id,media_type,media_name,media_size,media_key,views,tl,first_seen,seen_at,deleted_at,comments)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, x.group, row.MessageID, row.Date, row.EditDate, row.Text, row.GroupedID, row.SenderID, row.PostAuthor,
+			row.FwdFrom, row.FwdDate, row.ReplyTo, row.TopicID, row.MediaType, row.MediaName, row.MediaSize, row.MediaKey, row.Views, row.TL, seen, seen, x.deleted, row.Comments)
 		for i, older := range x.olderText {
 			exec(`INSERT INTO ix_message_edits(group_id,message_id,edit_date,text,recorded_at) VALUES(?,?,?,?,?)`, x.group, row.MessageID, row.Date, older, seen+int64(i))
 		}
@@ -211,13 +256,17 @@ func TestIxDataSample(t *testing.T) {
 		t.Helper()
 		att := media[group+"/"+ixItoa(int64(message))]
 		h := hash(path)
-		var tk, tid any
-		var tsize any
-		if att.Identity.ID != "" {
+		var tk, tid, tsize, mime, w, hgt, dur, thumb any
+		if att.Identity.ID != "" { // downloaded by the current downloader: Telegram's facts are kept
 			tk, tid, tsize = att.Identity.Kind, att.Identity.ID, att.Identity.Size
+			mime, w, hgt, dur = att.Facts.Mime, att.Facts.Width, att.Facts.Height, att.Facts.DurationMs
+			if len(att.Facts.Thumb) > 0 {
+				thumb = att.Facts.Thumb
+			}
 		}
-		exec(`INSERT INTO downloads(group_id,group_name,message_id,file_name,file_size,file_type,file_path,status,created_at,file_hash,telegram_media_kind,telegram_media_id,telegram_media_size)
-			VALUES(?,?,?,?,?,?,?,'completed',?,?,?,?,?)`, group, "", message, filepath.Base(path), size, kind, path, at, h, tk, tid, tsize)
+		exec(`INSERT INTO downloads(group_id,group_name,message_id,file_name,file_size,file_type,file_path,status,created_at,file_hash,telegram_media_kind,telegram_media_id,telegram_media_size,
+			telegram_mime,media_width,media_height,media_duration_ms,telegram_thumb)
+			VALUES(?,?,?,?,?,?,?,'completed',?,?,?,?,?,?,?,?,?,?)`, group, "", message, filepath.Base(path), size, kind, path, at, h, tk, tid, tsize, mime, w, hgt, dur, thumb)
 		return h
 	}
 	file(club, 102, "Riverside Cycling Club/images/2026-03-14_102.jpg", "photo", 412000, "2026-03-14 13:01:07")
@@ -225,8 +274,17 @@ func TestIxDataSample(t *testing.T) {
 	file(club, 104, "Riverside Cycling Club/images/2026-03-14_104.jpg", "photo", 430000, "2026-03-14 13:01:12")
 	recap := file(club, 105, "Riverside Cycling Club/videos/spring-ride-recap.mp4", "video", 48_211_337, "2026-03-14 14:02:44")
 	file(club, 109, "Riverside Cycling Club/images/2026-03-14_109.jpg", "photo", 268000, "2026-03-14 16:00:31")
-	exec(`INSERT INTO downloads(group_id,group_name,message_id,file_name,file_size,file_type,file_path,status,created_at,file_hash,telegram_media_kind,telegram_media_id,telegram_media_size)
-		SELECT ?,'',203,file_name,file_size,file_type,file_path,'completed','2026-03-14 12:51:02',file_hash,telegram_media_kind,telegram_media_id,telegram_media_size FROM downloads WHERE group_id=? AND message_id=105`, forum, club)
+	for i := 0; i < 9; i++ { // the last clip of the 10-item album is still missing
+		if i < 7 {
+			file(club, 120+i, fmt.Sprintf("Riverside Cycling Club/images/2026-03-14_%d.jpg", 120+i), "photo", int64(300000+i*7000), "2026-03-14 17:10:00")
+		} else {
+			file(club, 120+i, fmt.Sprintf("Riverside Cycling Club/videos/finish-line-%d.mp4", i-6), "video", 6_000_000+int64(i)*250_000, "2026-03-14 17:11:00")
+		}
+	}
+	exec(`INSERT INTO downloads(group_id,group_name,message_id,file_name,file_size,file_type,file_path,status,created_at,file_hash,telegram_media_kind,telegram_media_id,telegram_media_size,
+			telegram_mime,media_width,media_height,media_duration_ms,telegram_thumb)
+		SELECT ?,'',203,file_name,file_size,file_type,file_path,'completed','2026-03-14 14:31:02',file_hash,telegram_media_kind,telegram_media_id,telegram_media_size,
+			telegram_mime,media_width,media_height,media_duration_ms,telegram_thumb FROM downloads WHERE group_id=? AND message_id=105`, forum, club)
 	clip := file(forum, 204, "Trail Builders Forum/videos/descent-clip.mp4", "video", 9_870_112, "2026-03-14 13:00:40")
 	file(forum, 301, "Trail Builders Forum/documents/voice_5500000000000000301.ogg", "document", 61_440, "2026-03-14 13:31:00")
 	// Ottawa Maker Space: downloaded by the downloader before the archive
@@ -250,6 +308,43 @@ func TestIxDataSample(t *testing.T) {
 	}
 	pair(recap, reencode, "same", 0.94, 0.0)
 	pair(recap, clip, "clip", 0.81, 61.5)
+
+	// Comments on the recap (club post 105): messages of the club's discussion
+	// group, replying to its automatic copy of the post (9000).
+	discussion := "-1001811230004"
+	for i, c := range []struct {
+		from int64
+		text string
+	}{{1003, "Best recap yet. Who was on the drone?"}, {1001, "That was Liam! Full-res copy is on the club drive."}} {
+		cm := &tg.Message{ID: 9001 + i, Date: day + 7800 + i*300, Message: c.text, PeerID: &tg.PeerChannel{ChannelID: 1811230004}, FromID: user(c.from),
+			ReplyTo: &tg.MessageReplyHeader{ReplyToMsgID: 9000}}
+		var buf bin.Buffer
+		if err := cm.Encode(&buf); err != nil {
+			t.Fatal(err)
+		}
+		var decoded tg.Message
+		if err := decoded.Decode(&buf); err != nil {
+			t.Fatal(err)
+		}
+		row := ixRowFromMessage(&decoded)
+		exec(`INSERT INTO ix_messages(group_id,message_id,date,text,sender_id,reply_to,tl,first_seen,seen_at,comment_on) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+			discussion, row.MessageID, row.Date, row.Text, row.SenderID, row.ReplyTo, row.TL, seen, seen, club+":105")
+	}
+	// Chat details as Telegram gives them, the message count, and one chat
+	// marked finished.
+	for _, g := range []struct {
+		id, title, kind, about, username, linked string
+		members, pinned, count                   int
+		finished                                 int64
+	}{
+		{club, "Riverside Cycling Club", "channel", "Group rides every Saturday, 9:00 at the boathouse. Routes, photos and ride reports.", "riversidecc", discussion, 412, 101, 21, 0},
+		{forum, "Trail Builders Forum", "forum", "Trail work days, conditions and repairs.", "", "", 88, 0, 10, 0},
+		{discussion, "Riverside Cycling Club chat", "supergroup", "", "", "", 97, 0, 2, 0},
+		{makers, "Ottawa Maker Space", "supergroup", "", "", "", 230, 0, 0, seen + 3_600_000},
+	} {
+		exec(`INSERT INTO ix_group_info(group_id,title,kind,about,username,members,pinned_id,linked_group,info_at,tg_count,tg_count_at,finished_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+			g.id, g.title, g.kind, g.about, g.username, g.members, g.pinned, g.linked, seen, g.count, seen, g.finished)
+	}
 
 	exec(`INSERT INTO ix_walks(job_id,group_id,started_at,finished_at,processed,marked_deleted,state) VALUES('sample-1',?,?,?,10,1,'done'),('sample-2',?,?,?,13,0,'done')`,
 		club, seen, seen+60_000, forum, seen, seen+90_000)
@@ -305,6 +400,15 @@ func TestIxDataSample(t *testing.T) {
 	}
 	if ixSampleLine(t, filepath.Join(data, "messages", "g_1811230002.jsonl"), 301)["media"].(map[string]any)["type"] != "voice" {
 		t.Fatal("voice note")
+	}
+	if n := ixSampleLine(t, filepath.Join(data, "messages", "g_1811230001.jsonl"), 111); n["service"] != "messageActionPinMessage" || n["raw"].(map[string]any)["_"] != "messageService" {
+		t.Fatalf("pin notice: %v", n)
+	}
+	if c := ixSampleLine(t, filepath.Join(data, "messages", "g_1811230004.jsonl"), 9001); c["comment_on"].(map[string]any)["message_id"] != float64(105) {
+		t.Fatalf("comment: %v", c)
+	}
+	if p := ixSampleLine(t, filepath.Join(data, "messages", "g_1811230001.jsonl"), 105); p["comments"] != float64(2) {
+		t.Fatalf("post comments: %v", p)
 	}
 
 	files := map[string]bool{}

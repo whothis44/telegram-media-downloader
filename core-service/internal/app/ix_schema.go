@@ -95,6 +95,25 @@ CREATE TABLE IF NOT EXISTS ix_vdup (
 	found_at INTEGER NOT NULL DEFAULT 0,
 	PRIMARY KEY (key_a, key_b)
 );
+CREATE TABLE IF NOT EXISTS ix_group_info (
+	group_id     TEXT PRIMARY KEY,
+	title        TEXT    NOT NULL DEFAULT '',
+	kind         TEXT    NOT NULL DEFAULT '', -- channel, supergroup, forum or group
+	about        TEXT    NOT NULL DEFAULT '',
+	username     TEXT    NOT NULL DEFAULT '',
+	members      INTEGER NOT NULL DEFAULT 0,
+	pinned_id    INTEGER NOT NULL DEFAULT 0,
+	linked_group TEXT    NOT NULL DEFAULT '',
+	info_at      INTEGER NOT NULL DEFAULT 0,
+	tl           BLOB,
+	tg_count     INTEGER NOT NULL DEFAULT 0,
+	tg_count_at  INTEGER NOT NULL DEFAULT 0,
+	finished_at  INTEGER NOT NULL DEFAULT 0 -- marked finished: rescans leave it alone
+);
+CREATE TABLE IF NOT EXISTS ix_alerts (
+	key     TEXT PRIMARY KEY,
+	sent_at INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS ix_retry (
 	work_key TEXT PRIMARY KEY,
 	rounds   INTEGER NOT NULL DEFAULT 0,
@@ -104,6 +123,33 @@ CREATE TABLE IF NOT EXISTS ix_retry (
 
 func ixEnsureSchema(ctx context.Context, db *sql.DB) error {
 	if _, err := db.ExecContext(ctx, ixSchema); err != nil {
+		return err
+	}
+	// Columns added after the first archive release.
+	have := map[string]bool{}
+	rows, err := db.QueryContext(ctx, `SELECT name FROM pragma_table_info('ix_messages')`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var name string
+		if rows.Scan(&name) == nil {
+			have[name] = true
+		}
+	}
+	rows.Close()
+	for _, col := range [][2]string{
+		{"service", "TEXT NOT NULL DEFAULT ''"},    // service message: its action (pin, title change...)
+		{"comments", "INTEGER NOT NULL DEFAULT 0"}, // channel post: comments Telegram reports
+		{"comment_on", "TEXT NOT NULL DEFAULT ''"}, // comment: "<channel group id>:<post id>"
+	} {
+		if !have[col[0]] {
+			if _, err := db.ExecContext(ctx, `ALTER TABLE ix_messages ADD COLUMN `+col[0]+` `+col[1]); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS ix_messages_comment ON ix_messages(comment_on) WHERE comment_on <> ''`); err != nil {
 		return err
 	}
 	ixEnsureSearch(ctx, db)

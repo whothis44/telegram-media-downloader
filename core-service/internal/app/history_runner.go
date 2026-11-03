@@ -78,6 +78,9 @@ func (a *App) runHistory(ctx context.Context, id string) error {
 	if err = a.initializeHistory(ctx, id, session.AccountID, dialog); err != nil {
 		return err
 	}
+	if j.MessagesOnly {
+		a.ixRecordChatInfo(ctx, session, dialog, j.GroupID) // archive: the chat's own details
+	}
 	cfg, err := a.config.Load(ctx)
 	if err != nil {
 		return err
@@ -186,6 +189,9 @@ func (a *App) runHistory(ctx context.Context, id string) error {
 			}
 		}
 		if page.Done {
+			if j.MessagesOnly {
+				return a.ixSaveComments(ctx, session, dialog, j.GroupID) // archive: comments on channel posts
+			}
 			return nil
 		}
 		if len(page.Messages) == 0 {

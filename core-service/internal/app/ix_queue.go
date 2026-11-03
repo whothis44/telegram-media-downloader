@@ -110,6 +110,8 @@ func (a *App) ixStart() {
 	go func() { defer a.ambientWG.Done(); a.ixRunVdup(a.ctx) }()
 	a.ambientWG.Add(1)
 	go func() { defer a.ambientWG.Done(); a.ixRunRetry(a.ctx) }()
+	a.ambientWG.Add(1)
+	go func() { defer a.ambientWG.Done(); a.ixRunAlerts(a.ctx) }()
 }
 
 func (a *App) ixWake() {
