@@ -60,6 +60,7 @@ type ixMediaBox struct {
 	st      ixMediaStatus
 	leaders []ixLeader
 	loaded  bool
+	after   int64 // the last download ID looked at in this pass
 }
 
 var ixMediaState sync.Map // *App -> *ixMediaBox
@@ -119,19 +120,35 @@ func (a *App) ixRunMedia(ctx context.Context) {
 // ixMediaStep indexes one picture file; false when there is none left.
 func (a *App) ixMediaStep(ctx context.Context) (bool, error) {
 	var rel, hash string
-	err := a.db.Reader.QueryRowContext(ctx, `SELECT d.file_path, COALESCE(d.file_hash,'') FROM downloads d WHERE `+ixPictureWhere+`
+	var id int64
+	box := a.ixMediaBox()
+	box.mu.Lock()
+	after := box.after
+	box.mu.Unlock()
+	// Walk the downloads in ID order from where the last step stopped, so a
+	// large library is not scanned from the start for every file; at the end,
+	// one more pass from the start picks up anything changed behind it.
+	err := a.db.Reader.QueryRowContext(ctx, `SELECT d.id, d.file_path, COALESCE(d.file_hash,'') FROM downloads d WHERE d.id>? AND `+ixPictureWhere+`
 		AND NOT EXISTS (SELECT 1 FROM ix_pdq p WHERE p.key = CASE WHEN length(d.file_hash)=64 THEN 'h:'||lower(d.file_hash) ELSE 'p:'||replace(d.file_path,char(92),'/') END)
-		ORDER BY d.id LIMIT 1`).Scan(&rel, &hash)
+		ORDER BY d.id LIMIT 1`, after).Scan(&id, &rel, &hash)
 	if errors.Is(err, sql.ErrNoRows) {
+		box.mu.Lock()
+		box.after = 0
+		box.mu.Unlock()
+		if after > 0 {
+			return a.ixMediaStep(ctx)
+		}
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
+	box.mu.Lock()
+	box.after = id
+	box.mu.Unlock()
 	stored := rel
 	rel = ixNormPath(rel)
 	key := ixFileKey(hash, rel)
-	box := a.ixMediaBox()
 	box.mu.Lock()
 	box.st.Running, box.st.Current = true, rel
 	box.mu.Unlock()

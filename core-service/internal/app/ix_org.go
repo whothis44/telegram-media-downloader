@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -252,9 +254,21 @@ const ixMaxPlanOps = 100000
 
 var ixMoveMu sync.Mutex // one plan applies at a time
 
+// ixPathKey compares stored paths: separators and "./" normalised, and
+// letter case ignored on Windows, where the share does too.
+func ixPathKey(p string) string {
+	n := ixNormPath(p)
+	if runtime.GOOS == "windows" {
+		n = strings.ToLower(n)
+	}
+	return n
+}
+
 // ixPlanDuplicateCopies plans moving byte-identical extra copies (same
 // SHA-256, stored at different paths) to _trash, keeping the copy saved
 // first; every catalogue entry of a trashed copy points at the kept one.
+// Two spellings of one path, or two names for one file on disk, are never
+// taken for two copies.
 func (a *App) ixPlanDuplicateCopies(ctx context.Context) ([]ixMoveOp, error) {
 	rows, err := a.db.Reader.QueryContext(ctx, `SELECT lower(file_hash), file_path, MIN(id), MAX(COALESCE(file_size,0)) FROM downloads
 		WHERE length(file_hash)=64 AND file_path IS NOT NULL AND file_path<>'' AND (status IS NULL OR status='completed')
@@ -265,8 +279,13 @@ func (a *App) ixPlanDuplicateCopies(ctx context.Context) ([]ixMoveOp, error) {
 	}
 	defer rows.Close()
 	stamp := time.Now().In(ixTZ).Format("2006-01-02")
+	type kept struct {
+		stored, rel string
+		info        os.FileInfo
+	}
 	var ops []ixMoveOp
-	keep := map[string]string{}
+	keep := map[string]kept{}
+	seen := map[string]bool{} // hash + path key
 	for rows.Next() {
 		var sum, path string
 		var first, size int64
@@ -274,17 +293,23 @@ func (a *App) ixPlanDuplicateCopies(ctx context.Context) ([]ixMoveOp, error) {
 			continue
 		}
 		rel := ixNormPath(path)
-		if rel == "" {
+		if rel == "" || seen[sum+"\x00"+ixPathKey(path)] {
 			continue
 		}
-		if _, err := os.Stat(a.ixAbs(rel)); err != nil {
+		seen[sum+"\x00"+ixPathKey(path)] = true
+		info, err := os.Stat(a.ixAbs(rel))
+		if err != nil || !info.Mode().IsRegular() {
 			continue // not on disk: neither a copy to move nor one to keep
 		}
-		if _, ok := keep[sum]; !ok {
-			keep[sum] = path
+		k, ok := keep[sum]
+		if !ok {
+			keep[sum] = kept{path, rel, info}
 			continue
 		}
-		ops = append(ops, ixMoveOp{Op: "trash", Src: rel, Dst: "_trash/" + stamp + "/" + rel, SHA256: sum, Size: size, Repoint: keep[sum]})
+		if os.SameFile(info, k.info) {
+			continue // another name for the kept file itself
+		}
+		ops = append(ops, ixMoveOp{Op: "trash", Src: rel, Dst: "_trash/" + stamp + "/" + rel, SHA256: sum, Size: size, Repoint: k.stored})
 		if len(ops) >= ixMaxPlanOps {
 			break
 		}
@@ -502,6 +527,40 @@ func ixMoveVerified(src, dst, want string) error {
 	return os.Remove(src)
 }
 
+// ixLanded says whether a move's file is already at its destination (an
+// earlier attempt stopped after moving it, before recording that).
+func (a *App) ixLanded(o ixMoveOp) bool {
+	if _, err := os.Stat(a.ixAbs(o.Src)); !os.IsNotExist(err) {
+		return false
+	}
+	got, _, err := ixHashFile(a.ixAbs(o.Dst))
+	return err == nil && (o.SHA256 == "" || strings.EqualFold(got, o.SHA256))
+}
+
+// ixCheckKeeper makes sure the copy a trashed duplicate's entries will point
+// at is there, is a different file, and has the same bytes.
+func (a *App) ixCheckKeeper(o ixMoveOp) error {
+	keepRel := ixNormPath(o.Repoint)
+	if keepRel == "" || ixPathKey(keepRel) == ixPathKey(o.Src) {
+		return errors.New("the copy to keep is this same file")
+	}
+	ki, err := os.Stat(a.ixAbs(keepRel))
+	if err != nil {
+		return fmt.Errorf("the copy to keep is missing: %w", err)
+	}
+	if si, err := os.Stat(a.ixAbs(o.Src)); err == nil && os.SameFile(si, ki) {
+		return errors.New("the copy to keep is this same file")
+	}
+	got, _, err := ixHashFile(a.ixAbs(keepRel))
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(got, o.SHA256) {
+		return errors.New("the copy to keep no longer has the same bytes")
+	}
+	return nil
+}
+
 // ixApplyPlan carries out a plan, journalling every step.
 func (a *App) ixApplyPlan(ctx context.Context, id int64) error {
 	ixMoveMu.Lock()
@@ -529,16 +588,31 @@ func (a *App) ixApplyPlan(ctx context.Context, id int64) error {
 		}
 		_, _ = a.db.Writer.ExecContext(ctx, `UPDATE ix_moves SET state='running', at=? WHERE plan_id=? AND seq=?`, time.Now().UnixMilli(), id, o.Seq)
 		var opErr error
+		moved := false
 		switch o.Op {
 		case "copy":
 			opErr = ixCopyVerified(a.ixAbs(o.Src), a.ixAbs(o.Dst), o.SHA256)
 		case "move", "trash":
-			opErr = ixMoveVerified(a.ixAbs(o.Src), a.ixAbs(o.Dst), o.SHA256)
+			if o.Op == "trash" {
+				opErr = a.ixCheckKeeper(o)
+			}
+			if opErr == nil {
+				if a.ixLanded(o) {
+					moved = true // an earlier attempt got this far
+				} else if opErr = ixMoveVerified(a.ixAbs(o.Src), a.ixAbs(o.Dst), o.SHA256); opErr == nil {
+					moved = true
+				}
+			}
 		default:
 			opErr = fmt.Errorf("unknown operation %q", o.Op)
 		}
 		if opErr == nil && o.Repoint != "" {
-			opErr = a.ixRepoint(ctx, id, o)
+			if opErr = a.ixRepoint(ctx, id, o); opErr != nil && moved {
+				// The catalogue could not follow: put the file back.
+				if back := ixMoveVerified(a.ixAbs(o.Dst), a.ixAbs(o.Src), o.SHA256); back != nil {
+					opErr = fmt.Errorf("%v; moving it back also failed: %v (it is at %s)", opErr, back, o.Dst)
+				}
+			}
 		}
 		state, msg := "done", ""
 		if opErr != nil {
@@ -559,7 +633,8 @@ func (a *App) ixApplyPlan(ctx context.Context, id int64) error {
 	return failure
 }
 
-// ixUndoPlan reverses the done steps of a plan, newest first.
+// ixUndoPlan reverses the steps of a plan, newest first: those recorded as
+// done, and any that moved a file before an interruption.
 func (a *App) ixUndoPlan(ctx context.Context, id int64) error {
 	ixMoveMu.Lock()
 	defer ixMoveMu.Unlock()
@@ -574,13 +649,16 @@ func (a *App) ixUndoPlan(ctx context.Context, id int64) error {
 	sort.Slice(ops, func(i, j int) bool { return ops[i].Seq > ops[j].Seq })
 	var failure error
 	for _, o := range ops {
-		if o.State != "done" {
+		landed := (o.State == "running" || o.State == "failed") && (o.Op == "move" || o.Op == "trash") && a.ixLanded(o)
+		if o.State != "done" && !landed {
 			continue
 		}
 		var opErr error
 		switch o.Op {
 		case "copy":
-			opErr = os.Remove(a.ixAbs(o.Dst)) // the original is still where it was
+			if got, _, err := ixHashFile(a.ixAbs(o.Dst)); err == nil && (o.SHA256 == "" || strings.EqualFold(got, o.SHA256)) {
+				opErr = os.Remove(a.ixAbs(o.Dst)) // the original is still where it was
+			}
 		case "move", "trash":
 			opErr = ixMoveVerified(a.ixAbs(o.Dst), a.ixAbs(o.Src), o.SHA256)
 			if opErr == nil && o.Repoint != "" {
@@ -603,32 +681,47 @@ func (a *App) ixUndoPlan(ctx context.Context, id int64) error {
 	return failure
 }
 
+// ixRowsAt lists the catalogue entries whose stored path is this file,
+// however it is spelled.
+func ixRowsAt(ctx context.Context, q interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, rel string) ([]string, string, error) {
+	base := rel[strings.LastIndex(rel, "/")+1:]
+	like := "%" + strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(base)
+	rows, err := q.QueryContext(ctx, `SELECT id, file_path FROM downloads WHERE file_path LIKE ? ESCAPE '\'`, like)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close()
+	var ids []string
+	var stored string
+	want := ixPathKey(rel)
+	for rows.Next() {
+		var id int64
+		var p string
+		if rows.Scan(&id, &p) == nil && ixPathKey(p) == want {
+			ids = append(ids, strconv.FormatInt(id, 10))
+			stored = p
+		}
+	}
+	return ids, stored, rows.Err()
+}
+
 // ixRepoint points the catalogue entries at a moved file's new place (or,
 // for a trashed copy, at the copy kept), recording which entries changed so
-// that undoing restores exactly those.
+// that undoing restores exactly those. A move no entry points at is refused.
 func (a *App) ixRepoint(ctx context.Context, plan int64, o ixMoveOp) error {
 	tx, err := a.db.Writer.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `SELECT id, file_path FROM downloads WHERE replace(file_path,char(92),'/')=?`, o.Src)
+	ids, original, err := ixRowsAt(ctx, tx, o.Src)
 	if err != nil {
 		return err
 	}
-	var ids []string
-	var original string
-	for rows.Next() {
-		var id int64
-		var p string
-		if rows.Scan(&id, &p) == nil {
-			ids = append(ids, strconv.FormatInt(id, 10))
-			original = p
-		}
-	}
-	rows.Close()
 	if len(ids) == 0 {
-		return tx.Commit()
+		return errors.New("no catalogue entry points at this file any more")
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE downloads SET file_path=? WHERE id IN (`+strings.Join(ids, ",")+`)`, o.Repoint); err != nil {
 		return err
@@ -639,22 +732,45 @@ func (a *App) ixRepoint(ctx context.Context, plan int64, o ixMoveOp) error {
 	return tx.Commit()
 }
 
+// ixUnrepoint points the journalled entries back at the restored file, but
+// only those still pointing where the move left them.
 func (a *App) ixUnrepoint(ctx context.Context, plan int64, o ixMoveOp) error {
+	tx, err := a.db.Writer.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	var ids, original string
-	if err := a.db.Reader.QueryRowContext(ctx, `SELECT rows, src_stored FROM ix_moves WHERE plan_id=? AND seq=?`, plan, o.Seq).Scan(&ids, &original); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT rows, src_stored FROM ix_moves WHERE plan_id=? AND seq=?`, plan, o.Seq).Scan(&ids, &original); err != nil {
 		return err
 	}
 	if ids == "" {
-		return nil
+		return tx.Commit()
 	}
+	journal := map[string]bool{}
 	for _, id := range strings.Split(ids, ",") {
 		if _, err := strconv.ParseInt(id, 10, 64); err != nil {
 			return fmt.Errorf("bad journal entry %q", id)
 		}
+		journal[id] = true
 	}
 	if original == "" {
 		original = o.Src
 	}
-	_, err := a.db.Writer.ExecContext(ctx, `UPDATE downloads SET file_path=? WHERE id IN (`+ids+`)`, original)
-	return err
+	at, _, err := ixRowsAt(ctx, tx, o.Repoint)
+	if err != nil {
+		return err
+	}
+	var back []string
+	for _, id := range at {
+		if journal[id] {
+			back = append(back, id)
+		}
+	}
+	if len(back) > 0 {
+		if _, err := tx.ExecContext(ctx, `UPDATE downloads SET file_path=? WHERE id IN (`+strings.Join(back, ",")+`)`, original); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }

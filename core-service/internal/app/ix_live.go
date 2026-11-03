@@ -14,6 +14,7 @@ import (
 	"github.com/botnick/telegram-media-downloader/core-service/internal/engine"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/telegram"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 )
 
 // Work that needs the live account, done while it can still be done: the
@@ -125,7 +126,7 @@ func (a *App) ixMessagesPassEnd(ctx context.Context, session *engine.MessageSess
 var ixGapLimit = 20000
 
 // ixGapPause spaces the requests out.
-var ixFloodWaitRe = regexp.MustCompile(`FLOOD_WAIT_(\d+)`)
+var ixFloodWaitRe = regexp.MustCompile(`FLOOD_WAIT[_ (]+(\d+)`)
 var ixGapPause = time.Second
 
 // ixGapIDs lists the IDs between 1 and the newest kept message that are
@@ -182,10 +183,15 @@ func (a *App) ixFillGaps(ctx context.Context, session ixByIDReader, dialog teleg
 		page, err := session.MessagesByID(dialog, batch)
 		for try := 0; err != nil && try < len(historyPageRetries) && ctx.Err() == nil && session.Err() == nil; try++ {
 			wait := historyPageRetries[try]
-			if m := ixFloodWaitRe.FindStringSubmatch(err.Error()); m != nil {
+			if d, ok := tgerr.AsFloodWait(err); ok {
+				if d > 5*time.Minute {
+					break // a long flood wait: leave the rest for the next pass
+				}
+				wait = d + time.Second
+			} else if m := ixFloodWaitRe.FindStringSubmatch(err.Error()); m != nil {
 				n, _ := strconv.Atoi(m[1])
 				if n > 300 {
-					break // a long flood wait: leave the rest for the next pass
+					break
 				}
 				wait = time.Duration(n+1) * time.Second
 			} else if !historyConnectionLost(err) {

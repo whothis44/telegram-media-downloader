@@ -690,6 +690,7 @@ var ixVdupState sync.Map // *App -> *ixVdupBox
 type ixVdupBox struct {
 	mu        sync.Mutex
 	index     *ixVIndex // candidate index, built on first use
+	after     int64     // the last download ID looked at in this pass
 	st        ixVdupStatus
 	cpuOnly   bool // the GPU decoder failed; use the CPU for the rest of this run
 	gpuErrors int
@@ -769,10 +770,24 @@ func (a *App) ixVdupStep(ctx context.Context) (bool, error) {
 	}
 	var id int64
 	var rel, hash string
+	box.mu.Lock()
+	after := box.after
+	box.mu.Unlock()
 	err := a.db.Reader.QueryRowContext(ctx, `SELECT d.id, d.file_path, COALESCE(d.file_hash,'') FROM downloads d
-		WHERE d.file_type='video' AND d.message_id>0 AND d.file_path IS NOT NULL AND d.file_path<>'' AND (d.status IS NULL OR d.status='completed')
+		WHERE d.id>? AND d.file_type='video' AND d.message_id>0 AND d.file_path IS NOT NULL AND d.file_path<>'' AND (d.status IS NULL OR d.status='completed')
 		AND NOT EXISTS (SELECT 1 FROM ix_vfp v WHERE v.ver>=2 AND v.key = CASE WHEN length(d.file_hash)=64 THEN 'h:'||lower(d.file_hash) ELSE 'p:'||replace(d.file_path,char(92),'/') END)
-		ORDER BY d.id LIMIT 1`).Scan(&id, &rel, &hash)
+		ORDER BY d.id LIMIT 1`, after).Scan(&id, &rel, &hash)
+	if errors.Is(err, sql.ErrNoRows) && after > 0 {
+		box.mu.Lock()
+		box.after = 0
+		box.mu.Unlock()
+		return a.ixVdupStep(ctx)
+	}
+	if err == nil {
+		box.mu.Lock()
+		box.after = id
+		box.mu.Unlock()
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		box.mu.Lock()
 		box.st.Running, box.st.Current, box.st.FFmpeg = false, "", true

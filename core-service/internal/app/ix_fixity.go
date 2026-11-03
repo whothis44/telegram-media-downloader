@@ -112,7 +112,7 @@ func (a *App) ixFixityStep(ctx context.Context, batch int) (int, error) {
 				return done, err
 			}
 		}
-		if it.hash == "" && sum != "" {
+		if it.hash == "" && sum != "" && result == "ok" {
 			_, _ = a.db.Writer.ExecContext(ctx, `UPDATE downloads SET file_hash=? WHERE file_path=? AND (file_hash IS NULL OR file_hash='')`, sum, it.path)
 		}
 		done++

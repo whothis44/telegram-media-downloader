@@ -549,3 +549,108 @@ func TestIxFamiliesMergeOverlappingAlbumsAndSuggestCategories(t *testing.T) {
 		t.Fatalf("suggestions: %+v", sg)
 	}
 }
+
+// ---------- diagnostics ----------
+
+func TestIxDiagnosticsConcealChatsFilesAndPeople(t *testing.T) {
+	ctx := context.Background()
+	a, err := newConfiguredTestApp(ctx, Config{DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	cfg, _ := a.config.Load(ctx)
+	cfg["groups"] = []any{map[string]any{"id": "-1001811239876", "name": "Secret Riders Club", "enabled": true}}
+	if err := a.config.Save(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Writer.Exec(`INSERT INTO ix_peers(peer_id,kind,name,username,updated_at) VALUES('user:77','user','Jane Q Example','janeq',1)`); err != nil {
+		t.Fatal(err)
+	}
+	a.ixLog("picture index: open D:\\Telegram\\Secret Riders Club\\images\\holiday-2026.jpg: access denied for -1001811239876")
+	a.ixLog("comments on -1001811239876:105 from Jane Q Example via https://t.me/secretriders and @janeq_backup, file /volume1/Telegram/Secret Riders Club/videos/clip 1.mp4, hash 4a3b2c1d4a3b2c1d4a3b2c1d4a3b2c1d")
+	out := a.ixDiagnostics(ctx)
+	for _, secret := range []string{"Secret Riders", "1811239876", "holiday-2026", "Jane Q", "secretriders", "janeq", "volume1", "clip 1.mp4", "4a3b2c1d4a3b2c1d"} {
+		if strings.Contains(out, secret) {
+			t.Errorf("the report leaks %q:\n%s", secret, out)
+		}
+	}
+	for _, kept := range []string{"G1", "access denied", "picture index", "[settings]", "<path>", "<link>", "<user>"} {
+		if !strings.Contains(out, kept) {
+			t.Errorf("the report lacks %q:\n%s", kept, out)
+		}
+	}
+}
+
+func TestIxPlansNeverTrashTheOnlyCopy(t *testing.T) {
+	ctx := context.Background()
+	a, err := newConfiguredTestApp(ctx, Config{DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	body := []byte("only copy")
+	sum := sha256.Sum256(body)
+	h := hex.EncodeToString(sum[:])
+	if err := os.MkdirAll(filepath.Join(a.downloadsDir, "g1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(a.downloadsDir, "g1", "v.mp4"), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// One file, catalogued under two spellings of its path.
+	for i, p := range []string{"g1/v.mp4", "./g1/v.mp4", `g1\v.mp4`} {
+		if _, err := a.db.Writer.Exec(`INSERT INTO downloads(group_id,group_name,message_id,file_name,file_size,file_type,file_path,status,file_hash) VALUES(?,'',1,'v',9,'video',?,'completed',?)`,
+			"-100"+string(rune('1'+i)), p, h); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ops, err := a.ixPlanDuplicateCopies(ctx)
+	if err != nil || len(ops) != 0 {
+		t.Fatalf("planned to move the only copy: %+v %v", ops, err)
+	}
+	// Even a plan written by hand cannot trash it.
+	id, _ := a.ixSavePlan(ctx, "duplicate-copies", "bad", []ixMoveOp{{Op: "trash", Src: "g1/v.mp4", Dst: "_trash/x/g1/v.mp4", SHA256: h, Size: 9, Repoint: "./g1/v.mp4"}})
+	if err := a.ixApplyPlan(ctx, id); err == nil {
+		t.Fatal("trashed the only copy")
+	}
+	if _, err := os.Stat(filepath.Join(a.downloadsDir, "g1", "v.mp4")); err != nil {
+		t.Fatalf("the file is gone: %v", err)
+	}
+	// A move whose catalogue entry cannot follow is put back.
+	if err := os.WriteFile(filepath.Join(a.downloadsDir, "stray.mp4"), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	id, _ = a.ixSavePlan(ctx, "collection", "stray", []ixMoveOp{{Op: "move", Src: "stray.mp4", Dst: "moved/stray.mp4", SHA256: h, Size: 9, Repoint: "moved/stray.mp4"}})
+	if err := a.ixApplyPlan(ctx, id); err == nil {
+		t.Fatal("moved a file no entry points at")
+	}
+	if _, err := os.Stat(filepath.Join(a.downloadsDir, "stray.mp4")); err != nil {
+		t.Fatalf("not moved back: %v", err)
+	}
+	// An interrupted move (file moved, journal not updated) is finished on retry.
+	if _, err := a.db.Writer.Exec(`INSERT INTO downloads(group_id,group_name,message_id,file_name,file_size,file_type,file_path,status,file_hash) VALUES('-1009','',1,'v',9,'video','stray.mp4','completed',?)`, h); err != nil {
+		t.Fatal(err)
+	}
+	id, _ = a.ixSavePlan(ctx, "collection", "half", []ixMoveOp{{Op: "move", Src: "stray.mp4", Dst: "moved/stray.mp4", SHA256: h, Size: 9, Repoint: "moved/stray.mp4"}})
+	if err := ixMoveVerified(a.ixAbs("stray.mp4"), a.ixAbs("moved/stray.mp4"), h); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = a.db.Writer.Exec(`UPDATE ix_moves SET state='running' WHERE plan_id=?`, id)
+	_, _ = a.db.Writer.Exec(`UPDATE ix_move_plans SET state='failed' WHERE id=?`, id)
+	if err := a.ixApplyPlan(ctx, id); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	var path string
+	_ = a.db.Reader.QueryRow(`SELECT file_path FROM downloads WHERE group_id='-1009'`).Scan(&path)
+	if path != "moved/stray.mp4" {
+		t.Fatalf("entry at %q", path)
+	}
+	if err := a.ixUndoPlan(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	_ = a.db.Reader.QueryRow(`SELECT file_path FROM downloads WHERE group_id='-1009'`).Scan(&path)
+	if _, err := os.Stat(a.ixAbs("stray.mp4")); err != nil || path != "stray.mp4" {
+		t.Fatalf("undo: %v %q", err, path)
+	}
+}

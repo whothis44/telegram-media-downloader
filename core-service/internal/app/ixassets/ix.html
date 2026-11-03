@@ -348,7 +348,11 @@ function viewSearch() {
 // ---------------- Settings ----------------
 function viewSettings() {
   const s = state.status.settings;
-  return `<div class="card"><h2>Index copy on the NAS</h2>
+  return `<div class="card"><h2>Diagnostics report</h2>
+<div class="muted">If something isn't working, make a report and paste it to whoever is helping you. It lists settings, counts, progress and error messages only: every chat, file, person, link and long number is replaced by a placeholder (chats become G1, G2… consistently), and no message text, caption or file name is included. Read it before you share it.</div>
+<div class="btns"><button class="b" data-act="diag">Make the report</button>${state.diag ? '<button class="b" data-act="diag-copy">Copy it</button>' : ''}${state.diagMsg ? `<span class="muted">${esc(state.diagMsg)}</span>` : ''}</div>
+${state.diag ? `<textarea id="diag" readonly style="width:100%;min-height:260px;font:12px/1.4 ui-monospace,Consolas,monospace;background:var(--soft);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px">${esc(state.diag)}</textarea>` : ''}</div>
+<div class="card"><h2>Index copy on the NAS</h2>
 <label><input type="checkbox" data-set="exportEnabled" ${s.exportEnabled ? 'checked' : ''}> Write a copy of the index every night</label>
 <div class="btns">At <input class="t" data-set-text="exportTime" value="${esc(s.exportTime)}" style="width:80px"> (24-hour, this computer's time)</div>
 <div class="btns">Folder: <input class="t" data-set-text="exportDir" value="${esc(s.exportDir)}" placeholder="${esc(state.status.exportDir || '')}" style="flex:1;min-width:240px"></div>
@@ -384,6 +388,8 @@ function render() {
   const focusKey = prev && prev.getAttribute ? prev.getAttribute('data-focus') : null;
   const caret = focusKey && typeof prev.selectionStart === 'number' ? prev.selectionStart : null;
   const y = window.scrollY;
+  // Scrolled lists keep their place when the numbers refresh.
+  const listScroll = [...$app.querySelectorAll('.list,.rows')].map((el) => el.scrollTop);
   let h = `<header class="top"><h1>Archive</h1><nav class="tabs">${TABS.map(([k, l]) => `<button class="tab ${state.tab === k ? 'on' : ''}" data-act="tab" data-key="${k}">${l}</button>`).join('')}</nav><span class="grow"></span><a href="/">← Dashboard</a></header>`;
   if (state.error) h += `<div class="status bad">${esc(state.error)} <button class="b" data-act="reload">Try again</button></div>`;
   if (!state.status) { $app.innerHTML = h + (state.error ? '' : '<p class="muted">Loading…</p>'); return; }
@@ -392,6 +398,7 @@ function render() {
   h += view();
   $app.innerHTML = h;
   window.scrollTo(0, y);
+  $app.querySelectorAll('.list,.rows').forEach((el, i) => { if (listScroll[i]) el.scrollTop = listScroll[i]; });
   if (focusKey) {
     const el = $app.querySelector(`[data-focus="${CSS.escape(focusKey)}"]`);
     if (el) { el.focus(); if (caret !== null) { try { el.setSelectionRange(caret, caret); } catch { /* ignore */ } } }
@@ -457,6 +464,8 @@ $app.addEventListener('click', async (ev) => {
       await load(); loadDups(false); break;
     }
     case 'reload': load(); break;
+    case 'diag': { const r = await fetch('/api/ix/diagnostics', { credentials: 'same-origin' }); state.diag = r.ok ? await r.text() : ''; state.diagMsg = r.ok ? '' : 'Could not make the report: HTTP ' + r.status; render(); break; }
+    case 'diag-copy': { try { await navigator.clipboard.writeText(state.diag); state.diagMsg = 'Copied.'; } catch { const t = document.getElementById('diag'); if (t) { t.select(); document.execCommand('copy'); } state.diagMsg = 'Copied.'; } render(); break; }
     case 'freeze-check': { const r = await api('POST', '/api/ix/freeze/check'); if (!r.ok) state.error = 'Could not read the freeze state: ' + errText(r); load(); break; }
     case 'held-release': { const r = await api('POST', '/api/ix/held/release'); state.keepMsg = r.ok ? 'The held files are back in the download queue.' : errText(r); load(); break; }
     case 'subst-fetch': {

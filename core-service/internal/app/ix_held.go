@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/botnick/telegram-media-downloader/core-service/internal/download"
@@ -103,6 +104,16 @@ type ixRemoteFile interface {
 func (a *App) ixSubstitute(ctx context.Context, item download.Item, client download.Client) (string, bool) {
 	size := item.Identity.Size
 	if size < ixSubstMinSize {
+		return "", false
+	}
+	// Sampled checks suit media files, which change throughout when re-encoded.
+	// A document can be edited in place without changing its length, so
+	// documents are always downloaded.
+	mime := strings.ToLower(item.Facts.Mime)
+	switch {
+	case item.Type == "video" || item.Type == "audio" || item.Type == "voice" || item.Type == "photo":
+	case strings.HasPrefix(mime, "video/") || strings.HasPrefix(mime, "audio/") || strings.HasPrefix(mime, "image/"):
+	default:
 		return "", false
 	}
 	if !a.ixLoadSettings(ctx).SubstExact {
@@ -377,11 +388,19 @@ func (a *App) ixHeldStep(ctx context.Context) error {
 	}
 	release := !s.HoldLikely
 	if !release && !s.HoldForever {
+		// Only files the engine could take now count: not ones waiting to
+		// retry later. And when nothing has finished for half an hour while
+		// copies are held, they go too rather than wait behind a stuck queue.
 		var waiting int
-		if err := a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM tgdl_work WHERE status='pending' AND paused=0`).Scan(&waiting); err != nil {
+		if err := a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM tgdl_work WHERE status='pending' AND paused=0 AND retry_at<=?`, time.Now().UnixMilli()).Scan(&waiting); err != nil {
 			return err
 		}
 		release = waiting == 0
+		if !release {
+			var last int64
+			_ = a.db.Reader.QueryRowContext(ctx, `SELECT COALESCE(MAX(updated_at),0) FROM tgdl_work WHERE status='completed'`).Scan(&last)
+			release = last > 0 && time.Since(time.UnixMilli(last)) > 30*time.Minute
+		}
 	}
 	if !release {
 		return nil
@@ -450,6 +469,10 @@ func (a *App) ixFetchSubstituted(ctx context.Context) (int, []string, error) {
 		if err == nil {
 			// Only the catalogue row goes: the saved file it pointed at stays.
 			_, err = tx.ExecContext(ctx, `DELETE FROM downloads WHERE group_id=? AND message_id=? AND file_path=?`, x.group, x.msg, x.path)
+		}
+		if err == nil {
+			// So the next files pass queues it again.
+			_, err = tx.ExecContext(ctx, `DELETE FROM tgdl_work WHERE group_id=? AND message_id=? AND status IN ('completed','skipped','failed')`, x.group, x.msg)
 		}
 		if err == nil {
 			_, err = tx.ExecContext(ctx, `DELETE FROM ix_subst WHERE group_id=? AND message_id=?`, x.group, x.msg)

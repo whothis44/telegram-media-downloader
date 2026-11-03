@@ -42,6 +42,7 @@ func registerIxBrowseRoutes(mux *http.ServeMux, a *App) {
 	mux.Handle("POST /api/ix/held/release", h(a.handleIxHeldRelease))
 	mux.Handle("POST /api/ix/subst/fetch", h(a.handleIxSubstFetch))
 	mux.Handle("POST /api/ix/freeze/check", h(a.handleIxFreezeCheck))
+	mux.Handle("GET /api/ix/diagnostics", h(a.handleIxDiagnostics))
 }
 
 func (a *App) handleIxBrowsePage(w http.ResponseWriter, _ *http.Request) {
