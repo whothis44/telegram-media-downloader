@@ -19,40 +19,88 @@ It runs in Docker on your PC and uses the graphics card. **No picture leaves you
 
 ## Install (Windows)
 
-**RTX 50-series cards (5070 Ti and others): use the processor image.**
+### 1. Docker Desktop
 
-- Immich's CUDA image (v2.7.5, and Immich's main branch as of November 2026) is built on CUDA 12.2.
-- The RTX 50 series needs CUDA 12.8 or later, so on these cards that image quietly falls back to the processor
-  anyway; its log says `Falling back to ['CPUExecutionProvider']`.
-- The processor image does the same work. It's slower, but it runs in the background behind everything else.
-- Check Immich's release notes for "CUDA 12.8" before switching to the `-cuda` image.
-
-1. Install **Docker Desktop** (docker.com) with the WSL 2 engine, which is the default. Start it once and let it
-   finish setting up.
-2. Open PowerShell and run (one line):
+1. In an administrator PowerShell, run `winget install -e --id Docker.DockerDesktop`, or use the installer from
+   docker.com. Keep **Use WSL 2** ticked and restart when asked.
+2. Start Docker Desktop from the Start menu.
+   - Accept the terms and skip sign-in; no account is needed.
+   - Wait until it says **Engine running**.
+   - For privacy, untick Settings → General → **Send usage statistics**.
+3. Open a **new** PowerShell window and check that Docker can reach the graphics card:
 
    ```
-   docker run -d --name immich-ml --restart unless-stopped -p 127.0.0.1:3003:3003 -v immich-ml-cache:/cache ghcr.io/immich-app/immich-machine-learning:v2.7.5
+   docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu22.04 nvidia-smi
    ```
 
-   - `127.0.0.1:3003` makes the service reachable from this PC only.
-   - The models are kept in the `immich-ml-cache` volume, so they are downloaded once.
-   - The version is pinned (v2.7.5) because the archive talks to an internal part of Immich that could change in
-     another version. Use that version unless the archive's release notes name a newer one.
-   - With an older NVIDIA card (RTX 20, 30 or 40 series), add `--gpus all` after `-d` and use the image
-     `ghcr.io/immich-app/immich-machine-learning:v2.7.5-cuda`.
-3. In the archive (**Archive → Settings → Image recognition**):
-   - Enter `http://127.0.0.1:3003` and save.
-   - Press **Check the connection**. The first check downloads the models and can take a few minutes.
-   - It should then say **Connected**.
+   This should print a table naming your card.
+
+**If Docker complains:**
+
+- **"failed to connect to the docker API":** Docker Desktop isn't running, or hasn't finished starting.
+- **"docker-credential-desktop: executable file not found":** happens until you next sign in to Windows. Run these
+  once to fix it. They back up Docker's settings and switch off a sign-in helper that public images don't need:
+
+  ```
+  $cfg = "$env:USERPROFILE\.docker\config.json"; Copy-Item $cfg "$cfg.bak"
+  (Get-Content $cfg -Raw) -replace '"credsStore"', '"credsStore_off"' | Set-Content $cfg
+  ```
+
+### 2. The image-recognition service
+
+**RTX 50-series cards (5070 Ti and others):**
+
+- Immich's own CUDA image is built on CUDA 12.2. On these cards it quietly falls back to the processor; its log
+  says `Falling back to ['CPUExecutionProvider']`.
+- Instead, build this archive's version: Immich's official image plus NVIDIA's CUDA 12.8 libraries (see
+  `docs/immich-ml-rtx50/Dockerfile`). It has been checked on an RTX 5070 Ti.
+- Run:
+
+  ```
+  docker build -t immich-ml-rtx50 https://github.com/whothis44/telegram-media-downloader.git#main:docs/immich-ml-rtx50
+  docker run -d --name immich-ml --restart unless-stopped --gpus all -p 127.0.0.1:3003:3003 -v immich-ml-cache:/cache immich-ml-rtx50
+  ```
+
+**RTX 20, 30 or 40 series:**
+
+```
+docker run -d --name immich-ml --restart unless-stopped --gpus all -p 127.0.0.1:3003:3003 -v immich-ml-cache:/cache ghcr.io/immich-app/immich-machine-learning:v2.7.5-cuda
+```
+
+**No NVIDIA card:**
+
+```
+docker run -d --name immich-ml --restart unless-stopped -p 127.0.0.1:3003:3003 -v immich-ml-cache:/cache ghcr.io/immich-app/immich-machine-learning:v2.7.5
+```
+
+About these commands:
+
+- `127.0.0.1:3003` makes the service reachable from this PC only.
+- The models are kept in the `immich-ml-cache` volume, so they are downloaded once.
+- The version is pinned (v2.7.5) because the archive talks to an internal part of Immich that could change in another
+  version. Use that version unless the archive's release notes name a newer one.
+
+### 3. Connect the archive
+
+1. In **Archive → Settings → Image recognition**, enter `http://127.0.0.1:3003` and save.
+2. Press **Check the connection**. The first check downloads the models and can take a few minutes. It should then
+   say **Connected**.
+3. Check that the graphics card is used. Run:
+
+   ```
+   docker logs immich-ml 2>&1 | Select-String "Failed|Error|fall"
+   ```
+
+   It should print nothing. While the archive works through pictures, Task Manager → Performance → GPU should show
+   activity on its **Cuda** or **Compute** graph.
 
 The archive then looks at each distinct picture once, in the background. Duplicates are not looked at again.
 
 - **What it covers:** what the picture shows, then faces and text, when those are on.
 - **When it runs:** it follows the duplicate-finding quiet hours, and pauses while the service is unreachable.
 - **Progress:** shown in Settings and in the browser's sidebar.
-- **How long:** on the processor, expect hours rather than minutes for tens of thousands of distinct pictures. Faces
-  and text take longer than the rest.
+- **How fast:** several files are sent at a time, so the card stays busy. Without a usable graphics card, expect
+  hours rather than minutes for tens of thousands of distinct pictures. Faces and text take longer than the rest.
 
 When idle for 5 minutes, the service frees the memory its models use. To stop it: `docker stop immich-ml`; to
 start it again: `docker start immich-ml`.

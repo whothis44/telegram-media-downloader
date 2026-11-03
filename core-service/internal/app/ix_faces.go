@@ -216,7 +216,7 @@ func ixCosF(a, b []float32) float32 {
 func (a *App) ixFaceTask(ctx context.Context, c *ixMLClient) *ixMLTask {
 	a.ixMLDoneSet(ctx, "faces", ixFaceModel, `SELECT key FROM ix_face_done WHERE model=?`)
 	return &ixMLTask{
-		name: "faces", model: ixFaceModel, errTable: "ix_ml_err",
+		name: "faces", model: ixFaceModel, errTable: "ix_ml_err", par: 3,
 		wanted: func(it *ixMItem) bool { return it.Type == "photo" || it.Type == "video" },
 		done:   a.ixMLIsDone("faces"),
 		run:    func(ctx context.Context, it *ixMItem) error { return a.ixFaceItem(ctx, c, it) },

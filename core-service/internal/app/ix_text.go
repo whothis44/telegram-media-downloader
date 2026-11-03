@@ -81,7 +81,7 @@ func (a *App) ixOCRTask(ctx context.Context, c *ixMLClient) *ixMLTask {
 	model := ixOCRModelOf(a.ixLoadSettings(ctx))
 	a.ixMLDoneSet(ctx, "text", model, `SELECT key FROM ix_ocr WHERE model=?`)
 	return &ixMLTask{
-		name: "text", model: model, errTable: "ix_ml_err",
+		name: "text", model: model, errTable: "ix_ml_err", par: 3,
 		wanted: func(it *ixMItem) bool { return it.Type == "photo" || it.Type == "video" },
 		done:   a.ixMLIsDone("text"),
 		run: func(ctx context.Context, it *ixMItem) error {

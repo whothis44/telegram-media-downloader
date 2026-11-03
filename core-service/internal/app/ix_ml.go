@@ -293,6 +293,7 @@ type ixMLBox struct {
 	done         map[string]map[string]bool // task -> files looked at (faces, text, speech)
 	doneModel    map[string]string
 	regroupAfter int64 // the last ungrouped face given another chance
+	running      int   // steps under way
 }
 
 type ixMLStatus struct {
@@ -577,6 +578,7 @@ type ixMLTask struct {
 	test     func(ctx context.Context) error // does the service work at all
 	note     func(reachable bool, msg string)
 	finish   func(ctx context.Context) // after a round that did something
+	par      int                       // files at a time
 }
 
 // ixMLTasks lists the image-recognition work that is switched on.
@@ -594,7 +596,7 @@ func (a *App) ixMLTasks(ctx context.Context, c *ixMLClient, s ixSettings) []*ixM
 func (a *App) ixClipTask(c *ixMLClient) *ixMLTask {
 	box := a.ixMLBox()
 	return &ixMLTask{
-		name: "clip", model: c.model, errTable: "ix_emb_err",
+		name: "clip", model: c.model, errTable: "ix_emb_err", par: 4,
 		wanted: func(it *ixMItem) bool { return it.Type == "photo" || it.Type == "video" },
 		done:   box.store.has,
 		run:    func(ctx context.Context, it *ixMItem) error { return a.ixMLEmbedItem(ctx, c, it) },
@@ -774,15 +776,83 @@ func ixMLWanted(m *ixModel, c int) (int32, bool) {
 
 // ixMLStep does the next file of a task; false when none is left.
 func (a *App) ixMLStep(ctx context.Context, t *ixMLTask, m *ixModel, r *ixMLRun) (bool, error) {
+	items := a.ixMLNext(t, m, r, max(1, t.par))
+	if len(items) == 0 {
+		return false, nil
+	}
+	// A few files at a time: reading them (from the NAS, or frames out of
+	// videos) and the service's work overlap, so the graphics card is kept
+	// busy rather than waiting for each file in turn.
 	box := a.ixMLBox()
 	box.mu.Lock()
-	start := box.after[t.name]
+	box.running++
+	box.st.Running = true
 	box.mu.Unlock()
-	if int(start) > len(m.Clusters) {
+	errs := make([]error, len(items))
+	var wg sync.WaitGroup
+	for i, it := range items {
+		wg.Add(1)
+		go func(i int, it *ixMItem) {
+			defer wg.Done()
+			errs[i] = t.run(ctx, it)
+		}(i, it)
+	}
+	wg.Wait()
+	box.mu.Lock()
+	box.running--
+	box.st.Running = box.running > 0
+	box.mu.Unlock()
+	var first error
+	for i, it := range items {
+		var bad ixMLFileErr
+		switch err := errs[i]; {
+		case errors.As(err, &bad):
+			r.pending = append(r.pending, [2]string{it.Key, bad.msg})
+			r.last = bad.msg
+		case err == nil:
+			r.ok = true
+		case first == nil:
+			first = err
+		}
+	}
+	if first != nil {
+		return true, first
+	}
+	if !r.ok && len(r.pending) >= ixMLStreak {
+		return true, errIxMLStreak
+	}
+	if r.ok {
+		a.ixMLFlush(ctx, t, r)
+	}
+	return true, nil
+}
+
+// ixMLNext picks up to n files a task has still to do, walking the
+// duplicate sets from where it stopped (and once more from the start).
+func (a *App) ixMLNext(t *ixMLTask, m *ixModel, r *ixMLRun, n int) []*ixMItem {
+	box := a.ixMLBox()
+	box.mu.Lock()
+	start := int(box.after[t.name])
+	box.mu.Unlock()
+	if start > len(m.Clusters) {
 		start = 0 // the model was rebuilt smaller
 	}
-	for ci := int(start); ci < len(m.Clusters); ci++ {
+	var out []*ixMItem
+	ci := start
+	wrapped := false
+	for len(out) < n {
+		if ci >= len(m.Clusters) {
+			if wrapped || start == 0 {
+				ci = 0
+				break
+			}
+			wrapped, ci = true, 0
+		}
+		if wrapped && ci >= start {
+			break
+		}
 		ii, ok := ixMLWanted(m, ci)
+		ci++
 		if !ok {
 			continue
 		}
@@ -791,39 +861,12 @@ func (a *App) ixMLStep(ctx context.Context, t *ixMLTask, m *ixModel, r *ixMLRun)
 			continue
 		}
 		r.tried[it.Key] = true // once per round
-		box.mu.Lock()
-		box.after[t.name] = int32(ci + 1)
-		box.st.Running = true
-		box.mu.Unlock()
-		err := t.run(ctx, it)
-		box.mu.Lock()
-		box.st.Running = false
-		box.mu.Unlock()
-		var bad ixMLFileErr
-		if errors.As(err, &bad) {
-			r.pending = append(r.pending, [2]string{it.Key, bad.msg})
-			r.last = bad.msg
-			if !r.ok && len(r.pending) >= ixMLStreak {
-				return true, errIxMLStreak
-			}
-			if r.ok {
-				a.ixMLFlush(ctx, t, r)
-			}
-			return true, nil
-		}
-		if err == nil {
-			r.ok = true
-			a.ixMLFlush(ctx, t, r)
-		}
-		return true, err
+		out = append(out, it)
 	}
 	box.mu.Lock()
-	box.after[t.name] = 0
+	box.after[t.name] = int32(ci)
 	box.mu.Unlock()
-	if start > 0 {
-		return a.ixMLStep(ctx, t, m, r) // once more from the start
-	}
-	return false, nil
+	return out
 }
 
 // ixMLFileErr: this file could not be looked at (the service works).
