@@ -160,19 +160,19 @@ function viewRescan() {
   const notQueued = groups().filter((g) => !items.some((i) => i.groupId === g.id && (i.state === 'waiting' || i.state === 'running')));
   let h = `<div class="card"><h2>Rescan everything</h2><div class="muted">Full history of every group, one group after another, with photos, videos <b>and files/documents</b> switched on. Groups already in the queue are skipped.</div>
 <div class="btns"><button class="b primary" data-act="p-everything" ${notQueued.length ? '' : 'disabled'}>Rescan all ${notQueued.length} group(s)</button></div></div>`;
-  h += `<div class="status">${head} One group at a time. Groups marked <b>★ first</b> get both passes before all others. Then, <b>first pass:</b> every group's messages are saved — quick, and it doesn't wait for downloads. <b>Second pass</b>, once every queued group's messages are saved: each group with files still missing is walked again to fetch them (failed files get another try too). Runs inside the server — you can close this page.${q.notice ? `<div class="muted" style="margin-top:4px">${esc(q.notice)}</div>` : ''}</div>`;
+  h += `<div class="status">${head} Two lanes run side by side, one group each. <b>Messages:</b> every group's history is saved, without waiting for downloads. <b>Files:</b> as soon as a group's messages are saved, it is walked again to fetch the files still missing (failed files get another try too). <b>★ First</b> groups go first in both lanes. Runs inside the server — you can close this page.${q.notice ? `<div class="muted" style="margin-top:4px">${esc(q.notice)}</div>` : ''}</div>`;
   h += `<div class="btns" style="margin-bottom:12px">${q.running ? `<button class="b" data-act="q-pause">Pause</button>` : `<button class="b primary" data-act="q-start" ${counts.waiting ? '' : 'disabled'}>Start</button>`}
 <button class="b" data-act="q-clear-finished" ${counts.done + counts.failed ? '' : 'disabled'}>Remove finished</button><button class="b" data-act="q-clear" ${items.length ? '' : 'disabled'}>Clear queue</button>
 <span class="muted">Retries: ${q.maxAttempts ? 'up to ' + q.maxAttempts : 'unlimited'}</span></div>`;
   if (items.length) {
-    h += `<div class="list" style="margin-bottom:12px"><table><tr><th>#</th><th>Group</th><th>Step</th><th>Messages saved</th><th>Files missing</th><th>Files queued</th><th>Tries</th><th></th></tr>`;
+    h += `<div class="list" style="margin-bottom:12px"><table><tr><th>#</th><th>Group</th><th>Step</th><th>Messages saved</th><th>Files missing</th><th title="New downloads this group's files pass has added to the download queue">Files queued</th><th>Tries</th><th></th></tr>`;
     items.forEach((it, i) => {
-      const when = it.state === 'waiting' && it.nextAt > Date.now() ? ` · retry ${esc(fmtTime(it.nextAt))}` : '';
+      const when = (it.state === 'waiting' && it.nextAt > Date.now() ? ` · retry ${esc(fmtTime(it.nextAt))}` : '') + (it.resumeFrom && it.state !== 'done' ? ` · continues below message #${it.resumeFrom}` : '');
       const files = it.phase === 'files';
       const label = { waiting: files ? 'files: waiting' : 'messages: waiting', running: files ? 'fetching files' : 'saving messages', done: 'done', failed: 'failed' }[it.state] || it.state;
-      const msgs = it.messagesAt ? it.messages : (it.state === 'running' && !files) || (it.state === 'done' && !it.phase) ? it.processed : null;
+      const msgs = it.messagesAt ? it.messages : (it.state === 'running' && !files) || (it.state === 'done' && !it.phase) ? (it.carried || 0) + it.processed : it.carried ? it.carried : null;
       const missing = it.messagesAt ? it.missing : null;
-      h += `<tr><td class="n">${i + 1}</td><td>${it.priority ? '<b title="Goes first, files included">★</b> ' : ''}${esc(it.name)}${it.error ? `<div class="muted bad">${esc(it.error)}</div>` : ''}</td><td><span class="pill ${esc(it.state)}">${esc(label)}</span><span class="muted">${when}</span></td><td class="n">${msgs === null ? '<span class="muted">–</span>' : fmtNum(msgs)}</td><td class="n">${missing === null ? '<span class="muted">–</span>' : fmtNum(missing)}</td><td class="n">${files || !it.phase ? fmtNum(it.downloaded) : '<span class="muted">–</span>'}</td><td class="n">${it.attempts || 0}</td>
+      h += `<tr><td class="n">${i + 1}</td><td>${it.priority ? '<b title="Goes first, files included">★</b> ' : ''}${esc(it.name)}${it.error ? `<div class="muted bad">${esc(it.error)}</div>` : ''}</td><td><span class="pill ${esc(it.state)}">${esc(label)}</span><span class="muted">${when}</span></td><td class="n">${msgs === null ? '<span class="muted">–</span>' : fmtNum(msgs)}</td><td class="n">${missing === null ? '<span class="muted">–</span>' : fmtNum(missing)}</td><td class="n">${(files && it.state !== 'waiting') || !it.phase ? fmtNum(it.downloaded) : '<span class="muted">–</span>'}</td><td class="n">${it.attempts || 0}</td>
 <td>${it.state === 'running' || it.state === 'waiting' ? `<button class="mini" data-act="q-priority" data-id="${esc(it.groupId)}" data-on="${it.priority ? '' : '1'}">${it.priority ? 'Normal order' : '★ First'}</button>` : `<button class="mini" data-act="q-retry" data-id="${esc(it.groupId)}">Run again</button>`}<button class="mini" data-act="q-remove" data-id="${esc(it.groupId)}">${it.state === 'running' ? 'Stop' : 'Remove'}</button></td></tr>`;
     });
     h += `</table></div>`;
@@ -196,7 +196,7 @@ function viewRescan() {
 <div class="list">${shown.map((x) => `<div class="row" style="grid-template-columns:1fr"><label><input type="checkbox" data-pick="${esc(x.id)}" data-name="${esc(x.name)}" ${state.pick.has(x.id) ? 'checked' : ''}><span><b>${esc(x.name)}</b> <span class="muted">${x.extra ? esc(x.sub) : x.sub}${queued.has(x.id) ? ' · in the queue' : ''}</span></span></label></div>`).join('') || '<div class="muted" style="padding:8px">No chats match.</div>'}</div>
 <label class="muted"><input type="checkbox" data-in-check="ensureFilters" ${state.ensureFilters ? 'checked' : ''}> Switch on photos, videos <b>and files/documents</b> for these groups (recommended)</label>
 <div class="btns"><button class="b primary" data-act="p-add" ${state.pick.size ? '' : 'disabled'}>Rescan ${state.pick.size} ticked group(s)</button><button class="b" data-act="p-add-first" ${state.pick.size ? '' : 'disabled'}>★ Rescan ${state.pick.size} ticked first</button></div>
-<div class="muted">★ First: these groups get both passes, messages and files, before any other group. Ticking a group that is already queued just moves it to the front, keeping its progress.</div></div>`;
+<div class="muted">★ First: these groups go ahead of all others, for their messages and then their files. Ticking a group that is already queued just moves it to the front, keeping its progress.</div></div>`;
   return h;
 }
 

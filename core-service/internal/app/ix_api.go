@@ -254,6 +254,7 @@ func (a *App) handleIxQueueAction(w http.ResponseWriter, r *http.Request) {
 				// Again from the start: messages first, then missing files.
 				st.Items[i].State, st.Items[i].NextAt, st.Items[i].Error = "waiting", 0, ""
 				st.Items[i].Phase, st.Items[i].Attempts = ixPhaseMessages, 0
+				st.Items[i].ResumeFrom, st.Items[i].Carried, st.Items[i].PassStartedAt = 0, 0, 0
 			}
 		case "priority":
 			if i := ixQueueIndex(st, groupID); i >= 0 {

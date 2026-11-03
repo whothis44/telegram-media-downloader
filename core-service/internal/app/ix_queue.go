@@ -15,15 +15,15 @@ import (
 	"github.com/botnick/telegram-media-downloader/core-service/internal/ws"
 )
 
-// The rescan queue walks whole groups, one at a time, with the backfill
-// engine. Groups marked as priority go first, with both passes; then each
-// other group gets two passes. The first reads and records every
-// message and queues no downloads, so it is quick and is never held back by
-// the download queue; every queued group has its messages saved before any
-// second pass starts. The second pass walks again and queues the files the
-// library does not have yet; groups with nothing missing skip it. The queue
-// runs inside the server, so it continues with no browser open, and
-// survives restarts (its state is in the kv table).
+// The rescan queue walks whole groups with the backfill engine. Each group
+// gets two passes, in two lanes that run side by side, one group each: the
+// messages pass reads and records every message and queues no downloads, so
+// it is never held back by the download queue; the files pass walks the
+// group again once its messages are saved and queues the files the library
+// does not have yet (groups with nothing missing skip it). Groups marked as
+// priority go first in each lane. The queue runs inside the server, so it
+// continues with no browser open, and survives restarts (its state is in
+// the kv table).
 
 const (
 	ixQueueKey  = "ix_queue"
@@ -60,6 +60,12 @@ type ixQueueItem struct {
 	Missing    int    `json:"missing,omitempty"`    // files still missing after it
 	// Priority groups get both passes before any other group starts.
 	Priority bool `json:"priority,omitempty"`
+	// A pass that stopped part-way carries on below ResumeFrom (the oldest
+	// message it reached); Carried counts what earlier attempts read, and
+	// PassStartedAt is when the pass first started.
+	ResumeFrom    int   `json:"resumeFrom,omitempty"`
+	Carried       int   `json:"carried,omitempty"`
+	PassStartedAt int64 `json:"passStartedAt,omitempty"`
 }
 
 type ixQueueState struct {
@@ -72,7 +78,8 @@ type ixQueueState struct {
 
 // ixQueueDeps are the backfill operations the queue uses; tests replace them.
 type ixQueueDeps struct {
-	start   func(ctx context.Context, groupID string, messagesOnly bool) (jobID string, err error)
+	start   func(ctx context.Context, groupID string, messagesOnly bool, resumeFrom int) (jobID string, err error)
+	cursor  func(ctx context.Context, jobID string) int // oldest message a backfill reached (0: unknown)
 	job     func(ctx context.Context, jobID string) (historyJob, bool)
 	missing func(ctx context.Context, groupID string) (int, error) // files the library still lacks
 	finish  func(ctx context.Context, item ixQueueItem, job historyJob) error
@@ -84,6 +91,7 @@ func (a *App) ixDeps() ixQueueDeps {
 	return ixQueueDeps{
 		start:   a.ixStartHistory,
 		job:     a.ixHistoryJob,
+		cursor:  a.ixHistoryCursor,
 		missing: a.ixMissingFiles,
 		finish:  a.ixFinishWalk,
 		hold:    a.ixHold,
@@ -199,8 +207,11 @@ func ixRetryLater(st *ixQueueState, i int, now time.Time, reason string) {
 	st.Items = append(append(st.Items[:i:i], st.Items[i+1:]...), item)
 }
 
-// ixQueueStep advances the queue by one decision. It is called every few
-// seconds and after every change made through the API.
+// ixQueueStep advances the queue. It is called every few seconds and after
+// every change made through the API. Two lanes run side by side, one group
+// each: messages passes, and files passes (a group's files pass can start as
+// soon as its messages are saved), so saving messages never waits for
+// downloads and downloads never wait for the other groups' messages.
 func (a *App) ixQueueStep(ctx context.Context, deps ixQueueDeps) error {
 	rt := a.ix()
 	rt.queueMu.Lock()
@@ -218,83 +229,27 @@ func (a *App) ixQueueStep(ctx context.Context, deps ixQueueDeps) error {
 		}
 		return a.ixSaveQueue(ctx, st, now)
 	}
-	for i := range st.Items {
-		item := &st.Items[i]
-		if item.State != "running" {
-			continue
+	var running []string
+	for _, item := range st.Items {
+		if item.State == "running" {
+			running = append(running, item.GroupID)
 		}
-		job, ok := deps.job(ctx, item.JobID)
-		if !ok {
-			if now.Sub(time.UnixMilli(item.StartedAt)) > ixLostJob {
-				ixRetryLater(&st, i, now, "the backfill disappeared (the server may have restarted)")
-				return save()
-			}
-			return save()
-		}
-		item.Processed, item.Downloaded = job.Processed, job.Downloaded
-		switch job.State {
-		case "running":
-			st.Notice = ""
-			return save()
-		case "done":
-			if job.Cancelled {
-				ixRetryLater(&st, i, now, "the backfill was cancelled")
-				return save()
-			}
-			if deps.finish != nil {
-				if err := deps.finish(ctx, *item, job); err != nil {
-					ixRetryLater(&st, i, now, "could not finish: "+err.Error())
-					return save()
-				}
-			}
-			toFiles := false
-			if item.Phase == ixPhaseMessages {
-				item.MessagesAt, item.Messages = now.UnixMilli(), job.Processed
-				missing := 0
-				if deps.missing != nil {
-					n, err := deps.missing(ctx, item.GroupID)
-					if err != nil {
-						ixRetryLater(&st, i, now, "could not count missing files: "+err.Error())
-						return save()
-					}
-					missing = n
-				}
-				item.Missing, item.JobID, item.Error = missing, "", ""
-				if missing > 0 {
-					// The files pass waits until every queued group has
-					// had its messages saved.
-					toFiles = true
-					item.Phase, item.State, item.Attempts, item.NextAt = ixPhaseFiles, "waiting", 0, 0
-					item.Processed, item.Downloaded = 0, 0
-				}
-			}
-			if !toFiles {
-				item.State, item.FinishedAt, item.Error, item.JobID = "done", now.UnixMilli(), "", ""
-			}
-		default:
-			reason := "the backfill stopped (" + job.State + ")"
-			if job.Error != nil && *job.Error != "" {
-				reason = *job.Error
-			}
-			ixRetryLater(&st, i, now, reason)
-			return save()
-		}
-		break
 	}
-	// Order: prioritised groups first, both their passes; then everyone
-	// else's messages, then their files; queue order within each. A group
-	// waiting to retry does not hold the others up.
-	next, remaining := -1, 0
-	rank := func(it ixQueueItem) int {
-		r := 0
-		if !it.Priority {
-			r = 2
+	for _, groupID := range running {
+		if err := a.ixQueueTrack(ctx, deps, &st, groupID, now); err != nil {
+			return err
 		}
-		if it.Phase == ixPhaseFiles {
-			r++
-		}
-		return r
 	}
+	// Lanes in use, and the next group for each free lane: prioritised groups
+	// first, queue order otherwise. A group waiting to retry holds no one up.
+	busy := map[bool]bool{}
+	for _, item := range st.Items {
+		if item.State == "running" {
+			busy[item.Phase == ixPhaseFiles] = true
+		}
+	}
+	next := map[bool]int{false: -1, true: -1}
+	remaining := 0
 	for i, item := range st.Items {
 		if item.State != "waiting" {
 			continue
@@ -303,17 +258,28 @@ func (a *App) ixQueueStep(ctx context.Context, deps ixQueueDeps) error {
 		if item.NextAt > now.UnixMilli() {
 			continue
 		}
-		if next < 0 || rank(item) < rank(st.Items[next]) {
-			next = i
+		lane := item.Phase == ixPhaseFiles
+		if j := next[lane]; j < 0 || (item.Priority && !st.Items[j].Priority) {
+			next[lane] = i
 		}
 	}
 	if remaining == 0 {
-		st.Running = false
-		st.Notice = "Finished: every group in the queue has been processed."
+		if len(busy) == 0 {
+			st.Running = false
+			st.Notice = "Finished: every group in the queue has been processed."
+		}
 		return save()
 	}
-	if next < 0 {
-		st.Notice = "Waiting to retry groups that failed."
+	var startable []int
+	for _, lane := range []bool{false, true} { // messages lane first
+		if !busy[lane] && next[lane] >= 0 {
+			startable = append(startable, next[lane])
+		}
+	}
+	if len(startable) == 0 {
+		if len(busy) == 0 {
+			st.Notice = "Waiting to retry groups that failed."
+		}
 		return save()
 	}
 	if deps.hold != nil {
@@ -322,26 +288,112 @@ func (a *App) ixQueueStep(ctx context.Context, deps ixQueueDeps) error {
 			return save()
 		}
 	}
-	// A files pass is paced by the backfill engine itself: it reads more
-	// history only while the download queue has room.
-	item := &st.Items[next]
-	if item.Phase == "" {
-		item.Phase = ixPhaseMessages
-	}
-	jobID, err := deps.start(ctx, item.GroupID, item.Phase == ixPhaseMessages)
-	if err != nil {
-		var permanent ixPermanentError
-		if errors.As(err, &permanent) {
-			item.State, item.Error, item.FinishedAt = "failed", err.Error(), now.UnixMilli()
-			return save()
-		}
-		ixRetryLater(&st, next, now, err.Error())
-		return save()
-	}
-	item.State, item.JobID, item.StartedAt, item.Error = "running", jobID, now.UnixMilli(), ""
-	item.Processed, item.Downloaded, item.NextAt = 0, 0, 0
 	st.Notice = ""
+	// Indexes move when a failed start goes to the back: start by group.
+	var groups []string
+	for _, i := range startable {
+		groups = append(groups, st.Items[i].GroupID)
+	}
+	for _, groupID := range groups {
+		i := ixQueueIndex(&st, groupID)
+		if i < 0 {
+			continue
+		}
+		item := &st.Items[i]
+		if item.Phase == "" {
+			item.Phase = ixPhaseMessages
+		}
+		if item.ResumeFrom == 0 || item.PassStartedAt == 0 {
+			item.ResumeFrom, item.Carried, item.PassStartedAt = 0, 0, now.UnixMilli()
+		}
+		jobID, err := deps.start(ctx, item.GroupID, item.Phase == ixPhaseMessages, item.ResumeFrom)
+		if err != nil {
+			var permanent ixPermanentError
+			if errors.As(err, &permanent) {
+				item.State, item.Error, item.FinishedAt = "failed", err.Error(), now.UnixMilli()
+				continue
+			}
+			ixRetryLater(&st, i, now, err.Error())
+			continue
+		}
+		item.State, item.JobID, item.StartedAt, item.Error = "running", jobID, now.UnixMilli(), ""
+		item.Processed, item.Downloaded, item.NextAt = 0, 0, 0
+	}
 	return save()
+}
+
+// ixQueueTrack follows one running group's backfill: progress, finishing a
+// pass (messages → files when files are missing), or a retry.
+func (a *App) ixQueueTrack(ctx context.Context, deps ixQueueDeps, st *ixQueueState, groupID string, now time.Time) error {
+	i := ixQueueIndex(st, groupID)
+	if i < 0 {
+		return nil
+	}
+	item := &st.Items[i]
+	job, ok := deps.job(ctx, item.JobID)
+	// Where a stopped backfill got to, so the retry carries on from there.
+	keepPlace := func(processed int) {
+		if deps.cursor == nil {
+			return
+		}
+		if c := deps.cursor(ctx, item.JobID); c > 0 && (item.ResumeFrom == 0 || c < item.ResumeFrom) {
+			item.ResumeFrom = c
+			item.Carried += processed
+		}
+	}
+	if !ok {
+		if now.Sub(time.UnixMilli(item.StartedAt)) > ixLostJob {
+			keepPlace(item.Processed)
+			ixRetryLater(st, i, now, "the backfill disappeared (the server may have restarted)")
+		}
+		return nil
+	}
+	item.Processed, item.Downloaded = job.Processed, job.Downloaded
+	switch job.State {
+	case "running":
+		return nil
+	case "done":
+		if job.Cancelled {
+			keepPlace(job.Processed)
+			ixRetryLater(st, i, now, "the backfill was cancelled")
+			return nil
+		}
+		if deps.finish != nil {
+			if err := deps.finish(ctx, *item, job); err != nil {
+				ixRetryLater(st, i, now, "could not finish: "+err.Error())
+				return nil
+			}
+		}
+		read := item.Carried + job.Processed
+		item.ResumeFrom, item.Carried, item.PassStartedAt = 0, 0, 0
+		if item.Phase == ixPhaseMessages {
+			item.MessagesAt, item.Messages = now.UnixMilli(), read
+			missing := 0
+			if deps.missing != nil {
+				n, err := deps.missing(ctx, item.GroupID)
+				if err != nil {
+					ixRetryLater(st, i, now, "could not count missing files: "+err.Error())
+					return nil
+				}
+				missing = n
+			}
+			item.Missing, item.JobID, item.Error = missing, "", ""
+			if missing > 0 {
+				item.Phase, item.State, item.Attempts, item.NextAt = ixPhaseFiles, "waiting", 0, 0
+				item.Processed, item.Downloaded = 0, 0
+				return nil
+			}
+		}
+		item.State, item.FinishedAt, item.Error, item.JobID = "done", now.UnixMilli(), "", ""
+	default:
+		reason := "the backfill stopped (" + job.State + ")"
+		if job.Error != nil && *job.Error != "" {
+			reason = *job.Error
+		}
+		keepPlace(job.Processed)
+		ixRetryLater(st, i, now, reason)
+	}
+	return nil
 }
 
 // ixCall runs one of the server's own HTTP handlers in-process, exactly as
@@ -371,11 +423,15 @@ func ixCall(ctx context.Context, handler http.HandlerFunc, method, path string, 
 // newest down, using Telegram's normal paging; files already in the library
 // are recognised and not downloaded again. messagesOnly records the
 // messages without queueing any download.
-func (a *App) ixStartHistory(ctx context.Context, groupID string, messagesOnly bool) (string, error) {
-	if !messagesOnly {
+func (a *App) ixStartHistory(ctx context.Context, groupID string, messagesOnly bool, resumeFrom int) (string, error) {
+	if !messagesOnly && resumeFrom == 0 {
 		a.ixRequeueGroupFailed(ctx, groupID)
 	}
-	code, out := ixCall(ctx, a.handleHistoryStart, http.MethodPost, "/api/history", map[string]any{"groupId": groupID, "limit": 0, "mode": "pull-older", "minDate": 1, "messagesOnly": messagesOnly}, nil)
+	body := map[string]any{"groupId": groupID, "limit": 0, "mode": "pull-older", "minDate": 1, "messagesOnly": messagesOnly}
+	if resumeFrom > 0 {
+		body["resumeFrom"] = resumeFrom
+	}
+	code, out := ixCall(ctx, a.handleHistoryStart, http.MethodPost, "/api/history", body, nil)
 	if id := toString(out["jobId"]); id != "" && (code == http.StatusOK || toString(out["code"]) == "ALREADY_RUNNING") {
 		return id, nil
 	}
@@ -442,8 +498,12 @@ func (a *App) ixFinishWalk(ctx context.Context, item ixQueueItem, job historyJob
 	}
 	defer tx.Rollback()
 	var marked int64
-	if job.Limit == nil && job.MinDate > 0 && job.MinDate <= 1 && job.StartedAt > 0 {
-		res, err := tx.ExecContext(ctx, `UPDATE ix_messages SET deleted_at=? WHERE group_id=? AND deleted_at=0 AND seen_at<?`, now, group, job.StartedAt)
+	started := job.StartedAt
+	if item.PassStartedAt > 0 && item.PassStartedAt < started {
+		started = item.PassStartedAt // the pass was carried on over several backfills
+	}
+	if job.Limit == nil && job.MinDate > 0 && job.MinDate <= 1 && started > 0 {
+		res, err := tx.ExecContext(ctx, `UPDATE ix_messages SET deleted_at=? WHERE group_id=? AND deleted_at=0 AND seen_at<?`, now, group, started)
 		if err != nil {
 			return err
 		}
@@ -451,7 +511,7 @@ func (a *App) ixFinishWalk(ctx context.Context, item ixQueueItem, job historyJob
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO ix_walks(job_id,group_id,started_at,finished_at,processed,marked_deleted,state) VALUES(?,?,?,?,?,?,?)
 		ON CONFLICT(job_id) DO UPDATE SET finished_at=excluded.finished_at, processed=excluded.processed, marked_deleted=excluded.marked_deleted, state=excluded.state`,
-		job.ID, group, job.StartedAt, now, job.Processed, marked, "done"); err != nil {
+		job.ID, group, started, now, job.Processed, marked, "done"); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -490,4 +550,27 @@ func ixCleanName(name, id string) string {
 		return id
 	}
 	return name
+}
+
+// ixHistoryCursor is the oldest message a backfill has reached: where a
+// walk continues if it has to be started again (0: not known).
+func (a *App) ixHistoryCursor(ctx context.Context, id string) int {
+	if id == "" {
+		return 0
+	}
+	a.historyMu.Lock()
+	if j := a.historyJobs[id]; j != nil {
+		c := j.cursor
+		a.historyMu.Unlock()
+		return c
+	}
+	a.historyMu.Unlock()
+	var payload string
+	if err := a.db.Reader.QueryRowContext(ctx, `SELECT payload FROM tgdl_history_jobs WHERE id=?`, id).Scan(&payload); err == nil {
+		var record historyRecord
+		if json.Unmarshal([]byte(payload), &record) == nil && record.Job.ID == id {
+			return record.Cursor
+		}
+	}
+	return 0
 }
