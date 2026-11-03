@@ -69,6 +69,7 @@ type Controller struct {
 	filter         Filter
 	sink           Sink
 	observer       UpdateObserver
+	recorder       MessageRecorder
 	notify         func(string, error)
 	opMu           sync.Mutex
 	mu             sync.Mutex
@@ -835,6 +836,7 @@ func (c *Controller) accept(ctx context.Context, run *running, accountID string,
 	observe := run.observing.Load() || telegram.IsHistoryRecovery(ctx)
 	c.mu.Lock()
 	observer := c.observer
+	recorder := c.recorder
 	c.mu.Unlock()
 	var list []tg.UpdateClass
 	switch update := u.(type) {
@@ -848,6 +850,16 @@ func (c *Controller) accept(ctx context.Context, run *running, accountID string,
 		return nil
 	}
 	for _, update := range list {
+		if recorder != nil {
+			switch update.(type) {
+			case *tg.UpdateDeleteMessages, *tg.UpdateDeleteChannelMessages:
+				recorder(ctx, accountID, update, u)
+			case *tg.UpdateNewMessage, *tg.UpdateNewChannelMessage, *tg.UpdateEditMessage, *tg.UpdateEditChannelMessage:
+				if observe {
+					recorder(ctx, accountID, update, u)
+				}
+			}
+		}
 		switch update.(type) {
 		case *tg.UpdateDeleteMessages, *tg.UpdateDeleteChannelMessages:
 			// Source deletes still protect retained rescue files while an

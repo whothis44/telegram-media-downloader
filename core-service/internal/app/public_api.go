@@ -48,7 +48,7 @@ func (a *App) handleAPIVersion(w http.ResponseWriter, r *http.Request) {
 // Update check: the newest stable vX.Y.Z GitHub release, cached for 10
 // minutes; a failed lookup serves the last answer marked stale.
 var (
-	updateCheckURL = "https://api.github.com/repos/botnick/telegram-media-downloader/releases?per_page=100"
+	updateCheckURL = "https://api.github.com/repos/whothis44/telegram-media-downloader/releases?per_page=100"
 	updateCheckTTL = 10 * time.Minute
 	appReleaseTag  = regexp.MustCompile(`^v\d+\.\d+\.\d+$`)
 )

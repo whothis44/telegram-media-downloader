@@ -129,6 +129,10 @@ func (a *App) runHistory(ctx context.Context, id string) error {
 		if err != nil {
 			return err
 		}
+		// Keep every message read (text, dates, senders, topics), media or not.
+		if err = a.ixRecordHistoryPage(ctx, j.GroupID, page); err != nil {
+			return err
+		}
 		for _, raw := range page.Messages {
 			var target engine.Target
 			allowed := false
