@@ -288,13 +288,14 @@ func (c *GotdClient) DownloadMedia(ctx context.Context, a Attachment, w io.Write
 	// account has in flight is its job (the datacenter windows), so a file
 	// may always ask for its full share; without it, a FLOOD_WAIT halves
 	// the account's threads for its next files.
+	paced := c.pacer != nil && Pacing()
 	threads, floods := 1, uint64(0)
 	if tuned {
 		threads, floods = c.threads.threads(), c.guard.floods.Load()
-		if c.pacer != nil {
+		if paced {
 			threads, tuned = maxDownloadThreads, false
 		}
-	} else if c.pacer != nil && !verify && a.Identity.Size > downloadPartSize {
+	} else if paced && !verify && a.Identity.Size > downloadPartSize {
 		threads = maxDownloadThreads
 	}
 	err := downloadMedia(ctx, guardedClient{c.client, c}, a, w, verify, threads)
@@ -365,32 +366,16 @@ func (i sharedInvoker) Invoke(ctx context.Context, input bin.Encoder, output bin
 	if i.guard == nil {
 		return i.pool.Invoke(ctx, input, output)
 	}
-	call := func() error { return i.guard.invoke(ctx, i.pool, input, output) }
-	if _, part := input.(*tg.UploadGetFileRequest); part && i.pacer != nil {
-		// A file part: wait for room in the datacenter's window, and tell
-		// the pacer what came back.
-		if err := i.pacer.acquire(ctx, i.dc); err != nil {
-			return err
-		}
-		received := 0
-		defer func() { i.pacer.release(i.dc, received) }()
-		call = func() error {
-			err := i.guard.invokeFiles(ctx, i.pool, input, output, func(time.Duration) { i.pacer.flood(i.dc) })
-			if err == nil {
-				if box, ok := output.(*tg.UploadFileBox); ok {
-					if f, ok := box.File.(*tg.UploadFile); ok {
-						received = len(f.Bytes)
-					}
-				}
-			}
-			return err
-		}
+	var err error
+	if _, part := input.(*tg.UploadGetFileRequest); part && i.pacer != nil && Pacing() {
+		err = i.invokePart(ctx, input, output)
+	} else {
+		call := func() error { return i.guard.invoke(ctx, i.pool, input, output) }
+		// Telegram drops download connections under load, failing every
+		// request in flight on them. Reads are idempotent: ask again on
+		// another pooled connection instead of failing the whole file.
+		err = retryLostConnection(ctx, call(), call)
 	}
-	err := call()
-	// Telegram drops download connections under load, failing every request
-	// in flight on them. Reads are idempotent: ask again on another pooled
-	// connection instead of failing the whole file.
-	err = retryLostConnection(ctx, err, call)
 	// A wait short enough to sleep through that is still refused after every
 	// inline retry is Telegram refusing this file, not the account: the
 	// library would retry it forever, closing the account's gate each time
@@ -399,6 +384,29 @@ func (i sharedInvoker) Invoke(ctx context.Context, input bin.Encoder, output bin
 		return fmt.Errorf("Telegram kept refusing this file after %d waits (FLOOD_WAIT_%d)", floodInlineRetries+1, int(d.Seconds()))
 	}
 	return err
+}
+
+// invokePart asks for one file part within the datacenter's window and
+// tells the pacer what came back. While a lost connection is replaced, the
+// part gives its room back so it does not hold the window idle.
+func (i sharedInvoker) invokePart(ctx context.Context, input bin.Encoder, output bin.Decoder) error {
+	once := func() error {
+		if err := i.pacer.acquire(ctx, i.dc); err != nil {
+			return err
+		}
+		received := 0
+		err := i.guard.invokeFiles(ctx, i.pool, input, output, func(time.Duration) { i.pacer.flood(i.dc) })
+		if err == nil {
+			if box, ok := output.(*tg.UploadFileBox); ok {
+				if f, ok := box.File.(*tg.UploadFile); ok {
+					received = len(f.Bytes)
+				}
+			}
+		}
+		i.pacer.release(i.dc, received)
+		return err
+	}
+	return retryLostConnection(ctx, once(), once)
 }
 
 func (sharedInvoker) Close() error { return nil }

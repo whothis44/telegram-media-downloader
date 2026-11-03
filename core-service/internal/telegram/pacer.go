@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -25,28 +26,50 @@ import (
 // at what came through:
 //
 //   - a FLOOD_WAIT cuts the window to 60% and holds it there for a minute,
-//     and for ten minutes the window stays below the one that flooded;
-//   - when downloads are waiting for room and nothing flooded, it tries one
-//     part more, and keeps it only if the speed then rises by 5% or more;
-//     a try that brings nothing is taken back and not tried again for two
-//     minutes (the speed is set elsewhere: the line, the disk, Telegram);
+//     and for ten minutes the window stays below the one that flooded. Floods
+//     in the minute after a cut answer requests sent before it and are not
+//     cut for again;
+//   - when downloads keep waiting for room and nothing flooded, it tries a
+//     different window for three intervals and compares their average speed
+//     with the intervals before. A bigger window (one part more, or a quarter
+//     more while tries keep paying in full and Telegram has never asked to
+//     wait) is kept only if it brings at least half of what it could; a
+//     smaller one is kept if it loses less than half of what it could. After
+//     a bigger window brought nothing, the next try is a smaller one, so a
+//     lucky measurement is taken back later rather than built on;
 //   - when nobody waits for room, the window stays as it is.
 //
 // The window learned for each datacenter is kept next to the session, so a
 // restart starts from it rather than learning again.
+//
+// Pacing can be switched off (SetPacing): downloads then go as before ix.9,
+// each file with its own share of parts and every flood closing the
+// account's gate.
 
 const (
 	paceInterval   = 10 * time.Second
-	paceStart      = 4  // parts in flight on a datacenter not seen before (TDLib's free tier is 2 MiB)
-	paceMin        = 1  // never fewer
-	paceMax        = 32 // never more
-	paceGain       = 1.05
+	paceStart      = 4   // parts in flight on a datacenter not seen before (TDLib's free tier is 2 MiB)
+	paceMin        = 1   // never fewer
+	paceMax        = 80  // never more (ix.8 could have 20 files × 4 parts in flight)
+	paceGainShare  = 0.5 // a try is kept when it brings at least half the speed it could (step/window)
 	paceCut        = 0.6
 	paceFloodHold  = time.Minute
 	pacePlateau    = 2 * time.Minute
 	paceCeiling    = 10 * time.Minute // after a flood, stay below the window it happened at this long
+	paceCeilingMin = 3                // the window under a flood's ceiling may still be 2
+	paceTrial      = 3                // intervals a try is measured over
+	paceBase       = 2                // intervals measured at a window before trying another
 	paceHistoryLen = 30               // intervals kept for the 5-minute speed
+	paceFullRecent = 2 * time.Minute  // windows full this recently say how many files are enough
 )
+
+var pacingOff atomic.Bool
+
+// SetPacing switches the download pacer on or off for every account.
+func SetPacing(on bool) { pacingOff.Store(!on) }
+
+// Pacing reports whether downloads are paced.
+func Pacing() bool { return !pacingOff.Load() }
 
 type dcPace struct {
 	dc       int
@@ -56,18 +79,26 @@ type dcPace struct {
 	wake     chan struct{}
 
 	// This interval.
-	bytes   int64
-	parts   int
-	floods  int
-	waited  bool
-	busyFor time.Duration // time with the window full
+	bytes  int64
+	parts  int
+	floods int
+	waited bool
 
 	// Learning.
-	probing      bool
-	probeBase    float64
+	steady       []float64 // speeds of the last full intervals at this window
+	trial        int       // the step being tried (negative: fewer parts), 0 when none
+	trialFrom    int
+	trialBase    float64
+	trialLeft    int
+	trialSpeeds  []float64
+	trialFull    bool
+	nextDown     bool // the last bigger window brought nothing: try a smaller one next
+	growFast     bool // the last try paid in full: try a bigger step next
 	holdUntil    time.Time
+	lastCut      time.Time
 	ceiling      int // the window a flood happened at
 	ceilingUntil time.Time
+	fullAt       time.Time // the last interval downloads waited for room
 	state        string
 
 	speed   float64   // bytes a second, last interval
@@ -84,6 +115,7 @@ type downloadPacer struct {
 	floodAt []time.Time // every flood of the account in the last day
 	now     func() time.Time
 	saved   map[int]int
+	running atomic.Bool
 }
 
 func newDownloadPacer(path string) *downloadPacer {
@@ -174,6 +206,24 @@ func (p *downloadPacer) flood(dc int) {
 	p.floodAt = append(p.floodAt, now)
 }
 
+func meanOf(xs []float64) float64 {
+	if len(xs) == 0 {
+		return 0
+	}
+	s := 0.0
+	for _, x := range xs {
+		s += x
+	}
+	return s / float64(len(xs))
+}
+
+func lastOf(xs []float64, n int) []float64 {
+	if len(xs) > n {
+		xs = xs[len(xs)-n:]
+	}
+	return append([]float64(nil), xs...)
+}
+
 // tick adapts every window to what the last interval brought.
 func (p *downloadPacer) tick() {
 	p.mu.Lock()
@@ -187,42 +237,68 @@ func (p *downloadPacer) tick() {
 	changed := false
 	for _, d := range p.dcs {
 		d.speed = float64(d.bytes) / secs
-		d.history = append(d.history, d.speed)
-		if len(d.history) > paceHistoryLen {
-			d.history = d.history[len(d.history)-paceHistoryLen:]
+		d.history = lastOf(append(d.history, d.speed), paceHistoryLen)
+		if d.waited {
+			d.fullAt = now
 		}
 		before := d.window
 		switch {
-		case d.floods > 0:
-			d.ceiling, d.ceilingUntil = d.window, now.Add(paceCeiling)
+		case d.floods > 0 && now.Sub(d.lastCut) >= paceFloodHold:
+			d.ceiling, d.ceilingUntil = max(paceCeilingMin, d.window), now.Add(paceCeiling)
 			d.window = max(paceMin, int(math.Floor(float64(d.window)*paceCut)))
-			d.probing = false
-			d.holdUntil = now.Add(paceFloodHold)
+			d.trial, d.growFast, d.nextDown, d.steady = 0, false, false, nil
+			d.holdUntil, d.lastCut = now.Add(paceFloodHold), now
 			d.state = "slowed: Telegram asked to wait"
-		case d.probing:
-			// The interval after one part more: keep it only if it paid.
-			d.probing = false
-			if d.speed >= d.probeBase*paceGain {
-				d.state = "faster with more"
-			} else {
-				d.window = max(paceMin, d.window-1)
-				d.holdUntil = now.Add(pacePlateau)
-				d.state = "at its best"
+		case d.floods > 0:
+			// Answers to parts asked for before the last cut.
+		case d.trial != 0:
+			d.trialSpeeds = append(d.trialSpeeds, d.speed)
+			d.trialFull = d.trialFull || d.waited
+			if d.trialLeft--; d.trialLeft > 0 {
+				break
 			}
+			d.judgeTrial(now)
 		case now.Before(d.holdUntil):
 			// Holding after a flood or a try that brought nothing.
-		case d.waited && now.Before(d.ceilingUntil) && d.window+1 >= d.ceiling:
-			d.state = "just below Telegram's limit"
-		case d.waited && d.window < paceMax && d.bytes > 0:
-			d.probing = true
-			d.probeBase = d.speed
-			d.window++
-			d.state = "trying more"
 		case !d.waited:
 			if d.bytes == 0 {
 				d.state = "idle"
 			} else {
 				d.state = "not limiting"
+			}
+		default:
+			d.steady = lastOf(append(d.steady, d.speed), paceTrial)
+			if len(d.steady) < paceBase {
+				d.state = "measuring"
+				break
+			}
+			step := 0
+			switch {
+			case d.nextDown && d.window > paceMin:
+				step = -1
+			case now.Before(d.ceilingUntil) && d.window+1 >= d.ceiling:
+				d.state = "just below Telegram's limit"
+			case d.window >= paceMax:
+				d.state = "at the most it may ask for"
+			default:
+				step = 1
+				if d.growFast && d.ceiling == 0 {
+					step = max(1, d.window/4)
+				}
+				if now.Before(d.ceilingUntil) {
+					step = min(step, d.ceiling-1-d.window)
+				}
+				step = min(step, paceMax-d.window)
+			}
+			if step != 0 {
+				d.trial, d.trialFrom, d.trialBase = step, d.window, meanOf(d.steady)
+				d.trialLeft, d.trialSpeeds, d.trialFull = paceTrial, nil, false
+				d.window += step
+				if step > 0 {
+					d.state = "trying more"
+				} else {
+					d.state = "trying fewer"
+				}
 			}
 		}
 		if d.window != before {
@@ -235,6 +311,45 @@ func (p *downloadPacer) tick() {
 	p.floodAt = trimTimes(p.floodAt, now.Add(-24*time.Hour))
 	if changed {
 		p.saveLocked()
+	}
+}
+
+// judgeTrial keeps or takes back the window tried over the last intervals.
+// Going from w to w+s parts could at best change the speed by s/w; a try
+// counts when it brings (or, for fewer parts, loses) at least half that.
+func (d *dcPace) judgeTrial(now time.Time) {
+	step, from := d.trial, d.trialFrom
+	d.trial = 0
+	speed := meanOf(d.trialSpeeds)
+	could := math.Abs(float64(step)) / float64(max(1, from))
+	change := 0.0
+	if d.trialBase > 0 {
+		change = speed/d.trialBase - 1
+	}
+	switch {
+	case !d.trialFull:
+		// Nobody waited for room: the try says nothing.
+		d.window, d.state = from, "not limiting"
+	case step > 0 && change >= paceGainShare*could:
+		d.steady = lastOf(d.trialSpeeds, paceTrial)
+		d.growFast = change >= 0.8*could
+		d.nextDown = false
+		d.state = "faster with more"
+	case step > 0:
+		d.window = from
+		d.holdUntil = now.Add(pacePlateau)
+		d.growFast, d.nextDown = false, true
+		d.state = "at its best"
+	case -change < paceGainShare*could:
+		// As fast with fewer: keep fewer, and see whether fewer still do.
+		d.steady = lastOf(d.trialSpeeds, paceTrial)
+		d.growFast = false
+		d.state = "as fast with fewer"
+	default:
+		d.window = from
+		d.holdUntil = now.Add(pacePlateau)
+		d.nextDown = false
+		d.state = "at its best"
 	}
 }
 
@@ -264,6 +379,10 @@ func (p *downloadPacer) saveLocked() {
 
 // run adapts the windows until ctx ends.
 func (p *downloadPacer) run(ctx context.Context) {
+	if !p.running.CompareAndSwap(false, true) {
+		return // already adapting
+	}
+	defer p.running.Store(false)
 	t := time.NewTicker(paceInterval)
 	defer t.Stop()
 	for {
@@ -290,6 +409,7 @@ type DCPace struct {
 
 // PaceStats is the account's download pacing.
 type PaceStats struct {
+	Off        bool     `json:"off"`     // pacing is switched off
 	Speed      float64  `json:"speed"`   // bytes a second, all datacenters, last 10 s
 	Speed5m    float64  `json:"speed5m"` // last 5 minutes
 	Window     int      `json:"window"`  // parts in flight allowed, all datacenters
@@ -303,7 +423,7 @@ func (p *downloadPacer) stats() PaceStats {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := p.now()
-	var s PaceStats
+	s := PaceStats{Off: !Pacing()}
 	for _, d := range p.dcs {
 		if now.Sub(d.lastUse) > 30*time.Minute && d.inflight == 0 {
 			continue
@@ -338,18 +458,25 @@ func (p *downloadPacer) stats() PaceStats {
 // suggestedWorkers is how many files at once keep the windows full: a
 // small file takes one part, and every file also spends time being written
 // to disk, so three files for each part allowed, and two more.
+//
+// It is 0 (no suggestion) while no window has been full lately: then the
+// windows are not what limits the account, and more files may help.
 func (p *downloadPacer) suggestedWorkers() int {
+	if !Pacing() {
+		return 0
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	total := 0
+	total, full := 0, false
 	now := p.now()
 	for _, d := range p.dcs {
 		if now.Sub(d.lastUse) < 10*time.Minute {
 			total += d.window
+			full = full || now.Sub(d.fullAt) < paceFullRecent
 		}
 	}
-	if total == 0 {
-		return 0 // nothing learned yet
+	if total == 0 || !full {
+		return 0
 	}
 	return 3*total + 2
 }

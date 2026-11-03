@@ -148,6 +148,7 @@ type ixDownloadStats struct {
 
 // ixPace is the download pacing of all running accounts together.
 type ixPace struct {
+	Off       bool       `json:"off"`     // pacing switched off in settings
 	Speed     float64    `json:"speed"`   // bytes a second, last 10 s
 	Speed5m   float64    `json:"speed5m"` // last 5 minutes
 	Window    int        `json:"window"`  // file parts allowed in flight
@@ -168,7 +169,7 @@ type ixDownloadDay struct {
 }
 
 func (a *App) ixPaceNow() ixPace {
-	var p ixPace
+	p := ixPace{Off: !telegram.Pacing()}
 	if a.monitor == nil {
 		return p
 	}

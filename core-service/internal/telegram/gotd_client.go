@@ -63,12 +63,17 @@ func (c *GotdClient) SuggestedWorkers() int {
 }
 
 // FloodWaitUntil reports when Telegram allows this account's requests again
-// (zero when it is not flood-limited).
+// (zero when it is not flood-limited). A wait on file downloads counts too:
+// the engine should not start more files while their parts may not go.
 func (c *GotdClient) FloodWaitUntil() time.Time {
 	if c == nil || c.guard == nil {
 		return time.Time{}
 	}
-	return c.guard.FloodWaitUntil()
+	until, files := c.guard.FloodWaitUntil(), c.guard.FilesWaitUntil()
+	if files.After(until) {
+		return files
+	}
+	return until
 }
 
 func NewGotdClient(cfg GotdConfig) (*GotdClient, error) {

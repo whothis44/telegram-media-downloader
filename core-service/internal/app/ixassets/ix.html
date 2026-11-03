@@ -194,7 +194,8 @@ function viewDownloads() {
 ${(() => {
   const p = d.pace || {}; const mbs = (b) => (b / 1e6).toFixed(b >= 1e7 ? 0 : 1) + ' MB/s';
   let x = '';
-  if (d.engineRunning && (p.dcs || []).length) {
+  if (p.off) x += `<div style="margin-top:6px">Download pacing is <b>off</b> (Settings → Account safety): files download as they did in ix.8, and the speed isn't measured here. The per-day totals below still compare the two.</div>`;
+  else if (d.engineRunning && (p.dcs || []).length) {
     x += `<div style="margin-top:6px">Speed: <b>${mbs(p.speed5m || 0)}</b> over the last 5 minutes (${mbs(p.speed || 0)} now). The app is allowed ${fmtNum(p.window)} file part(s) of 1 MB in flight at once and finds that number by measuring: more while it makes downloads faster, fewer as soon as Telegram asks it to wait${p.floods1h ? ` (it asked ${fmtNum(p.floods1h)} time(s) in the last hour)` : ''}.</div>`;
     x += `<div class="muted">${p.dcs.map((c) => `Telegram server ${c.dc}${c.account ? ' (' + esc(c.account) + ')' : ''}: ${c.window} at once, ${mbs(c.speed5m || 0)}, ${esc(c.state || '')}`).join(' · ')}</div>`;
   }
@@ -394,6 +395,7 @@ ${state.diag ? `<textarea id="diag" readonly style="width:100%;min-height:260px;
 <label>Pace of rescans: <select class="t" data-set-select="pace"><option value="normal" ${s.pace === 'normal' ? 'selected' : ''}>Normal</option><option value="gentle" ${s.pace === 'gentle' ? 'selected' : ''}>Gentle (pauses more often, smaller download batches)</option></select></label>
 <div class="btns">Quiet hours (no new group starts): <input class="t" data-set-text="quietStart" value="${esc(s.quietStart)}" placeholder="22:00" style="width:80px"> to <input class="t" data-set-text="quietEnd" value="${esc(s.quietEnd)}" placeholder="07:00" style="width:80px"> <span class="muted">empty = none</span></div>
 <label>When Telegram has set a deletion date: <select class="t" data-set-select="deadlineOrder">${[['auto', 'smaller files first, only if the backup would not finish in time (recommended)'], ['on', 'smaller files first, always'], ['off', 'keep the normal order']].map(([v, l]) => `<option value="${v}" ${(s.deadlineOrder || 'auto') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+<label><input type="checkbox" data-set="downloadPacing" ${s.downloadPacing ? 'checked' : ''}> Pace downloads by measuring (recommended): the app finds how many file parts to ask Telegram for at once, backing off when Telegram asks it to wait. Untick to download as ix.8 did.</label>
 <label><input type="checkbox" data-set="pauseOnFreeze" ${s.pauseOnFreeze ? 'checked' : ''}> Pause rescans when Telegram reports the account frozen</label>
 <label><input type="checkbox" data-set="autoRetry" ${s.autoRetry ? 'checked' : ''}> Retry failed downloads automatically every few hours (up to 5 times per file)</label>
 <label><input type="checkbox" data-set="substExact" ${s.substExact ? 'checked' : ''}> Don't download exact re-uploads: when a file is exactly as large as one already saved, compare its bytes on Telegram first (uses Telegram's own fingerprints, or three 1 MB samples)</label>

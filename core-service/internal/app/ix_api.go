@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/botnick/telegram-media-downloader/core-service/internal/telegram"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/version"
 )
 
@@ -390,6 +391,7 @@ func (a *App) handleIxSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	telegram.SetPacing(s.DownloadPacing)
 	if s.Pace != old.Pace {
 		if err = a.ixApplyPace(ctx, s.Pace); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())

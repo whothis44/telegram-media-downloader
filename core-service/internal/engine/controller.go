@@ -1090,6 +1090,19 @@ func (r *running) unthrottled() []string {
 	return ids
 }
 
+// paced reports whether every account of the run paces its downloads.
+func (r *running) paced() bool {
+	if !telegram.Pacing() || len(r.ids) == 0 {
+		return false
+	}
+	for _, id := range r.ids {
+		if _, ok := r.accounts[id].(interface{ SuggestedWorkers() int }); !ok {
+			return false
+		}
+	}
+	return true
+}
+
 func (c *Controller) scale(run *running, s Scaling) {
 	interval := s.Interval
 	if interval <= 0 {
@@ -1097,6 +1110,7 @@ func (c *Controller) scale(run *running, s Scaling) {
 	}
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
+	gated := false
 	for {
 		select {
 		case <-run.ctx.Done():
@@ -1105,12 +1119,20 @@ func (c *Controller) scale(run *running, s Scaling) {
 		}
 		target := int(run.target.Load())
 		if len(run.unthrottled()) < len(run.ids) {
-			// Telegram asked an account to wait: fewer files at once, but not
-			// all the way down (the accounts' download pacers already cut
-			// how many parts are in flight).
-			run.target.Store(int32(max(s.Min, target/2)))
+			// Telegram asked an account to wait. Without pacing, drop to the
+			// fewest files at once. With it, halve once for the whole wait:
+			// the accounts' pacers already cut how many parts are in flight,
+			// and halving again every tick would end at the fewest anyway.
+			switch {
+			case !run.paced():
+				run.target.Store(int32(s.Min))
+			case !gated:
+				run.target.Store(int32(max(s.Min, target/2)))
+			}
+			gated = true
 			continue
 		}
+		gated = false
 		// With pacing, the accounts say how many files keep their download
 		// windows full: more would only wait for room.
 		suggested := 0

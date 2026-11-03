@@ -2,6 +2,8 @@ package telegram
 
 import (
 	"context"
+	"io"
+	"math/rand"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -14,9 +16,13 @@ import (
 // paceSim drives a pacer against a simulated Telegram: a datacenter that
 // moves partRate bytes per part a second up to cap parts (the line or the
 // disk is the limit beyond), and answers FLOOD_WAIT whenever more than
-// floodAt parts are in flight.
-func paceSim(t *testing.T, cap, floodAt, ticks int) (windows []int, floods int) {
+// floodAt parts are in flight. noise (0.15 = ±15%) varies each interval's
+// speed at random, as a real line does.
+var paceSimSeed int64 = 7
+
+func paceSim(t *testing.T, cap, floodAt, ticks int, noise float64) (windows []int, floods int) {
 	t.Helper()
+	rnd := rand.New(rand.NewSource(paceSimSeed))
 	p := newDownloadPacer("")
 	clock := time.Unix(1_800_000_000, 0)
 	p.now = func() time.Time { return clock }
@@ -27,7 +33,7 @@ func paceSim(t *testing.T, cap, floodAt, ticks int) (windows []int, floods int) 
 		d := p.dcLocked(dc)
 		w := d.window
 		d.waited = true // always more to download than room
-		d.bytes = int64(float64(min(w, cap)) * partRate * paceInterval.Seconds())
+		d.bytes = int64(float64(min(w, cap)) * partRate * paceInterval.Seconds() * (1 + noise*(2*rnd.Float64()-1)))
 		d.lastUse = clock
 		if w > floodAt {
 			d.floods++
@@ -51,7 +57,7 @@ func mean(xs []int) float64 {
 
 func TestPacerFindsTheSpeedLimitWithoutFlooding(t *testing.T) {
 	// The line tops out at 6 parts; Telegram would allow 20.
-	w, floods := paceSim(t, 6, 20, 360) // an hour
+	w, floods := paceSim(t, 6, 20, 360, 0) // an hour
 	tail := w[60:]
 	t.Logf("window %.1f, %d floods", mean(tail), floods)
 	if m := mean(tail); m < 5.5 || m > 7.5 || floods != 0 {
@@ -61,7 +67,7 @@ func TestPacerFindsTheSpeedLimitWithoutFlooding(t *testing.T) {
 
 func TestPacerStaysUnderTelegramsLimit(t *testing.T) {
 	// Telegram floods past 8 parts in flight; the line could take 30.
-	w, floods := paceSim(t, 30, 8, 360)
+	w, floods := paceSim(t, 30, 8, 360, 0)
 	tail := w[60:]
 	t.Logf("window %.1f, %d floods", mean(tail), floods)
 	if m := mean(tail); m < 5 || m > 8.5 {
@@ -70,6 +76,117 @@ func TestPacerStaysUnderTelegramsLimit(t *testing.T) {
 	if floods > 8 { // about one an ten minutes at most
 		t.Fatalf("%d floods in an hour", floods)
 	}
+}
+
+func TestPacerIsNotFooledByANoisyLine(t *testing.T) {
+	// The line tops out at 6 parts, but each interval's speed varies by
+	// ±15%: lucky intervals must not ratchet the window up.
+	defer func() { paceSimSeed = 7 }()
+	for seed := int64(1); seed <= 5; seed++ {
+		paceSimSeed = seed
+		w, floods := paceSim(t, 6, 200, 2160, 0.15) // six hours
+		tail := w[180:]
+		hi := 0
+		for _, x := range tail {
+			hi = max(hi, x)
+		}
+		t.Logf("window %.1f (at most %d), %d floods", mean(tail), hi, floods)
+		if m := mean(tail); m < 4.5 || m > 9 || hi > 14 {
+			t.Fatalf("window settles at %.1f, at most %d", m, hi)
+		}
+	}
+}
+
+func TestPacerFindsTheLimitOnANoisyLine(t *testing.T) {
+	w, floods := paceSim(t, 30, 8, 2160, 0.15)
+	tail := w[180:]
+	t.Logf("window %.1f, %d floods", mean(tail), floods)
+	if m := mean(tail); m < 4.5 || m > 8.5 || floods > 6*8 {
+		t.Fatalf("window settles at %.1f with %d floods", m, floods)
+	}
+}
+
+func TestPacerCutsOnceForAFloodOfAnswers(t *testing.T) {
+	p := newDownloadPacer("")
+	clock := time.Unix(1_800_000_000, 0)
+	p.now = func() time.Time { return clock }
+	p.mu.Lock()
+	p.dcLocked(4).window = 20
+	p.mu.Unlock()
+	// Parts asked for before the cut keep coming back with FLOOD_WAIT for
+	// a few intervals: one cut, not one a interval.
+	for i := 0; i < 4; i++ {
+		p.mu.Lock()
+		d := p.dcLocked(4)
+		d.waited, d.floods, d.lastUse = true, 3, clock
+		p.mu.Unlock()
+		clock = clock.Add(paceInterval)
+		p.tick()
+	}
+	p.mu.Lock()
+	d := p.dcLocked(4)
+	w, ceiling := d.window, d.ceiling
+	p.mu.Unlock()
+	if w != 12 || ceiling != 20 {
+		t.Fatalf("window %d ceiling %d after a burst of floods, want 12 under 20", w, ceiling)
+	}
+	// A flood at a small window still leaves room to work under it.
+	p.mu.Lock()
+	d.window = 2
+	d.lastCut = time.Time{}
+	d.floods = 1
+	p.mu.Unlock()
+	p.tick()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if d.window != 1 || d.ceiling != paceCeilingMin {
+		t.Fatalf("window %d ceiling %d", d.window, d.ceiling)
+	}
+}
+
+func TestPacerSuggestsWorkersOnlyWhileItsWindowsAreFull(t *testing.T) {
+	p := newDownloadPacer("")
+	clock := time.Unix(1_800_000_000, 0)
+	p.now = func() time.Time { return clock }
+	p.mu.Lock()
+	d := p.dcLocked(2)
+	d.lastUse, d.bytes = clock, 1<<20
+	p.mu.Unlock()
+	clock = clock.Add(paceInterval)
+	p.tick()
+	if n := p.suggestedWorkers(); n != 0 {
+		t.Fatalf("windows never full, suggested %d", n)
+	}
+	p.mu.Lock()
+	d.waited, d.lastUse = true, clock
+	p.mu.Unlock()
+	clock = clock.Add(paceInterval)
+	p.tick()
+	if n := p.suggestedWorkers(); n != 3*paceStart+2 {
+		t.Fatalf("full window, suggested %d", n)
+	}
+	SetPacing(false)
+	defer SetPacing(true)
+	if n := p.suggestedWorkers(); n != 0 {
+		t.Fatalf("pacing off, suggested %d", n)
+	}
+}
+
+func TestPacerRunsOnce(t *testing.T) {
+	p := newDownloadPacer("")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { p.run(ctx); close(done) }()
+	time.Sleep(20 * time.Millisecond)
+	second := make(chan struct{})
+	go func() { p.run(ctx); close(second) }()
+	select {
+	case <-second: // returned at once: already running
+	case <-time.After(time.Second):
+		t.Fatal("a second run loop started")
+	}
+	cancel()
+	<-done
 }
 
 func TestPacerWindowsLimitPartsInFlight(t *testing.T) {
@@ -175,5 +292,84 @@ func TestPacedPartsCountBytesAndFloodsOnTheFilesGate(t *testing.T) {
 	// Other requests on the pool are not paced.
 	if err := inv.Invoke(context.Background(), &tg.HelpGetConfigRequest{}, nil); err != nil || !pool.main {
 		t.Fatal("other request")
+	}
+}
+
+// lostOnce fails its first part as if the connection had dropped.
+type lostOnce struct {
+	partPool
+	lost  bool
+	pacer *downloadPacer
+	held  int
+}
+
+func (p *lostOnce) Invoke(ctx context.Context, input bin.Encoder, output bin.Decoder) error {
+	p.mu.Lock()
+	if !p.lost {
+		p.lost = true
+		p.mu.Unlock()
+		return io.EOF
+	}
+	p.mu.Unlock()
+	p.pacer.mu.Lock()
+	p.held = p.pacer.dcLocked(4).inflight
+	p.pacer.mu.Unlock()
+	return p.partPool.Invoke(ctx, input, output)
+}
+
+func TestPacedPartGivesItsRoomBackWhileItsConnectionIsReplaced(t *testing.T) {
+	old := connectionRetryDelay
+	connectionRetryDelay = 30 * time.Millisecond
+	defer func() { connectionRetryDelay = old }()
+	p := newDownloadPacer("")
+	p.mu.Lock()
+	p.dcLocked(4).window = 1
+	p.mu.Unlock()
+	pool := &lostOnce{pacer: p}
+	inv := sharedInvoker{pool: pool, guard: newFloodGuard(), pacer: p, dc: 4}
+	done := make(chan error, 1)
+	go func() {
+		var box tg.UploadFileBox
+		done <- inv.Invoke(context.Background(), &tg.UploadGetFileRequest{Limit: 1 << 20}, &box)
+	}()
+	// While the lost part backs off, another part may use the window.
+	time.Sleep(10 * time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := p.acquire(ctx, 4); err != nil {
+		t.Fatal("the window stayed taken while the connection was replaced")
+	}
+	p.release(4, 0)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if pool.held != 1 {
+		t.Fatalf("the retried part was not counted in flight: %d", pool.held)
+	}
+}
+
+func TestUnpacedPartsGoAsBefore(t *testing.T) {
+	withFastFlood(t)
+	SetPacing(false)
+	defer SetPacing(true)
+	g := newFloodGuard()
+	p := newDownloadPacer("")
+	pool := &partPool{flood: 1}
+	inv := sharedInvoker{pool: pool, guard: g, pacer: p, dc: 4}
+	var box tg.UploadFileBox
+	if err := inv.Invoke(context.Background(), &tg.UploadGetFileRequest{Limit: 1 << 20}, &box); err != nil {
+		t.Fatal(err)
+	}
+	p.mu.Lock()
+	n := len(p.dcs)
+	p.mu.Unlock()
+	if n != 0 || pool.served != 1 {
+		t.Fatalf("paced while off: %d datacenters, %d served", n, pool.served)
+	}
+	// As in ix.8, the flood closed the account's gate, not the files gate.
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.until.IsZero() || !g.filesUntil.IsZero() {
+		t.Fatal("a file flood did not close the account gate")
 	}
 }
