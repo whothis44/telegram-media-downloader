@@ -197,6 +197,7 @@ ${(() => {
   if (p.off) x += `<div style="margin-top:6px">Download pacing is <b>off</b> (Settings → Account safety): files download as they did in ix.8, and the speed isn't measured here. The per-day totals below still compare the two.</div>`;
   else if (d.engineRunning && (p.dcs || []).length) {
     x += `<div style="margin-top:6px">Speed: <b>${mbs(p.speed5m || 0)}</b> over the last 5 minutes (${mbs(p.speed || 0)} now). The app is allowed ${fmtNum(p.window)} file part(s) of 1 MB in flight at once and finds that number by measuring: more while it makes downloads faster, fewer as soon as Telegram asks it to wait${p.floods1h ? ` (it asked ${fmtNum(p.floods1h)} time(s) in the last hour)` : ''}.</div>`;
+    if (p.premium24h) x += `<div class="muted">Telegram's speed limit for accounts without Premium: ${fmtNum(p.premium1h)} wait(s) in the last hour, ${fmtNum(p.premium24h)} in the last day. Telegram applies it after an account has downloaded tens of gigabytes; asking for fewer parts doesn't avoid it, so the app waits it out without slowing down further.</div>`;
     x += `<div class="muted">${p.dcs.map((c) => `Telegram server ${c.dc}${c.account ? ' (' + esc(c.account) + ')' : ''}: ${c.window} at once, ${mbs(c.speed5m || 0)}, ${esc(c.state || '')}`).join(' · ')}</div>`;
   }
   if ((d.days || []).length) x += `<div class="muted">Downloaded per day: ${d.days.map((y) => `${esc(y.day.slice(5))} <b>${fmtNum(y.files)}</b> files, ${fmtSize(y.bytes)}`).join(' · ')}</div>`;

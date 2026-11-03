@@ -140,9 +140,9 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 	if d.Pace.Off {
 		line("download pacing is off (Settings): downloads go as in ix.8")
 	}
-	line("speed %.2f MB/s now, %.2f MB/s over 5 min · parts in flight allowed %d · Telegram waits: %d in the last hour, %d in the last day", mb(d.Pace.Speed), mb(d.Pace.Speed5m), d.Pace.Window, d.Pace.Floods1h, d.Pace.Floods24h)
+	line("speed %.2f MB/s now, %.2f MB/s over 5 min · parts in flight allowed %d · Telegram waits: %d in the last hour, %d in the last day · speed-limit waits (no Premium): %d in the last hour, %d in the last day", mb(d.Pace.Speed), mb(d.Pace.Speed5m), d.Pace.Window, d.Pace.Floods1h, d.Pace.Floods24h, d.Pace.Premium1h, d.Pace.Premium24h)
 	for _, dc := range d.Pace.DCs {
-		line("  DC%d: window %d, in flight %d, waiting %d, %.2f MB/s (5 min %.2f), waits last hour %d · %s", dc.DC, dc.Window, dc.InFlight, dc.Waiting, mb(dc.Speed), mb(dc.Speed5m), dc.Floods1h, dc.State)
+		line("  DC%d: window %d, in flight %d, waiting %d, %.2f MB/s (5 min %.2f), waits last hour %d (speed limit %d) · %s", dc.DC, dc.Window, dc.InFlight, dc.Waiting, mb(dc.Speed), mb(dc.Speed5m), dc.Floods1h, dc.Premium1h, dc.State)
 	}
 	var days []string
 	for _, day := range d.Days {
