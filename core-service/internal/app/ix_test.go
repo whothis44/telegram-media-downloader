@@ -104,8 +104,13 @@ func TestIxRecordingKeepsEditsDeletionsAndNames(t *testing.T) {
 	}
 	var n int
 	a.db.Reader.QueryRow(`SELECT count(*) FROM ix_messages WHERE group_id=?`, group).Scan(&n)
-	if n != 2 {
+	if n != 3 { // two messages and the notice that opened the topic
 		t.Fatalf("messages=%d", n)
+	}
+	var notice string
+	a.db.Reader.QueryRow(`SELECT text FROM ix_messages WHERE group_id=? AND message_id=4 AND service='messageActionTopicCreate'`, group).Scan(&notice)
+	if notice != "created the topic “News”" {
+		t.Fatalf("notice=%q", notice)
 	}
 	var name, username, title string
 	a.db.Reader.QueryRow(`SELECT name, username FROM ix_peers WHERE peer_id='user:5'`).Scan(&name, &username)
@@ -147,7 +152,7 @@ func TestIxRecordingKeepsEditsDeletionsAndNames(t *testing.T) {
 	other.PeerID = &tg.PeerChannel{ChannelID: 77}
 	a.ixRecordUpdate(ctx, "one", &tg.UpdateNewChannelMessage{Message: other}, &tg.Updates{})
 	a.db.Reader.QueryRow(`SELECT count(*) FROM ix_messages`).Scan(&n)
-	if n != 3 {
+	if n != 4 {
 		t.Fatalf("live recording: %d messages", n)
 	}
 }
