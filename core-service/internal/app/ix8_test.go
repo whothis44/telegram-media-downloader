@@ -344,6 +344,9 @@ func TestIxSpeechIsWrittenOutAndSearchable(t *testing.T) {
 	m.Items[m.ByKey["x0"]].Type, m.Items[m.ByKey["x0"]].Dur = "video", 8
 	old := ixSTTAudioHook
 	defer func() { ixSTTAudioHook = old }()
+	oldHave := ixHaveFFmpeg
+	defer func() { ixHaveFFmpeg = oldHave }()
+	ixHaveFFmpeg = func() bool { return true } // the test reads no real files
 	ixSTTAudioHook = func(_ *App, _ context.Context, it *ixMItem) ([]byte, error) {
 		if it.Key == "x0" {
 			return nil, errIxNoAudio // a silent clip

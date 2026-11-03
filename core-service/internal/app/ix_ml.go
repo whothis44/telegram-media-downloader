@@ -676,7 +676,7 @@ func (a *App) ixMLRound(ctx context.Context, c *ixMLClient, m *ixModel, n int) t
 // ixMLRoundTask does up to n files of one task and says when to try again.
 func (a *App) ixMLRoundTask(ctx context.Context, t *ixMLTask, m *ixModel, n int) time.Duration {
 	t.note(true, "")
-	r := &ixMLRun{failed: a.ixMLFailedKeys(ctx, t), tried: map[string]bool{}, noFFmpeg: seekbar.FFmpegPath() == ""}
+	r := &ixMLRun{failed: a.ixMLFailedKeys(ctx, t), tried: map[string]bool{}, noFFmpeg: !ixHaveFFmpeg()}
 	defer func() {
 		// Failures of single files are recorded once the service is known
 		// to work: a file worked in this round, or a test request does.
@@ -717,6 +717,10 @@ func (a *App) ixMLRoundTask(ctx context.Context, t *ixMLTask, m *ixModel, n int)
 	}
 	return 2 * time.Second
 }
+
+// ixHaveFFmpeg says whether frames and sound can be read from videos and
+// recordings (replaceable in tests, whose readers do not need it).
+var ixHaveFFmpeg = func() bool { return seekbar.FFmpegPath() != "" }
 
 // ixMLTestPicture is a small grey gradient, to check the picture model.
 func ixMLTestPicture() []byte {
