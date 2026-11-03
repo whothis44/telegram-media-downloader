@@ -101,14 +101,14 @@ func TestSharedInvokerFailsFileThatKeepsFlooding(t *testing.T) {
 	g := newFloodGuard()
 	g.limiter = rate.NewLimiter(rate.Inf, 1)
 	next := &scriptedInvoker{errs: []error{floodErr(0), floodErr(0), floodErr(0)}}
-	err := sharedInvoker{scriptedPool{next}, g}.Invoke(context.Background(), nil, nil)
+	err := sharedInvoker{pool: scriptedPool{next}, guard: g}.Invoke(context.Background(), nil, nil)
 	if _, flood := tgerr.AsFloodWait(err); err == nil || flood || next.calls != 2 {
 		t.Fatalf("err=%v calls=%d", err, next.calls)
 	}
 	// A long wait is the account's: it stays a flood wait and is rescheduled.
 	long := &scriptedInvoker{errs: []error{floodErr(30)}}
 	g = newFloodGuard()
-	if _, flood := tgerr.AsFloodWait(sharedInvoker{scriptedPool{long}, g}.Invoke(context.Background(), nil, nil)); !flood {
+	if _, flood := tgerr.AsFloodWait(sharedInvoker{pool: scriptedPool{long}, guard: g}.Invoke(context.Background(), nil, nil)); !flood {
 		t.Fatal("long wait lost its flood type")
 	}
 }
@@ -122,19 +122,19 @@ func TestSharedInvokerRetriesLostConnection(t *testing.T) {
 	g := newFloodGuard()
 	lost := errors.New("invoke pool: rpcDoRequest: retryUntilAck: engine forcibly closed: context canceled")
 	next := &scriptedInvoker{errs: []error{lost, errors.New("write tcp 1.2.3.4:1->5.6.7.8:443: write: broken pipe")}}
-	if err := (sharedInvoker{scriptedPool{next}, g}).Invoke(context.Background(), nil, nil); err != nil || next.calls != 3 {
+	if err := (sharedInvoker{pool: scriptedPool{next}, guard: g}).Invoke(context.Background(), nil, nil); err != nil || next.calls != 3 {
 		t.Fatalf("err=%v calls=%d", err, next.calls)
 	}
 	refused := &tgerr.Error{Code: 400, Type: "FILE_REFERENCE_EXPIRED"}
 	next = &scriptedInvoker{errs: []error{refused}}
-	if err := (sharedInvoker{scriptedPool{next}, g}).Invoke(context.Background(), nil, nil); !errors.Is(err, refused) || next.calls != 1 {
+	if err := (sharedInvoker{pool: scriptedPool{next}, guard: g}).Invoke(context.Background(), nil, nil); !errors.Is(err, refused) || next.calls != 1 {
 		t.Fatalf("err=%v calls=%d", err, next.calls)
 	}
 	// The caller's own cancellation is not a lost connection.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	next = &scriptedInvoker{errs: []error{lost, lost}}
-	_ = (sharedInvoker{scriptedPool{next}, g}).Invoke(ctx, nil, nil)
+	_ = (sharedInvoker{pool: scriptedPool{next}, guard: g}).Invoke(ctx, nil, nil)
 	if next.calls > 1 {
 		t.Fatalf("retried after cancel: calls=%d", next.calls)
 	}

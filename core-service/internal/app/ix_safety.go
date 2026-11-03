@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/botnick/telegram-media-downloader/core-service/internal/telegram"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/ws"
 )
 
@@ -45,6 +46,9 @@ type ixSettings struct {
 	STTURL        string `json:"sttUrl"`        // speech to text (an OpenAI-compatible Whisper server); empty: off
 	STTModel      string `json:"sttModel"`      // its model; empty: ixSTTDefaultModel
 	DeadlineOrder string `json:"deadlineOrder"` // auto (when the backup would not finish before deletion), on, off
+	// DownloadPacing lets the download pacer set how many file parts are in
+	// flight (ix.9); off goes back to how ix.8 downloaded.
+	DownloadPacing bool `json:"downloadPacing"`
 	// Alerts (see ix_alerts.go). The SMTP password is never sent back to
 	// the dashboard; AlertSMTPPassSet says whether one is saved.
 	AlertWebhook     string `json:"alertWebhook"`
@@ -67,7 +71,7 @@ func (s ixSettings) public() ixSettings {
 }
 
 func ixDefaultSettings() ixSettings {
-	return ixSettings{ExportEnabled: true, ExportTime: "03:30", Pace: "normal", DupEnabled: true, DupHWAccel: "cuda", AutoRetry: true, FixityEnabled: true, SubstExact: true, HoldLikely: true, MLText: true, MLDupes: true, DeadlineOrder: "auto", AlertWebhookKind: "ntfy", AlertSMTPPort: "587"}
+	return ixSettings{ExportEnabled: true, ExportTime: "03:30", Pace: "normal", DupEnabled: true, DupHWAccel: "cuda", AutoRetry: true, FixityEnabled: true, SubstExact: true, HoldLikely: true, MLText: true, MLDupes: true, DeadlineOrder: "auto", DownloadPacing: true, AlertWebhookKind: "ntfy", AlertSMTPPort: "587"}
 }
 
 func (a *App) ixLoadSettings(ctx context.Context) ixSettings {
@@ -226,6 +230,7 @@ func (a *App) ixRunSafety(ctx context.Context) {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 	for ctx.Err() == nil {
+		telegram.SetPacing(a.ixLoadSettings(ctx).DownloadPacing)
 		now := time.Now().UnixMilli()
 		st := ixClassify(a.ixRecentErrors(ctx, now-6*60*60*1000), now)
 		old := a.ixAccount()
@@ -271,7 +276,7 @@ func ixParseSettings(body map[string]any, s ixSettings) (ixSettings, error) {
 		s.AutoRetry = v
 	}
 	for key, dst := range map[string]*bool{"fixityEnabled": &s.FixityEnabled, "substExact": &s.SubstExact, "holdLikely": &s.HoldLikely, "holdForever": &s.HoldForever,
-		"mlFaces": &s.MLFaces, "mlText": &s.MLText, "mlDupes": &s.MLDupes} {
+		"mlFaces": &s.MLFaces, "mlText": &s.MLText, "mlDupes": &s.MLDupes, "downloadPacing": &s.DownloadPacing} {
 		if v, ok := body[key].(bool); ok {
 			*dst = v
 		}

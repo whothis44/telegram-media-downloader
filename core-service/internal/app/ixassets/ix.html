@@ -191,6 +191,17 @@ function viewDownloads() {
   else state1 = `Nothing to download right now${d.lastAt ? ' — the latest file finished ' + esc(fmtTime(d.lastAt)) : ''}.`;
   let h = `<div class="card"><h2>Downloads</h2><div>${state1}</div>
 <div class="muted" style="margin-top:6px">${fmtNum(d.downloading)} downloading · ${fmtNum(d.waiting)} waiting · <span class="${d.failed ? 'bad' : ''}">${fmtNum(d.failed)} failed</span>${d.givenUp ? ` (${fmtNum(d.givenUp)} no longer retried automatically)` : ''}</div>
+${(() => {
+  const p = d.pace || {}; const mbs = (b) => (b / 1e6).toFixed(b >= 1e7 ? 0 : 1) + ' MB/s';
+  let x = '';
+  if (p.off) x += `<div style="margin-top:6px">Download pacing is <b>off</b> (Settings → Account safety): files download as they did in ix.8, and the speed isn't measured here. The per-day totals below still compare the two.</div>`;
+  else if (d.engineRunning && (p.dcs || []).length) {
+    x += `<div style="margin-top:6px">Speed: <b>${mbs(p.speed5m || 0)}</b> over the last 5 minutes (${mbs(p.speed || 0)} now). The app is allowed ${fmtNum(p.window)} file part(s) of 1 MB in flight at once and finds that number by measuring: more while it makes downloads faster, fewer as soon as Telegram asks it to wait${p.floods1h ? ` (it asked ${fmtNum(p.floods1h)} time(s) in the last hour)` : ''}.</div>`;
+    x += `<div class="muted">${p.dcs.map((c) => `Telegram server ${c.dc}${c.account ? ' (' + esc(c.account) + ')' : ''}: ${c.window} at once, ${mbs(c.speed5m || 0)}, ${esc(c.state || '')}`).join(' · ')}</div>`;
+  }
+  if ((d.days || []).length) x += `<div class="muted">Downloaded per day: ${d.days.map((y) => `${esc(y.day.slice(5))} <b>${fmtNum(y.files)}</b> files, ${fmtSize(y.bytes)}`).join(' · ')}</div>`;
+  return x;
+})()}
 <div class="muted">A failed file is first retried a few times by the download engine. ${state.status.settings.autoRetry ? `After that, it goes back in the queue every ${Math.round(d.retryAfterMin / 60)} hours, up to ${d.retryRounds} times (Settings).` : 'Automatic retries every few hours are <b>off</b> (Settings).'} A group's files pass also tries its failed files again.</div>`;
   if (d.errors && d.errors.length) {
     h += `<div class="list" style="margin-top:8px"><table><tr><th>Why files failed</th><th>Files</th></tr>${d.errors.map((e) => `<tr><td class="muted">${esc(e.error)}</td><td class="n">${fmtNum(e.count)}</td></tr>`).join('')}</table></div>`;
@@ -384,6 +395,7 @@ ${state.diag ? `<textarea id="diag" readonly style="width:100%;min-height:260px;
 <label>Pace of rescans: <select class="t" data-set-select="pace"><option value="normal" ${s.pace === 'normal' ? 'selected' : ''}>Normal</option><option value="gentle" ${s.pace === 'gentle' ? 'selected' : ''}>Gentle (pauses more often, smaller download batches)</option></select></label>
 <div class="btns">Quiet hours (no new group starts): <input class="t" data-set-text="quietStart" value="${esc(s.quietStart)}" placeholder="22:00" style="width:80px"> to <input class="t" data-set-text="quietEnd" value="${esc(s.quietEnd)}" placeholder="07:00" style="width:80px"> <span class="muted">empty = none</span></div>
 <label>When Telegram has set a deletion date: <select class="t" data-set-select="deadlineOrder">${[['auto', 'smaller files first, only if the backup would not finish in time (recommended)'], ['on', 'smaller files first, always'], ['off', 'keep the normal order']].map(([v, l]) => `<option value="${v}" ${(s.deadlineOrder || 'auto') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+<label><input type="checkbox" data-set="downloadPacing" ${s.downloadPacing ? 'checked' : ''}> Pace downloads by measuring (recommended): the app finds how many file parts to ask Telegram for at once, backing off when Telegram asks it to wait. Untick to download as ix.8 did.</label>
 <label><input type="checkbox" data-set="pauseOnFreeze" ${s.pauseOnFreeze ? 'checked' : ''}> Pause rescans when Telegram reports the account frozen</label>
 <label><input type="checkbox" data-set="autoRetry" ${s.autoRetry ? 'checked' : ''}> Retry failed downloads automatically every few hours (up to 5 times per file)</label>
 <label><input type="checkbox" data-set="substExact" ${s.substExact ? 'checked' : ''}> Don't download exact re-uploads: when a file is exactly as large as one already saved, compare its bytes on Telegram first (uses Telegram's own fingerprints, or three 1 MB samples)</label>

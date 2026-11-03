@@ -801,6 +801,28 @@ func (c *Controller) Status(ctx context.Context) (map[string]any, error) {
 	return map[string]any{"state": state, "error": errorValue, "startedAt": startedAt, "uptimeMs": uptime, "workers": workers, "accounts": accounts, "queue": counts["pending"], "active": counts["processing"], "stats": nil}, nil
 }
 
+// Pace reports each running account's download pacing.
+func (c *Controller) Pace() map[string]telegram.PaceStats {
+	c.mu.Lock()
+	run := c.run
+	c.mu.Unlock()
+	out := map[string]telegram.PaceStats{}
+	if run == nil {
+		return out
+	}
+	select {
+	case <-run.done:
+		return out
+	default:
+	}
+	for _, id := range run.ids {
+		if paced, ok := run.accounts[id].(interface{ DownloadPace() telegram.PaceStats }); ok {
+			out[id] = paced.DownloadPace()
+		}
+	}
+	return out
+}
+
 // Gauges are the downloader figures /metrics exports, as 2.x reported
 // them: accounts and workers of the engine run in progress (monitoring or a
 // backfill-only run), transfers in flight right now, and queued work.
@@ -1068,6 +1090,19 @@ func (r *running) unthrottled() []string {
 	return ids
 }
 
+// paced reports whether every account of the run paces its downloads.
+func (r *running) paced() bool {
+	if !telegram.Pacing() || len(r.ids) == 0 {
+		return false
+	}
+	for _, id := range r.ids {
+		if _, ok := r.accounts[id].(interface{ SuggestedWorkers() int }); !ok {
+			return false
+		}
+	}
+	return true
+}
+
 func (c *Controller) scale(run *running, s Scaling) {
 	interval := s.Interval
 	if interval <= 0 {
@@ -1075,6 +1110,7 @@ func (c *Controller) scale(run *running, s Scaling) {
 	}
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
+	gated := false
 	for {
 		select {
 		case <-run.ctx.Done():
@@ -1083,8 +1119,35 @@ func (c *Controller) scale(run *running, s Scaling) {
 		}
 		target := int(run.target.Load())
 		if len(run.unthrottled()) < len(run.ids) {
-			run.target.Store(int32(s.Min))
+			// Telegram asked an account to wait. Without pacing, drop to the
+			// fewest files at once. With it, halve once for the whole wait:
+			// the accounts' pacers already cut how many parts are in flight,
+			// and halving again every tick would end at the fewest anyway.
+			switch {
+			case !run.paced():
+				run.target.Store(int32(s.Min))
+			case !gated:
+				run.target.Store(int32(max(s.Min, target/2)))
+			}
+			gated = true
 			continue
+		}
+		gated = false
+		// With pacing, the accounts say how many files keep their download
+		// windows full: more would only wait for room.
+		suggested := 0
+		for _, id := range run.ids {
+			if paced, ok := run.accounts[id].(interface{ SuggestedWorkers() int }); ok {
+				suggested += paced.SuggestedWorkers()
+			}
+		}
+		ceiling := s.Max
+		if suggested > 0 {
+			ceiling = min(s.Max, max(s.Min, suggested))
+			if target > ceiling {
+				run.target.Store(int32(ceiling))
+				continue
+			}
 		}
 		var pending int
 		if err := c.reader.QueryRowContext(run.ctx, `SELECT count(*) FROM tgdl_work WHERE status='pending' AND paused=0`).Scan(&pending); err != nil {
@@ -1094,8 +1157,8 @@ func (c *Controller) scale(run *running, s Scaling) {
 		active := len(run.active)
 		run.mu.Unlock()
 		switch {
-		case pending > target*2 && target < s.Max:
-			run.target.Store(int32(min(s.Max, target+3)))
+		case pending > target*2 && target < ceiling:
+			run.target.Store(int32(min(ceiling, target+3)))
 			c.wake(run)
 		case pending == 0 && active < s.Min && target > s.Min:
 			run.target.Store(int32(max(s.Min, active+1)))
