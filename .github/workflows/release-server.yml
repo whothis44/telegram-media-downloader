@@ -51,6 +51,7 @@ jobs:
             core-service/dist/SHA256SUMS
           fail_on_unmatched_files: true
       - name: Announce the release
+        if: github.repository == 'botnick/telegram-media-downloader'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

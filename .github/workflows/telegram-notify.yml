@@ -25,7 +25,8 @@ permissions: {}
 
 jobs:
   notify-push:
-    if: github.event_name == 'push'
+    # The original project's channel; a fork has no bot to post with.
+    if: github.event_name == 'push' && github.repository == 'botnick/telegram-media-downloader'
     runs-on: ubuntu-latest
     steps:
       - name: Send commit notification
@@ -50,7 +51,7 @@ jobs:
             --data-urlencode "text=${text}"
 
   notify-release:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'botnick/telegram-media-downloader'
     runs-on: ubuntu-latest
     steps:
       - name: Load the release

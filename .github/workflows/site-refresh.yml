@@ -28,6 +28,8 @@ env:
 
 jobs:
   refresh:
+    # The original project's website; a fork does not publish it.
+    if: github.repository == 'botnick/telegram-media-downloader'
     runs-on: ubuntu-latest
     steps:
       - name: Rebuild Pages for the release
