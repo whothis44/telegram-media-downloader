@@ -19,6 +19,8 @@ func registerIxRoutes(mux *http.ServeMux, a *App) {
 	mux.Handle("POST /api/ix/queue/{action}", a.requireAdmin(http.HandlerFunc(a.handleIxQueueAction)))
 	mux.Handle("POST /api/ix/settings", a.requireAdmin(http.HandlerFunc(a.handleIxSettings)))
 	mux.Handle("POST /api/ix/export", a.requireAdmin(http.HandlerFunc(a.handleIxExport)))
+	mux.Handle("GET /api/ix/dups", a.requireAdmin(http.HandlerFunc(a.handleIxDups)))
+	mux.Handle("POST /api/ix/dups/retry", a.requireAdmin(http.HandlerFunc(a.handleIxDupsRetry)))
 }
 
 type ixGroupStatus struct {
@@ -107,10 +109,13 @@ func (a *App) handleIxStatus(w http.ResponseWriter, r *http.Request) {
 		"exportDir": exportDir,
 		"search":    map[bool]string{true: "full-text", false: "simple"}[fts > 0],
 		"hold":      a.ixHold(ctx),
+		"dups":      a.ixVdupStatus(),
 	}
 	if exportErr != nil {
 		out["exportDirError"] = exportErr.Error()
 	}
+	a.ixVdupCount(ctx)
+	out["dups"] = a.ixVdupStatus()
 	writeJSON(w, http.StatusOK, out)
 }
 

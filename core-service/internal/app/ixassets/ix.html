@@ -222,6 +222,46 @@ ${state.msg ? `<div class="muted">${esc(state.msg)}</div>` : ''}</div>
   return h;
 }
 
+// ---------------- Duplicates ----------------
+const fmtSize = (n) => (n >= 1073741824 ? (n / 1073741824).toFixed(2) + ' GB' : n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : n >= 1024 ? Math.round(n / 1024) + ' KB' : (n || 0) + ' B');
+const fmtDur = (s) => { s = Math.round(s || 0); const m = Math.floor(s / 60); return m + ':' + String(s % 60).padStart(2, '0'); };
+async function loadDups(more) {
+  const offset = more && state.dups ? state.dups.clusters.length : 0;
+  const r = await api('GET', '/api/ix/dups?limit=50&offset=' + offset);
+  if (r.ok) {
+    if (more && state.dups) { state.dups.clusters = state.dups.clusters.concat(r.data.clusters || []); state.dups.status = r.data.status; }
+    else state.dups = r.data;
+  } else state.error = 'Could not load duplicates: ' + errText(r);
+  render();
+}
+function viewDuplicates() {
+  const s = state.status.settings;
+  const st = (state.dups && state.dups.status) || state.status.dups || {};
+  const pct = st.total ? Math.floor((100 * st.done) / st.total) : 100;
+  let h = `<div class="card"><h2>Near-duplicate videos</h2>
+<div class="muted">Finds the same footage saved as different files — re-encoded, resized, trimmed or watermarked — which identical-file matching can't see. It decodes only each video's key frames (on the graphics card when it can) and compares visual fingerprints. Nothing is deleted or moved: the index shows each set once on category pages and lists them in near_duplicates.csv.</div>`;
+  if (st.ffmpeg === false) h += `<div class="status warn"><b>ffmpeg is not installed on this PC</b>, so videos can't be checked yet. Open PowerShell and run <code>winget install Gyan.FFmpeg</code>, then restart the app (close and reopen start.bat).</div>`;
+  h += `<div><b>${fmtNum(st.done)} of ${fmtNum(st.total)} videos checked</b> (${pct}%)${st.errors ? ` · <span class="warn">${fmtNum(st.errors)} could not be read</span> <button class="mini" data-act="d-retry">Try them again</button>` : ''} · ${fmtNum(st.pairs)} matching pairs found${st.running ? ` · now: <span class="muted">${esc(st.current)}</span> (${esc(st.hwaccel === 'cpu' ? 'processor' : 'graphics card: ' + st.hwaccel)})` : s.dupEnabled ? ' · idle' : ' · <b>paused</b>'}</div>
+${st.lastError ? `<div class="muted">Last problem: ${esc(st.lastError)}</div>` : ''}
+<div class="btns"><label><input type="checkbox" data-dset="dupEnabled" ${s.dupEnabled ? 'checked' : ''}> Check videos in the background</label>
+<label>Decode on: <select class="t" data-dset-select="dupHwaccel">${[['cuda', 'NVIDIA graphics card (CUDA)'], ['d3d11va', 'Any graphics card (Direct3D 11)'], ['qsv', 'Intel graphics (Quick Sync)'], ['none', 'Processor only']].map(([v, l]) => `<option value="${v}" ${s.dupHwaccel === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+<span>Pause between <input class="t" data-dset-text="dupQuietStart" value="${esc(s.dupQuietStart || '')}" placeholder="" style="width:70px"> and <input class="t" data-dset-text="dupQuietEnd" value="${esc(s.dupQuietEnd || '')}" style="width:70px"></span>
+<button class="b" data-act="d-save">Save</button></div>
+<div class="muted">If the graphics card fails on a video, that video is decoded on the processor instead.</div></div>`;
+  const d = state.dups;
+  if (!d) return h + '<div class="muted">Loading…</div>';
+  h += `<div class="card"><h2>${fmtNum(d.total)} set(s) of near-duplicates</h2><div class="muted">Keeping only the largest copy of each set would free about <b>${fmtSize(d.spareSize)}</b>. Biggest savings first. <a href="/ix/view/near_duplicates.csv">Download the list (CSV)</a></div>`;
+  for (const c of d.clusters) {
+    h += `<div style="border-top:1px solid var(--line);padding:10px 0"><div class="muted">${c.kind === 'same' ? 'Same video' : 'Same footage, some copies are shorter clips'} · ${c.members.length} files · ${fmtSize(c.spareSize)} beyond the largest</div><div class="chips" style="margin-top:6px">`;
+    for (const m of c.members) {
+      h += `<div style="border:1px solid var(--line);border-radius:8px;overflow:hidden;width:190px">${m.downloadId ? `<img loading="lazy" src="/api/thumbs/${m.downloadId}" style="width:190px;height:110px;object-fit:cover;display:block;background:var(--soft)" alt="">` : ''}<div style="padding:6px 8px;font-size:12px"><b>${fmtSize(m.size)}</b> · ${fmtDur(m.duration)}<br>${m.places.slice(0, 3).map((p) => p.link ? `<a href="${esc(p.link)}" target="_blank">${esc(p.label)}</a>` : esc(p.label)).join('<br>')}${m.places.length > 3 ? `<br>+${m.places.length - 3} more` : ''}</div></div>`;
+    }
+    h += `</div></div>`;
+  }
+  if (d.clusters.length < d.total) h += `<div class="btns"><button class="b" data-act="d-more">More</button></div>`;
+  return h + `</div>`;
+}
+
 // ---------------- Search ----------------
 function viewSearch() {
   const s = state.status;
@@ -260,7 +300,7 @@ function viewSettings() {
 ${state.setMsg ? `<div class="muted">${esc(state.setMsg)}</div>` : ''}</div>`;
 }
 
-const TABS = [['overview', 'Overview'], ['rescan', 'Rescan'], ['categories', 'Categories'], ['search', 'Search'], ['settings', 'Settings']];
+const TABS = [['overview', 'Overview'], ['rescan', 'Rescan'], ['categories', 'Categories'], ['duplicates', 'Duplicates'], ['search', 'Search'], ['settings', 'Settings']];
 function render() {
   const prev = document.activeElement;
   const focusKey = prev && prev.getAttribute ? prev.getAttribute('data-focus') : null;
@@ -270,7 +310,7 @@ function render() {
   if (state.error) h += `<div class="status bad">${esc(state.error)} <button class="b" data-act="reload">Try again</button></div>`;
   if (!state.status) { $app.innerHTML = h + (state.error ? '' : '<p class="muted">Loading…</p>'); return; }
   h += banner();
-  const view = { overview: viewOverview, rescan: viewRescan, categories: viewCategories, search: viewSearch, settings: viewSettings }[state.tab] || viewOverview;
+  const view = { overview: viewOverview, rescan: viewRescan, categories: viewCategories, duplicates: viewDuplicates, search: viewSearch, settings: viewSettings }[state.tab] || viewOverview;
   h += view();
   $app.innerHTML = h;
   window.scrollTo(0, y);
@@ -326,7 +366,18 @@ $app.addEventListener('click', async (ev) => {
   const id = el.getAttribute('data-id');
   const all = groups();
   switch (act) {
-    case 'tab': state.tab = key; location.hash = key; render(); if (key !== 'search') load(); break;
+    case 'tab': state.tab = key; location.hash = key; render(); if (key !== 'search') load(); if (key === 'duplicates') loadDups(false); break;
+    case 'd-more': loadDups(true); break;
+    case 'd-retry': { const r = await api('POST', '/api/ix/dups/retry'); if (!r.ok) state.error = errText(r); loadDups(false); break; }
+    case 'd-save': {
+      const body = {};
+      for (const x of $app.querySelectorAll('[data-dset]')) body[x.getAttribute('data-dset')] = x.checked;
+      for (const x of $app.querySelectorAll('[data-dset-text]')) body[x.getAttribute('data-dset-text')] = x.value.trim();
+      for (const x of $app.querySelectorAll('[data-dset-select]')) body[x.getAttribute('data-dset-select')] = x.value;
+      const r = await api('POST', '/api/ix/settings', body);
+      if (!r.ok) state.error = 'Not saved: ' + errText(r);
+      await load(); loadDups(false); break;
+    }
     case 'reload': load(); break;
     case 'export': { const r = await api('POST', '/api/ix/export'); if (!r.ok) state.error = errText(r); load(); break; }
     case 'q-start': case 'q-pause': case 'q-clear-finished': case 'q-clear': {
@@ -408,7 +459,14 @@ $app.addEventListener('keydown', (ev) => {
 window.addEventListener('hashchange', () => { const k = (location.hash || '#overview').slice(1); if (k !== state.tab) { state.tab = k; render(); } });
 
 load();
-setInterval(() => { if (document.visibilityState === 'visible' && (state.tab === 'rescan' || state.tab === 'overview')) load(); }, 10000);
+if (state.tab === 'duplicates') loadDups(false);
+setInterval(() => {
+  if (document.visibilityState !== 'visible') return;
+  const busy = document.activeElement && document.activeElement.matches && document.activeElement.matches('[data-dset],[data-dset-text],[data-dset-select]');
+  if (busy) return; // don't redraw under someone editing the duplicate settings
+  if (state.tab === 'rescan' || state.tab === 'overview') load();
+  if (state.tab === 'duplicates' && state.dups && state.dups.clusters.length <= 50) loadDups(false);
+}, 10000);
 })();
 </script>
 </body>

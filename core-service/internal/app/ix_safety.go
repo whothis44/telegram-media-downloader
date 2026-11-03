@@ -24,11 +24,15 @@ type ixSettings struct {
 	PauseOnFreeze bool   `json:"pauseOnFreeze"` // stop starting rescans when Telegram reports the account frozen
 	QuietStart    string `json:"quietStart"`    // HH:MM; no new rescans start between QuietStart and QuietEnd
 	QuietEnd      string `json:"quietEnd"`
-	Pace          string `json:"pace"` // "normal" or "gentle"
+	Pace          string `json:"pace"`          // "normal" or "gentle"
+	DupEnabled    bool   `json:"dupEnabled"`    // look for near-duplicate videos in the background
+	DupHWAccel    string `json:"dupHwaccel"`    // "cuda" (default), "none", or another ffmpeg backend
+	DupQuietStart string `json:"dupQuietStart"` // HH:MM; no fingerprinting between start and end
+	DupQuietEnd   string `json:"dupQuietEnd"`
 }
 
 func ixDefaultSettings() ixSettings {
-	return ixSettings{ExportEnabled: true, ExportTime: "03:30", Pace: "normal"}
+	return ixSettings{ExportEnabled: true, ExportTime: "03:30", Pace: "normal", DupEnabled: true, DupHWAccel: "cuda"}
 }
 
 func (a *App) ixLoadSettings(ctx context.Context) ixSettings {
@@ -225,13 +229,23 @@ func ixParseSettings(body map[string]any, s ixSettings) (ixSettings, error) {
 	if v, ok := body["pauseOnFreeze"].(bool); ok {
 		s.PauseOnFreeze = v
 	}
+	if v, ok := body["dupEnabled"].(bool); ok {
+		s.DupEnabled = v
+	}
+	if v, ok := body["dupHwaccel"].(string); ok {
+		v = strings.ToLower(strings.TrimSpace(v))
+		if v != "none" && v != "cuda" && allowedThumbAccel(v) == "" {
+			return s, errors.New("dupHwaccel must be cuda, none, d3d11va, dxva2, qsv or vaapi")
+		}
+		s.DupHWAccel = v
+	}
 	if v, ok := body["exportTime"].(string); ok {
 		if !ixValidClock(v) {
 			return s, errors.New("exportTime must be HH:MM")
 		}
 		s.ExportTime = v
 	}
-	for key, dst := range map[string]*string{"quietStart": &s.QuietStart, "quietEnd": &s.QuietEnd} {
+	for key, dst := range map[string]*string{"quietStart": &s.QuietStart, "quietEnd": &s.QuietEnd, "dupQuietStart": &s.DupQuietStart, "dupQuietEnd": &s.DupQuietEnd} {
 		if v, ok := body[key].(string); ok {
 			v = strings.TrimSpace(v)
 			if v != "" && !ixValidClock(v) {

@@ -61,6 +61,8 @@ type ixRender struct {
 	catOf     func(groupID string) string   // category name of a group
 	peers     map[string]ixPeerName
 	edits     func(groupID string, ids []int) map[int][]ixEdit
+	near      map[string][]ixNear  // near-duplicate videos per file key
+	nearAt    map[string][]ixPlace // where those files appear
 	generated time.Time
 	dashboard bool
 }
@@ -253,6 +255,57 @@ func (r *ixRender) alsoHTML(f *ixFile, g *ixGroup, m *ixMsg) string {
 	return `<span class="also"><span class="badge">also in</span> ` + strings.Join(parts, ", ") + more + `</span>`
 }
 
+// nearHTML lists other files with the same footage (not byte-identical).
+func (r *ixRender) nearHTML(f *ixFile, g *ixGroup, m *ixMsg) string {
+	var parts []string
+	total := 0
+	kinds := map[string]bool{}
+	for _, n := range r.near[f.Key] {
+		kinds[n.Kind] = true
+		for _, p := range r.nearAt[n.Key] {
+			if p.GroupID == g.ID && p.MessageID == m.ID {
+				continue
+			}
+			total++
+			if len(parts) == 3 {
+				continue
+			}
+			label, href := r.placeLink(p, g)
+			if href == "" {
+				parts = append(parts, ixEsc(label))
+			} else {
+				parts = append(parts, `<a href="`+ixEsc(href)+`">`+ixEsc(label)+`</a>`)
+			}
+		}
+	}
+	if total == 0 {
+		return ""
+	}
+	word := "near-duplicate"
+	if kinds["clip"] && !kinds["same"] {
+		word = "same footage, different length"
+	}
+	more := ""
+	if total > 3 {
+		more = fmt.Sprintf(" +%d more", total-3)
+	}
+	return `<span class="also"><span class="badge warn">` + word + `</span> ` + strings.Join(parts, ", ") + more + `</span>`
+}
+
+func (r *ixRender) nearList(f *ixFile, g *ixGroup, m *ixMsg) string {
+	var out []string
+	for _, n := range r.near[f.Key] {
+		for _, p := range r.nearAt[n.Key] {
+			if p.GroupID == g.ID && p.MessageID == m.ID {
+				continue
+			}
+			label, _ := r.placeLink(p, g)
+			out = append(out, label+" ("+n.Kind+")")
+		}
+	}
+	return strings.Join(out, " | ")
+}
+
 func (r *ixRender) renderPost(g *ixGroup, p *ixPost, edits map[int][]ixEdit) string {
 	m := p.First
 	var bits []string
@@ -323,7 +376,7 @@ func (r *ixRender) renderPost(g *ixGroup, p *ixPost, edits map[int][]ixEdit) str
 			default:
 				el = `<a class="file" href="` + h + `" target="_blank">` + ixEsc(f.Name) + ` · ` + ixSize(f.Size) + `</a>`
 			}
-			media.WriteString(`<div class="item">` + el + r.alsoHTML(f, g, x) + `</div>`)
+			media.WriteString(`<div class="item">` + el + r.alsoHTML(f, g, x) + r.nearHTML(f, g, x) + `</div>`)
 		}
 		switch x.Status {
 		case "missing":
@@ -473,6 +526,7 @@ func (r *ixRender) renderGroupIndex(g *ixGroup, lastWalk int64) []byte {
 	row("Deleted on Telegram (copy kept)", c.Deleted, map[bool]string{true: "warn", false: ""}[c.Deleted > 0])
 	row("Edited (earlier versions kept)", c.Edited, "")
 	row("Files also posted elsewhere", c.Shared, "")
+	row("Videos with a near-duplicate (same footage, different file)", c.Near, "")
 	row("Files with no archived message", c.Extra, map[bool]string{true: "warn", false: ""}[c.Extra > 0])
 	row("Size different from Telegram's", c.SizeMismatch, map[bool]string{true: "warn", false: ""}[c.SizeMismatch > 0])
 	b.WriteString(`</table><p class="muted">Spreadsheets: <a href="posts.csv">posts.csv</a> · <a href="files.csv">files.csv</a> · <a href="missing.csv">missing.csv</a> · <a href="extra.csv">extra.csv</a> · <a href="size_mismatch.csv">size_mismatch.csv</a> · <a href="sha256.txt">sha256.txt</a> (SHA-256 of every file, for checking them later)</p>`)
@@ -573,7 +627,7 @@ func (r *ixRender) groupFiles(g *ixGroup) map[string][]byte {
 		posts = append(posts, []string{strconv.Itoa(m.ID), m.Grouped, topicID, r.topicCol(g, m), ixUTC(m.Date), ixLocal(m.Date), sender, m.Author, r.fwdLabel(m), reply, attachment, m.Status, deleted, strconv.Itoa(m.Edits), strings.Join(paths, " | "), m.Text})
 	}
 	out["posts.csv"] = ixCSVBytes(posts)
-	files := [][]string{{"message_id", "album_id", "topic", "date_toronto", "file_type", "file_name", "path_in_downloads_folder", "size_bytes", "sha256", "also_posted_in"}}
+	files := [][]string{{"message_id", "album_id", "topic", "date_toronto", "file_type", "file_name", "path_in_downloads_folder", "size_bytes", "sha256", "also_posted_in", "near_duplicates"}}
 	var sums strings.Builder
 	for _, m := range g.Msgs {
 		for _, f := range m.Files {
@@ -582,7 +636,7 @@ func (r *ixRender) groupFiles(g *ixGroup) map[string][]byte {
 				label, _ := r.placeLink(p, g)
 				also = append(also, label)
 			}
-			files = append(files, []string{strconv.Itoa(m.ID), m.Grouped, r.topicCol(g, m), ixLocal(m.Date), f.Type, f.Name, f.Path, strconv.FormatInt(f.Size, 10), strings.ToLower(f.Hash), strings.Join(also, " | ")})
+			files = append(files, []string{strconv.Itoa(m.ID), m.Grouped, r.topicCol(g, m), ixLocal(m.Date), f.Type, f.Name, f.Path, strconv.FormatInt(f.Size, 10), strings.ToLower(f.Hash), strings.Join(also, " | "), r.nearList(f, g, m)})
 			if len(f.Hash) == 64 {
 				fmt.Fprintf(&sums, "%s  %s\n", strings.ToLower(f.Hash), f.Path)
 			}
@@ -611,6 +665,7 @@ func (r *ixRender) groupFiles(g *ixGroup) map[string][]byte {
 // ---------- categories ----------
 
 type ixCategory struct {
+	roots   map[string]string // near-duplicate videos: file key -> cluster
 	Name    string
 	Slug    string
 	Groups  []*ixGroup
@@ -619,23 +674,25 @@ type ixCategory struct {
 	Missing int
 	Unique  int
 	SharedU int
+	Merged  int // near-duplicate video files shown together with another
 }
 
 type ixTile struct {
-	f      *ixFile
-	date   int
-	places []ixPlace
-	first  ixPlace
+	f        *ixFile
+	date     int
+	places   []ixPlace
+	first    ixPlace
+	versions map[string]bool // distinct files (near-duplicate videos) in this tile
 }
 
-func ixCategories(groups []*ixGroup) []*ixCategory {
+func ixCategories(groups []*ixGroup, roots map[string]string) []*ixCategory {
 	byName := map[string]*ixCategory{}
 	var cats []*ixCategory
 	for _, g := range groups {
 		name := ixCategoryName(g)
 		c := byName[name]
 		if c == nil {
-			c = &ixCategory{Name: name}
+			c = &ixCategory{Name: name, roots: roots}
 			byName[name] = c
 			cats = append(cats, c)
 		}
@@ -699,19 +756,29 @@ func ixLeadingDigits(s string) string {
 	return s[:i]
 }
 
-// tiles is every file of the category once, oldest first.
+// tiles is every file of the category once, oldest first. Near-duplicate
+// videos (the same footage in different files) share one tile, showing the
+// largest file.
 func (c *ixCategory) tiles() []*ixTile {
 	byKey := map[string]*ixTile{}
 	var list []*ixTile
 	for _, g := range c.Groups {
 		for _, m := range g.Msgs {
 			for _, f := range m.Files {
-				t := byKey[f.Key]
+				key := f.Key
+				if root := c.roots[f.Key]; root != "" && f.Type == "video" {
+					key = "near:" + root
+				}
+				t := byKey[key]
 				place := ixPlace{GroupID: g.ID, MessageID: m.ID}
 				if t == nil {
-					t = &ixTile{f: f, date: m.Date, first: place}
-					byKey[f.Key] = t
+					t = &ixTile{f: f, date: m.Date, first: place, versions: map[string]bool{}}
+					byKey[key] = t
 					list = append(list, t)
+				}
+				t.versions[f.Key] = true
+				if f.Size > t.f.Size {
+					t.f = f
 				}
 				t.places = append(t.places, place)
 				if m.Date > 0 && (t.date == 0 || m.Date < t.date) {
@@ -727,11 +794,12 @@ func (c *ixCategory) tiles() []*ixTile {
 		return list[i].first.MessageID < list[j].first.MessageID
 	})
 	c.Unique = len(list)
-	c.SharedU = 0
+	c.SharedU, c.Merged = 0, 0
 	for _, t := range list {
 		if len(t.places) > 1 {
 			c.SharedU++
 		}
+		c.Merged += len(t.versions) - 1
 	}
 	return list
 }
@@ -860,6 +928,9 @@ func (r *ixRender) renderCategory(c *ixCategory) map[string][]byte {
 			if len(t.places) > 1 {
 				badge = fmt.Sprintf(`<span><span class="badge">%d posts</span></span>`, len(t.places))
 			}
+			if len(t.versions) > 1 {
+				badge += fmt.Sprintf(`<span><span class="badge warn">%d versions of this video</span></span>`, len(t.versions))
+			}
 			date := ""
 			if t.date > 0 {
 				date = ixLocal(t.date)[:10]
@@ -885,7 +956,8 @@ func (r *ixRender) renderCategory(c *ixCategory) map[string][]byte {
 		months.WriteString(`<span class="muted">No files yet.</span>`)
 	}
 	body := `<div class="nav"><a href="../index.html">All groups</a></div><h1>` + ixEsc(c.Name) + `</h1>` +
-		fmt.Sprintf(`<p class="muted">%d group(s) · %s files in posts · <b>%s unique files</b> · %s posted more than once</p>`, len(c.Groups), ixNum(c.Files), ixNum(c.Unique), ixNum(c.SharedU)) +
+		fmt.Sprintf(`<p class="muted">%d group(s) · %s files in posts · <b>%s unique files</b> · %s posted more than once`, len(c.Groups), ixNum(c.Files), ixNum(c.Unique), ixNum(c.SharedU)) +
+		map[bool]string{true: fmt.Sprintf(` · %s near-duplicate video file(s) shown with their best version`, ixNum(c.Merged)), false: ""}[c.Merged > 0] + `</p>` +
 		ixGroupHead + rows.String() + `</table><h2>All media, each file once</h2><div class="months">` + months.String() + `</div>`
 	out["index.html"] = r.page(c.Name, 1, body)
 	return out
@@ -914,6 +986,7 @@ func (r *ixRender) renderRoot(cats []*ixCategory) []byte {
 	}
 	body := `<h1>Telegram backup index</h1>` +
 		fmt.Sprintf(`<p class="muted">Updated %s (Toronto time) · %d group(s) in %d %s · Files stay where the downloader saved them; these pages only link to them.</p>`, ixEsc(r.generated.In(ixTZ).Format("2006-01-02 15:04")), groups, len(cats), plural) +
-		`<div class="cards">` + cards.String() + `</div>` + sections.String()
+		`<div class="cards">` + cards.String() + `</div>` + sections.String() +
+		map[bool]string{true: `<h2>Near-duplicate videos</h2><p class="muted">Videos with the same footage in different files (re-encoded, resized, trimmed): <a href="near_duplicates.csv">near_duplicates.csv</a>. Category pages show each set once.</p>`, false: ""}[len(r.near) > 0]
 	return r.page("Telegram backup index", 0, body)
 }

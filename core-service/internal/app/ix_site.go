@@ -77,6 +77,7 @@ func (a *App) ixSite(ctx context.Context, site ixSite, dashboard bool) (*ixSiteD
 	if err != nil {
 		return nil, err
 	}
+	near := a.ixNearMap(ctx)
 	d := &ixSiteData{byID: map[string]*ixGroup{}, byDir: map[string]*ixGroup{}, walks: a.ixLatestWalks(ctx)}
 	for _, meta := range metas {
 		g, err := a.ixLayoutOf(ctx, meta)
@@ -84,13 +85,14 @@ func (a *App) ixSite(ctx context.Context, site ixSite, dashboard bool) (*ixSiteD
 			return nil, err
 		}
 		ixCountShared(g, shared)
+		ixCountNear(g, near)
 		d.groups = append(d.groups, g)
 		d.byID[g.ID] = g
 		if _, taken := d.byDir[g.Dir]; !taken {
 			d.byDir[g.Dir] = g
 		}
 	}
-	d.cats = ixCategories(d.groups)
+	d.cats = ixCategories(d.groups, ixNearRoots(near))
 	d.render = &ixRender{
 		site:      site,
 		shared:    shared,
@@ -98,6 +100,8 @@ func (a *App) ixSite(ctx context.Context, site ixSite, dashboard bool) (*ixSiteD
 		peers:     a.ixPeers(ctx),
 		edits:     a.ixEdits(ctx),
 		generated: time.Now(),
+		near:      near,
+		nearAt:    a.ixNearPlaces(ctx),
 		dashboard: dashboard,
 	}
 	return d, nil
@@ -110,6 +114,7 @@ func (a *App) ixFullGroup(ctx context.Context, d *ixSiteData, layout *ixGroup) (
 		return nil, err
 	}
 	ixCountShared(g, d.render.shared)
+	ixCountNear(g, d.render.near)
 	return g, nil
 }
 
@@ -163,6 +168,13 @@ func ixContentType(name string) string {
 func (a *App) ixViewFile(ctx context.Context, d *ixSiteData, rel string) ([]byte, string, error) {
 	if rel == "index.html" {
 		return d.render.renderRoot(d.cats), ixContentType(rel), nil
+	}
+	if rel == "near_duplicates.csv" {
+		clusters, err := a.ixDupClusters(ctx)
+		if err != nil {
+			return nil, "", err
+		}
+		return ixDupCSV(clusters), ixContentType(rel), nil
 	}
 	dir, file, ok := strings.Cut(rel, "/")
 	if !ok || file == "" || strings.Contains(file, "/") {
@@ -340,6 +352,11 @@ func (a *App) ixExportTo(ctx context.Context, progress func(string), count *int)
 	}
 	if err = write("index.html", d.render.renderRoot(d.cats)); err != nil {
 		return target, err
+	}
+	if clusters, err := a.ixDupClusters(ctx); err == nil && len(clusters) > 0 {
+		if err = write("near_duplicates.csv", ixDupCSV(clusters)); err != nil {
+			return target, err
+		}
 	}
 	for _, c := range d.cats {
 		for name, body := range d.render.renderCategory(c) {

@@ -1,0 +1,33 @@
+name: Archive features (with ffmpeg)
+
+# The archive's own tests, with ffmpeg installed so the near-duplicate video
+# check runs on real videos too.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: core-service/go.mod
+          cache-dependency-path: core-service/go.sum
+      - name: Install ffmpeg
+        run: |
+          command -v ffmpeg && command -v ffprobe && exit 0
+          sudo apt-get -o Acquire::Retries=1 update
+          sudo apt-get install -y ffmpeg
+      - name: Archive tests
+        run: |
+          set -o pipefail
+          go -C core-service test -race -count=1 -run 'TestIx' -v ./internal/app/ 2>&1 | grep -E '^(=== RUN|--- |PASS|FAIL|ok|panic)|ix.*_test.go'

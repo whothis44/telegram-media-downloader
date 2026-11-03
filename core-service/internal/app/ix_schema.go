@@ -69,6 +69,32 @@ CREATE TABLE IF NOT EXISTS ix_walks (
 	state       TEXT    NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS ix_walks_group ON ix_walks(group_id, finished_at);
+CREATE TABLE IF NOT EXISTS ix_vfp (
+	key        TEXT PRIMARY KEY,
+	file_path  TEXT    NOT NULL DEFAULT '',
+	duration   REAL    NOT NULL DEFAULT 0,
+	frames     BLOB,
+	status     TEXT    NOT NULL DEFAULT '',
+	error      TEXT    NOT NULL DEFAULT '',
+	updated_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS ix_vband (
+	band INTEGER NOT NULL,
+	v    INTEGER NOT NULL,
+	key  TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_vband_value ON ix_vband(band, v);
+CREATE INDEX IF NOT EXISTS ix_vband_key ON ix_vband(key);
+CREATE TABLE IF NOT EXISTS ix_vdup (
+	key_a    TEXT    NOT NULL,
+	key_b    TEXT    NOT NULL,
+	kind     TEXT    NOT NULL DEFAULT '',
+	score    REAL    NOT NULL DEFAULT 0,
+	matched  INTEGER NOT NULL DEFAULT 0,
+	offset_s REAL    NOT NULL DEFAULT 0,
+	found_at INTEGER NOT NULL DEFAULT 0,
+	PRIMARY KEY (key_a, key_b)
+);
 `
 
 func ixEnsureSchema(ctx context.Context, db *sql.DB) error {

@@ -94,7 +94,7 @@ type ixPage struct {
 }
 
 type ixCounts struct {
-	Messages, Captured, Posts, Albums, WithText, WithMedia, Downloaded, Files, Missing, Skipped, TextOnly, Extra, SizeMismatch, Deleted, Edited, Shared, Topics int
+	Messages, Captured, Posts, Albums, WithText, WithMedia, Downloaded, Files, Missing, Skipped, TextOnly, Extra, SizeMismatch, Deleted, Edited, Shared, Topics, Near int
 }
 
 type ixGroup struct {
@@ -653,4 +653,17 @@ func ixCountShared(g *ixGroup, shared map[string][]ixPlace) {
 		}
 	}
 	g.Counts.Shared = n
+}
+
+// ixCountNear counts a group's videos that have a near-duplicate.
+func ixCountNear(g *ixGroup, near map[string][]ixNear) {
+	n := 0
+	for _, m := range g.Msgs {
+		for _, f := range m.Files {
+			if len(near[f.Key]) > 0 {
+				n++
+			}
+		}
+	}
+	g.Counts.Near = n
 }
