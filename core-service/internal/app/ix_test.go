@@ -188,6 +188,7 @@ func TestIxQueueRescansWholeGroupAndRecordsEveryMessage(t *testing.T) {
 	}
 	deadline := time.Now().Add(10 * time.Second)
 	var st ixQueueState
+	sawMessagesPass := false
 	for time.Now().Before(deadline) {
 		if err = a.ixQueueStep(ctx, a.ixDeps()); err != nil {
 			t.Fatal(err)
@@ -195,12 +196,24 @@ func TestIxQueueRescansWholeGroupAndRecordsEveryMessage(t *testing.T) {
 		if st, err = a.ixLoadQueue(ctx); err != nil {
 			t.Fatal(err)
 		}
+		if len(st.Items) == 1 && st.Items[0].Phase == ixPhaseFiles && st.Items[0].State == "waiting" {
+			// Between the passes: the messages pass queued no download.
+			sawMessagesPass = true
+			var queued int
+			a.db.Reader.QueryRow(`SELECT count(*) FROM tgdl_work`).Scan(&queued)
+			if queued != 0 {
+				t.Fatalf("the messages pass queued %d download(s)", queued)
+			}
+		}
 		if len(st.Items) == 1 && st.Items[0].State == "done" {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if len(st.Items) != 1 || st.Items[0].State != "done" || st.Items[0].Processed != 3 {
+	if !sawMessagesPass {
+		t.Fatal("the group did not get a separate messages pass")
+	}
+	if len(st.Items) != 1 || st.Items[0].State != "done" || st.Items[0].Phase != ixPhaseFiles || st.Items[0].Messages != 3 || st.Items[0].Missing != 2 || st.Items[0].Processed != 3 {
 		t.Fatalf("queue=%+v", st)
 	}
 	if minDates.Load() != 1 {
@@ -217,7 +230,7 @@ func TestIxQueueRescansWholeGroupAndRecordsEveryMessage(t *testing.T) {
 		t.Fatal("a message missing from the full walk was not flagged as deleted")
 	}
 	a.db.Reader.QueryRow(`SELECT count(*) FROM ix_walks WHERE group_id=? AND state='done'`, group).Scan(&n)
-	if n != 1 {
+	if n != 2 { // the messages pass and the files pass
 		t.Fatalf("walks=%d", n)
 	}
 	waitHistoryDownloads(t, a, 2)
@@ -267,10 +280,12 @@ func TestIxQueueRetriesFailuresAtTheBackAndStopsOnPermanentErrors(t *testing.T) 
 	now := time.Unix(1_800_000_000, 0)
 	jobs := map[string]historyJob{}
 	started := []string{}
-	pending := 0
 	hold := ""
 	deps := ixQueueDeps{
-		start: func(_ context.Context, id string) (string, error) {
+		start: func(_ context.Context, id string, messagesOnly bool) (string, error) {
+			if !messagesOnly {
+				t.Fatalf("%s: the first pass must record messages only", id)
+			}
 			started = append(started, id)
 			switch id {
 			case "gone":
@@ -284,7 +299,7 @@ func TestIxQueueRetriesFailuresAtTheBackAndStopsOnPermanentErrors(t *testing.T) 
 			return "job-" + id, nil
 		},
 		job:     func(_ context.Context, id string) (historyJob, bool) { j, ok := jobs[id]; return j, ok },
-		pending: func(context.Context) (int, error) { return pending, nil },
+		missing: func(context.Context, string) (int, error) { return 0, nil },
 		finish:  func(context.Context, ixQueueItem, historyJob) error { return nil },
 		hold:    func(context.Context) string { return hold },
 		now:     func() time.Time { return now },
@@ -329,18 +344,12 @@ func TestIxQueueRetriesFailuresAtTheBackAndStopsOnPermanentErrors(t *testing.T) 
 	j := jobs["job-ok"]
 	j.State, j.Processed = "done", 9
 	jobs["job-ok"] = j
-	pending = 1000
-	st = step() // ok done; flaky's retry is not due yet
-	if st.Items[1].State != "done" || st.Items[1].Processed != 9 || !strings.Contains(st.Notice, "retry") {
+	st = step() // ok done (nothing missing); flaky's retry is not due yet
+	if st.Items[1].State != "done" || st.Items[1].Messages != 9 || !strings.Contains(st.Notice, "retry") {
 		t.Fatalf("done: %+v", st)
 	}
 	now = now.Add(2 * time.Minute)
-	st = step() // flaky is due, but the downloads of "ok" are still queued
-	if st.Items[2].State != "waiting" || !strings.Contains(st.Notice, "download queue") {
-		t.Fatalf("drain: %+v", st)
-	}
-	pending = 0
-	st = step()
+	st = step() // flaky is due: no waiting for the download queue
 	if st.Items[2].State != "running" {
 		t.Fatalf("retry start: %+v", st.Items)
 	}
@@ -354,6 +363,91 @@ func TestIxQueueRetriesFailuresAtTheBackAndStopsOnPermanentErrors(t *testing.T) 
 	}
 	if ixBackoff(10) != 15*time.Minute {
 		t.Fatal("backoff must cap at 15 minutes")
+	}
+}
+
+func TestIxQueueSavesEveryGroupsMessagesBeforeFetchingFiles(t *testing.T) {
+	ixBackgroundQueue.Store(false)
+	defer ixBackgroundQueue.Store(true)
+	ctx := context.Background()
+	a, err := newConfiguredTestApp(ctx, Config{DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	now := time.Unix(1_800_000_000, 0)
+	jobs := map[string]historyJob{}
+	type start struct {
+		id           string
+		messagesOnly bool
+	}
+	var started []start
+	missing := map[string]int{"a": 5, "b": 0}
+	deps := ixQueueDeps{
+		start: func(_ context.Context, id string, messagesOnly bool) (string, error) {
+			started = append(started, start{id, messagesOnly})
+			jid := fmt.Sprintf("job-%s-%d", id, len(started))
+			jobs[jid] = historyJob{ID: jid, State: "running", GroupID: id}
+			return jid, nil
+		},
+		job:     func(_ context.Context, id string) (historyJob, bool) { j, ok := jobs[id]; return j, ok },
+		missing: func(_ context.Context, id string) (int, error) { return missing[id], nil },
+		finish:  func(context.Context, ixQueueItem, historyJob) error { return nil },
+		now:     func() time.Time { return now },
+	}
+	// "a" was queued by an earlier version (no phase).
+	if _, err = a.ixQueueEdit(ctx, func(st *ixQueueState) error {
+		st.Running = true
+		st.Items = append(st.Items, ixQueueItem{GroupID: "a", Name: "a", State: "waiting"}, ixQueueItem{GroupID: "b", Name: "b", State: "waiting", Phase: ixPhaseMessages})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	step := func() ixQueueState {
+		t.Helper()
+		if err := a.ixQueueStep(ctx, deps); err != nil {
+			t.Fatal(err)
+		}
+		st, err := a.ixLoadQueue(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+	finish := func(processed int) {
+		last := started[len(started)-1]
+		jid := fmt.Sprintf("job-%s-%d", last.id, len(started))
+		j := jobs[jid]
+		j.State, j.Processed, j.Downloaded = "done", processed, 1
+		jobs[jid] = j
+	}
+	step() // a: messages
+	finish(40)
+	st := step() // a's messages saved, 5 files missing: files pass later; b's messages next
+	if st.Items[0].Phase != ixPhaseFiles || st.Items[0].State != "waiting" || st.Items[0].Messages != 40 || st.Items[0].Missing != 5 || st.Items[0].MessagesAt == 0 {
+		t.Fatalf("after a's messages: %+v", st.Items[0])
+	}
+	st = step()
+	if st.Items[1].State != "running" || st.Items[0].State != "waiting" {
+		t.Fatalf("b's messages must come before a's files: %+v", st.Items)
+	}
+	finish(7)
+	st = step() // b: nothing missing, done after one pass
+	if st.Items[1].State != "done" || st.Items[1].Messages != 7 {
+		t.Fatalf("b: %+v", st.Items[1])
+	}
+	st = step() // now a's files
+	if st.Items[0].State != "running" {
+		t.Fatalf("a's files: %+v", st.Items[0])
+	}
+	finish(40)
+	st = step()
+	if st.Items[0].State != "done" || st.Items[0].Missing != 5 || st.Items[0].Downloaded != 1 {
+		t.Fatalf("a done: %+v", st.Items[0])
+	}
+	want := []start{{"a", true}, {"b", true}, {"a", false}}
+	if fmt.Sprint(started) != fmt.Sprint(want) {
+		t.Fatalf("starts=%v want %v", started, want)
 	}
 }
 
@@ -596,5 +690,46 @@ func TestIxMonitorRecordsLiveMessagesWithoutMedia(t *testing.T) {
 	a.db.Reader.QueryRow(`SELECT deleted_at FROM ix_messages WHERE group_id='-1000000000042' AND message_id=50`).Scan(&deleted)
 	if deleted == 0 {
 		t.Fatal("live deletion not recorded")
+	}
+}
+
+func TestIxDownloadStatsExplainFailures(t *testing.T) {
+	ctx := context.Background()
+	a, err := newConfiguredTestApp(ctx, Config{DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	now := time.Now().UnixMilli()
+	for i, row := range []struct {
+		status, err string
+		updated     int64
+	}{
+		{"pending", "", now}, {"pending", "", now}, {"processing", "", now},
+		{"completed", "", now - 60_000}, {"completed", "", now - 3*60*60*1000},
+		{"failed", "FILE_REFERENCE_EXPIRED", now}, {"failed", "FILE_REFERENCE_EXPIRED", now}, {"failed", "disk full", now},
+	} {
+		var errText any
+		if row.err != "" {
+			errText = row.err
+		}
+		if _, err = a.db.Writer.Exec(`INSERT INTO tgdl_work(account_id,group_id,group_name,message_id,version,identity,media_type,file_name,file_size,body,status,error,created_at,updated_at)
+			VALUES('acc','-1000000000042','g',?,1,'id','photo','f.jpg',1,X'01',?,?,?,?)`, i+1, row.status, errText, row.updated, row.updated); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The "disk full" file has used up its automatic retries.
+	if _, err = a.db.Writer.Exec(`INSERT INTO ix_retry(work_key,rounds,last_at) VALUES('-1000000000042_8',?,1)`, ixRetryRounds); err != nil {
+		t.Fatal(err)
+	}
+	d := a.ixDownloads(ctx)
+	if d.Waiting != 2 || d.Downloading != 1 || d.Failed != 3 || d.LastHour != 1 || d.GivenUp != 1 || d.LastAt != now-60_000 {
+		t.Fatalf("stats=%+v", d)
+	}
+	if len(d.Errors) != 2 || d.Errors[0].Error != "FILE_REFERENCE_EXPIRED" || d.Errors[0].Count != 2 {
+		t.Fatalf("errors=%+v", d.Errors)
+	}
+	if !a.ixLoadSettings(ctx).AutoRetry {
+		t.Fatal("automatic retry must be on by default")
 	}
 }

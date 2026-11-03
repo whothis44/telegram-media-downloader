@@ -19,6 +19,7 @@ func registerIxRoutes(mux *http.ServeMux, a *App) {
 	mux.Handle("POST /api/ix/queue/{action}", a.requireAdmin(http.HandlerFunc(a.handleIxQueueAction)))
 	mux.Handle("POST /api/ix/settings", a.requireAdmin(http.HandlerFunc(a.handleIxSettings)))
 	mux.Handle("POST /api/ix/export", a.requireAdmin(http.HandlerFunc(a.handleIxExport)))
+	mux.Handle("POST /api/ix/downloads/retry", a.requireAdmin(http.HandlerFunc(a.handleIxDownloadsRetry)))
 	mux.Handle("GET /api/ix/dups", a.requireAdmin(http.HandlerFunc(a.handleIxDups)))
 	mux.Handle("POST /api/ix/dups/retry", a.requireAdmin(http.HandlerFunc(a.handleIxDupsRetry)))
 }
@@ -110,6 +111,7 @@ func (a *App) handleIxStatus(w http.ResponseWriter, r *http.Request) {
 		"search":    map[bool]string{true: "full-text", false: "simple"}[fts > 0],
 		"hold":      a.ixHold(ctx),
 		"dups":      a.ixVdupStatus(),
+		"downloads": a.ixDownloads(ctx),
 	}
 	if exportErr != nil {
 		out["exportDirError"] = exportErr.Error()
@@ -168,7 +170,7 @@ func (a *App) handleIxQueueAdd(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		added = append(added, ixQueueItem{GroupID: id, Name: name, State: "waiting", AddedAt: time.Now().UnixMilli()})
+		added = append(added, ixQueueItem{GroupID: id, Name: name, State: "waiting", Phase: ixPhaseMessages, AddedAt: time.Now().UnixMilli()})
 	}
 	a.ixForgetGroups()
 	st, err := a.ixQueueEdit(ctx, func(st *ixQueueState) error {
@@ -244,7 +246,9 @@ func (a *App) handleIxQueueAction(w http.ResponseWriter, r *http.Request) {
 			}
 		case "retry":
 			if i := ixQueueIndex(st, groupID); i >= 0 && st.Items[i].State != "running" {
+				// Again from the start: messages first, then missing files.
 				st.Items[i].State, st.Items[i].NextAt, st.Items[i].Error = "waiting", 0, ""
+				st.Items[i].Phase, st.Items[i].Attempts = ixPhaseMessages, 0
 			}
 		case "attempts":
 			st.MaxAttempts = max(0, min(1000, int(number(body["maxAttempts"], 0))))

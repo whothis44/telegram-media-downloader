@@ -16,18 +16,26 @@ import (
 )
 
 // The rescan queue walks whole groups, one at a time, with the backfill
-// engine: every message is read (and recorded), and media the library does
-// not have yet is downloaded. It runs inside the server, so it continues
-// with no browser open, and survives restarts (its state is in the kv table).
+// engine. Each group gets two passes. The first reads and records every
+// message and queues no downloads, so it is quick and is never held back by
+// the download queue; every queued group has its messages saved before any
+// second pass starts. The second pass walks again and queues the files the
+// library does not have yet; groups with nothing missing skip it. The queue
+// runs inside the server, so it continues with no browser open, and
+// survives restarts (its state is in the kv table).
 
 const (
-	ixQueueKey         = "ix_queue"
-	ixQueueTick        = 10 * time.Second
-	ixRetryBase        = time.Minute
-	ixRetryMax         = 15 * time.Minute
-	ixStartBelowQueued = 400              // start the next group once the download queue is this short
-	ixDrainWaitMax     = 20 * time.Minute // ...or after waiting this long
-	ixLostJob          = 3 * time.Minute
+	ixQueueKey  = "ix_queue"
+	ixQueueTick = 10 * time.Second
+	ixRetryBase = time.Minute
+	ixRetryMax  = 15 * time.Minute
+	ixLostJob   = 3 * time.Minute
+)
+
+// Passes of a queued group.
+const (
+	ixPhaseMessages = "messages" // record every message, download nothing
+	ixPhaseFiles    = "files"    // walk again and queue missing files
 )
 
 type ixQueueItem struct {
@@ -43,22 +51,27 @@ type ixQueueItem struct {
 	Downloaded int    `json:"downloaded"`
 	Error      string `json:"error,omitempty"`
 	AddedAt    int64  `json:"addedAt,omitempty"`
+	// Phase is the pass to run next, or running ("" in queues saved by
+	// earlier versions: one pass that also queues downloads).
+	Phase      string `json:"phase,omitempty"`
+	MessagesAt int64  `json:"messagesAt,omitempty"` // when the messages pass finished
+	Messages   int    `json:"messages,omitempty"`   // messages read by that pass
+	Missing    int    `json:"missing,omitempty"`    // files still missing after it
 }
 
 type ixQueueState struct {
-	Running      bool          `json:"running"`
-	Items        []ixQueueItem `json:"items"`
-	Notice       string        `json:"notice,omitempty"`
-	MaxAttempts  int           `json:"maxAttempts"` // 0 = keep trying
-	WaitingSince int64         `json:"waitingSince,omitempty"`
-	UpdatedAt    int64         `json:"updatedAt"`
+	Running     bool          `json:"running"`
+	Items       []ixQueueItem `json:"items"`
+	Notice      string        `json:"notice,omitempty"`
+	MaxAttempts int           `json:"maxAttempts"` // 0 = keep trying
+	UpdatedAt   int64         `json:"updatedAt"`
 }
 
 // ixQueueDeps are the backfill operations the queue uses; tests replace them.
 type ixQueueDeps struct {
-	start   func(ctx context.Context, groupID string) (jobID string, err error)
+	start   func(ctx context.Context, groupID string, messagesOnly bool) (jobID string, err error)
 	job     func(ctx context.Context, jobID string) (historyJob, bool)
-	pending func(ctx context.Context) (int, error)
+	missing func(ctx context.Context, groupID string) (int, error) // files the library still lacks
 	finish  func(ctx context.Context, item ixQueueItem, job historyJob) error
 	hold    func(ctx context.Context) string // non-empty: do not start new groups (safety pause, quiet hours)
 	now     func() time.Time
@@ -66,17 +79,12 @@ type ixQueueDeps struct {
 
 func (a *App) ixDeps() ixQueueDeps {
 	return ixQueueDeps{
-		start: a.ixStartHistory,
-		job:   a.ixHistoryJob,
-		pending: func(ctx context.Context) (int, error) {
-			if a.monitor == nil {
-				return 0, nil
-			}
-			return a.monitor.PendingManual(ctx)
-		},
-		finish: a.ixFinishWalk,
-		hold:   a.ixHold,
-		now:    time.Now,
+		start:   a.ixStartHistory,
+		job:     a.ixHistoryJob,
+		missing: a.ixMissingFiles,
+		finish:  a.ixFinishWalk,
+		hold:    a.ixHold,
+		now:     time.Now,
 	}
 }
 
@@ -89,6 +97,8 @@ func (a *App) ixStart() {
 	go func() { defer a.ambientWG.Done(); a.ixRunSafety(a.ctx) }()
 	a.ambientWG.Add(1)
 	go func() { defer a.ambientWG.Done(); a.ixRunVdup(a.ctx) }()
+	a.ambientWG.Add(1)
+	go func() { defer a.ambientWG.Done(); a.ixRunRetry(a.ctx) }()
 }
 
 func (a *App) ixWake() {
@@ -137,6 +147,12 @@ func (a *App) ixLoadQueue(ctx context.Context) (ixQueueState, error) {
 	}
 	if st.Items == nil {
 		st.Items = []ixQueueItem{}
+	}
+	for i := range st.Items {
+		// Groups queued by an earlier version start with the messages pass.
+		if st.Items[i].State == "waiting" && st.Items[i].Phase == "" {
+			st.Items[i].Phase = ixPhaseMessages
+		}
 	}
 	return st, nil
 }
@@ -228,8 +244,30 @@ func (a *App) ixQueueStep(ctx context.Context, deps ixQueueDeps) error {
 					return save()
 				}
 			}
-			item.State, item.FinishedAt, item.Error, item.JobID = "done", now.UnixMilli(), "", ""
-			st.WaitingSince = now.UnixMilli()
+			toFiles := false
+			if item.Phase == ixPhaseMessages {
+				item.MessagesAt, item.Messages = now.UnixMilli(), job.Processed
+				missing := 0
+				if deps.missing != nil {
+					n, err := deps.missing(ctx, item.GroupID)
+					if err != nil {
+						ixRetryLater(&st, i, now, "could not count missing files: "+err.Error())
+						return save()
+					}
+					missing = n
+				}
+				item.Missing, item.JobID, item.Error = missing, "", ""
+				if missing > 0 {
+					// The files pass waits until every queued group has
+					// had its messages saved.
+					toFiles = true
+					item.Phase, item.State, item.Attempts, item.NextAt = ixPhaseFiles, "waiting", 0, 0
+					item.Processed, item.Downloaded = 0, 0
+				}
+			}
+			if !toFiles {
+				item.State, item.FinishedAt, item.Error, item.JobID = "done", now.UnixMilli(), "", ""
+			}
 		default:
 			reason := "the backfill stopped (" + job.State + ")"
 			if job.Error != nil && *job.Error != "" {
@@ -240,15 +278,28 @@ func (a *App) ixQueueStep(ctx context.Context, deps ixQueueDeps) error {
 		}
 		break
 	}
-	next := -1
-	remaining := 0
+	// Messages passes first, in queue order; files passes after them.
+	next, nextFiles := -1, -1
+	remaining, messagesLeft := 0, 0
 	for i, item := range st.Items {
-		if item.State == "waiting" {
-			remaining++
-			if next < 0 && item.NextAt <= now.UnixMilli() {
-				next = i
-			}
+		if item.State != "waiting" {
+			continue
 		}
+		remaining++
+		due := item.NextAt <= now.UnixMilli()
+		if item.Phase == ixPhaseFiles {
+			if due && nextFiles < 0 {
+				nextFiles = i
+			}
+			continue
+		}
+		messagesLeft++
+		if due && next < 0 {
+			next = i
+		}
+	}
+	if next < 0 && messagesLeft == 0 {
+		next = nextFiles
 	}
 	if remaining == 0 {
 		st.Running = false
@@ -256,7 +307,11 @@ func (a *App) ixQueueStep(ctx context.Context, deps ixQueueDeps) error {
 		return save()
 	}
 	if next < 0 {
-		st.Notice = "Waiting to retry groups that failed."
+		if messagesLeft > 0 && nextFiles >= 0 {
+			st.Notice = "Waiting to retry a messages pass that failed; files passes start once every group's messages are saved."
+		} else {
+			st.Notice = "Waiting to retry groups that failed."
+		}
 		return save()
 	}
 	if deps.hold != nil {
@@ -265,23 +320,13 @@ func (a *App) ixQueueStep(ctx context.Context, deps ixQueueDeps) error {
 			return save()
 		}
 	}
-	// Let the previous group's downloads drain first, so one long backfill
-	// after another does not pile thousands of files into the queue.
-	if deps.pending != nil {
-		pending, err := deps.pending(ctx)
-		if err != nil {
-			return err
-		}
-		if st.WaitingSince == 0 {
-			st.WaitingSince = now.UnixMilli()
-		}
-		if pending >= ixStartBelowQueued && now.Sub(time.UnixMilli(st.WaitingSince)) < ixDrainWaitMax {
-			st.Notice = "Waiting for the download queue to shorten before the next group."
-			return save()
-		}
-	}
+	// A files pass is paced by the backfill engine itself: it reads more
+	// history only while the download queue has room.
 	item := &st.Items[next]
-	jobID, err := deps.start(ctx, item.GroupID)
+	if item.Phase == "" {
+		item.Phase = ixPhaseMessages
+	}
+	jobID, err := deps.start(ctx, item.GroupID, item.Phase == ixPhaseMessages)
 	if err != nil {
 		var permanent ixPermanentError
 		if errors.As(err, &permanent) {
@@ -293,7 +338,7 @@ func (a *App) ixQueueStep(ctx context.Context, deps ixQueueDeps) error {
 	}
 	item.State, item.JobID, item.StartedAt, item.Error = "running", jobID, now.UnixMilli(), ""
 	item.Processed, item.Downloaded, item.NextAt = 0, 0, 0
-	st.Notice, st.WaitingSince = "", 0
+	st.Notice = ""
 	return save()
 }
 
@@ -322,9 +367,13 @@ func ixCall(ctx context.Context, handler http.HandlerFunc, method, path string, 
 // ixStartHistory starts a whole-history backfill. A start date of 1 (the
 // beginning of time) makes the backfill engine walk every message from the
 // newest down, using Telegram's normal paging; files already in the library
-// are recognised and not downloaded again.
-func (a *App) ixStartHistory(ctx context.Context, groupID string) (string, error) {
-	code, out := ixCall(ctx, a.handleHistoryStart, http.MethodPost, "/api/history", map[string]any{"groupId": groupID, "limit": 0, "mode": "pull-older", "minDate": 1}, nil)
+// are recognised and not downloaded again. messagesOnly records the
+// messages without queueing any download.
+func (a *App) ixStartHistory(ctx context.Context, groupID string, messagesOnly bool) (string, error) {
+	if !messagesOnly {
+		a.ixRequeueGroupFailed(ctx, groupID)
+	}
+	code, out := ixCall(ctx, a.handleHistoryStart, http.MethodPost, "/api/history", map[string]any{"groupId": groupID, "limit": 0, "mode": "pull-older", "minDate": 1, "messagesOnly": messagesOnly}, nil)
 	if id := toString(out["jobId"]); id != "" && (code == http.StatusOK || toString(out["code"]) == "ALREADY_RUNNING") {
 		return id, nil
 	}
