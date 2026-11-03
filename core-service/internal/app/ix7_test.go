@@ -464,3 +464,20 @@ func TestIxMLParsesBothAnswerShapes(t *testing.T) {
 		}
 	}
 }
+
+func TestIxMLNeverConnectsOutsideTheLocalNetwork(t *testing.T) {
+	// The address is checked when connecting too, whatever a name resolves
+	// to; redirects are not followed.
+	_, err := ixMLHTTP.Get("http://203.0.113.7:3003/ping")
+	if err == nil || !strings.Contains(err.Error(), "not on this computer") {
+		t.Fatalf("connected to a public address: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://203.0.113.7/steal", http.StatusTemporaryRedirect)
+	}))
+	defer srv.Close()
+	c := &ixMLClient{base: srv.URL, model: "m", http: ixMLHTTP}
+	if _, err := c.embed(context.Background(), []byte("picture"), ""); err == nil || !strings.Contains(err.Error(), "redirect") {
+		t.Fatalf("redirect: %v", err)
+	}
+}

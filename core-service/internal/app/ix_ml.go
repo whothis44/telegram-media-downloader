@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/botnick/telegram-media-downloader/core-service/internal/seekbar"
@@ -96,7 +97,30 @@ func (a *App) ixMLClientNow(ctx context.Context) *ixMLClient {
 		model = ixMLDefaultModel
 	}
 	// The first request may wait while the service downloads the model.
-	return &ixMLClient{base: s.MLURL, model: model, http: &http.Client{Timeout: 10 * time.Minute}}
+	return &ixMLClient{base: s.MLURL, model: model, http: ixMLHTTP}
+}
+
+// ixMLHTTP talks to the service directly: never through a proxy set for
+// the system, and never following a redirect, so a picture can only reach
+// the address that was checked.
+var ixMLHTTP = &http.Client{
+	Timeout: 10 * time.Minute,
+	Transport: &http.Transport{Proxy: nil, MaxIdleConns: 4, IdleConnTimeout: 30 * time.Second,
+		// A local name could resolve to a public address: check the address
+		// actually connected to.
+		DialContext: (&net.Dialer{Timeout: 10 * time.Second, Control: func(_, address string, _ syscall.RawConn) error {
+			host, _, err := net.SplitHostPort(address)
+			if err != nil {
+				return err
+			}
+			if ip := net.ParseIP(host); ip == nil || !(ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()) {
+				return fmt.Errorf("the image recognition address resolves to %s, which is not on this computer or the local network", host)
+			}
+			return nil
+		}}).DialContext},
+	CheckRedirect: func(*http.Request, []*http.Request) error {
+		return errors.New("the image recognition service answered with a redirect; refusing to follow it")
+	},
 }
 
 func (c *ixMLClient) ping(ctx context.Context) error {
