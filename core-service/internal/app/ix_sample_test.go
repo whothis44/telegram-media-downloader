@@ -510,6 +510,20 @@ func TestIxDataSample(t *testing.T) {
 		}
 	}
 
+	// ix.8: what recognition found. Maya's face in two of the club's
+	// hill-climb photos and one of her own (a named person); the text on the
+	// braking-tips picture; the forum's voice note written out.
+	exec(`INSERT INTO ix_people(id,name,created_at,updated_at) VALUES(1,'Maya Chen',?,?)`, seen, seen)
+	for i, f := range []struct {
+		path string
+		x    float64
+	}{{"Riverside Cycling Club/images/2026-03-14_130.jpg", 0.42}, {"Riverside Cycling Club/images/2026-03-14_131.jpg", 0.18}, {"Trail Builders Forum/images/2026-03-14_223.jpg", 0.55}} {
+		exec(`INSERT INTO ix_faces(id,key,model,x1,y1,x2,y2,score,vec,person,at) VALUES(?,?,'buffalo_l',?,0.2,?,0.45,0.93,zeroblob(512),1,?)`, i+1, "h:"+hash(f.path), f.x, f.x+0.12, seen)
+	}
+	exec(`INSERT INTO ix_ocr(key,model,text,at) VALUES(?,'PP-OCRv5_mobile',?,?)`, "h:"+hash("Riverside Cycling Club/images/2026-03-14_109.jpg"), "WET BRAKING\nBrake early, brake gently", seen)
+	exec(`INSERT INTO ix_stt(key,model,language,text,segments,at) VALUES(?,'Systran/faster-whisper-large-v3','en',?,?,?)`, "h:"+hash("Trail Builders Forum/documents/voice_5500000000000000301.ogg"),
+		"The north loop is flooded past the bridge. Take the ridge trail.", `[[0,2.6,"The north loop is flooded past the bridge."],[2.6,4.1,"Take the ridge trail."]]`, seen)
+
 	exec(`INSERT INTO ix_walks(job_id,group_id,started_at,finished_at,processed,marked_deleted,state) VALUES('sample-1',?,?,?,10,1,'done'),('sample-2',?,?,?,13,0,'done')`,
 		club, seen, seen+60_000, forum, seen, seen+90_000)
 
@@ -597,6 +611,12 @@ func TestIxDataSample(t *testing.T) {
 		}
 		if core != 4 {
 			t.Fatalf("hill-climb core files: %d", core)
+		}
+	}
+	for name, want := range map[string]string{"people.jsonl": `"name":"Maya Chen"`, "faces.jsonl": `"person":1`, "media_text.jsonl": `"kind":"speech"`} {
+		body, err := os.ReadFile(filepath.Join(data, name))
+		if err != nil || !strings.Contains(string(body), want) {
+			t.Fatalf("%s: %v %s", name, err, body)
 		}
 	}
 	files := map[string]bool{}

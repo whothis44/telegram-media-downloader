@@ -37,6 +37,14 @@ type ixSettings struct {
 	HoldForever   bool   `json:"holdForever"`   // ...and are never released automatically
 	MLURL         string `json:"mlUrl"`         // image recognition (Immich machine learning); empty: off
 	MLModel       string `json:"mlModel"`       // its model; empty: ixMLDefaultModel
+	MLFaces       bool   `json:"mlFaces"`       // find faces and group them into people (off unless turned on)
+	MLTextModel   string `json:"mlTextModel"`   // text-reading model (by script); empty: ixOCRDefaultModel
+	MLText        bool   `json:"mlText"`        // read text in pictures
+	MLDupes       bool   `json:"mlDupes"`       // near-identical pictures by recognition go to review
+	MLThings      string `json:"mlThings"`      // subjects to tag, one per line; empty: ixDefaultThings
+	STTURL        string `json:"sttUrl"`        // speech to text (an OpenAI-compatible Whisper server); empty: off
+	STTModel      string `json:"sttModel"`      // its model; empty: ixSTTDefaultModel
+	DeadlineOrder string `json:"deadlineOrder"` // auto (when the backup would not finish before deletion), on, off
 	// Alerts (see ix_alerts.go). The SMTP password is never sent back to
 	// the dashboard; AlertSMTPPassSet says whether one is saved.
 	AlertWebhook     string `json:"alertWebhook"`
@@ -59,7 +67,7 @@ func (s ixSettings) public() ixSettings {
 }
 
 func ixDefaultSettings() ixSettings {
-	return ixSettings{ExportEnabled: true, ExportTime: "03:30", Pace: "normal", DupEnabled: true, DupHWAccel: "cuda", AutoRetry: true, FixityEnabled: true, SubstExact: true, HoldLikely: true, AlertWebhookKind: "ntfy", AlertSMTPPort: "587"}
+	return ixSettings{ExportEnabled: true, ExportTime: "03:30", Pace: "normal", DupEnabled: true, DupHWAccel: "cuda", AutoRetry: true, FixityEnabled: true, SubstExact: true, HoldLikely: true, MLText: true, MLDupes: true, DeadlineOrder: "auto", AlertWebhookKind: "ntfy", AlertSMTPPort: "587"}
 }
 
 func (a *App) ixLoadSettings(ctx context.Context) ixSettings {
@@ -262,7 +270,8 @@ func ixParseSettings(body map[string]any, s ixSettings) (ixSettings, error) {
 	if v, ok := body["autoRetry"].(bool); ok {
 		s.AutoRetry = v
 	}
-	for key, dst := range map[string]*bool{"fixityEnabled": &s.FixityEnabled, "substExact": &s.SubstExact, "holdLikely": &s.HoldLikely, "holdForever": &s.HoldForever} {
+	for key, dst := range map[string]*bool{"fixityEnabled": &s.FixityEnabled, "substExact": &s.SubstExact, "holdLikely": &s.HoldLikely, "holdForever": &s.HoldForever,
+		"mlFaces": &s.MLFaces, "mlText": &s.MLText, "mlDupes": &s.MLDupes} {
 		if v, ok := body[key].(bool); ok {
 			*dst = v
 		}
@@ -295,6 +304,41 @@ func ixParseSettings(body map[string]any, s ixSettings) (ixSettings, error) {
 			return s, errors.New("the model name may hold letters, digits, dots, dashes and underscores only")
 		}
 		s.MLModel = v
+	}
+	if v, ok := body["mlTextModel"].(string); ok {
+		if _, known := ixOCRModels[v]; v != "" && !known {
+			return s, errors.New("unknown text-reading model")
+		}
+		s.MLTextModel = v
+	}
+	if v, ok := body["mlThings"].(string); ok {
+		var lines []string
+		for _, l := range strings.Split(v, "\n") {
+			if l = strings.TrimSpace(l); l != "" && len(l) <= 80 && len(lines) < 200 {
+				lines = append(lines, l)
+			}
+		}
+		s.MLThings = strings.Join(lines, "\n")
+	}
+	if v, ok := body["sttUrl"].(string); ok {
+		u, err := ixMLCheckURL(v)
+		if err != nil {
+			return s, errors.New(strings.Replace(err.Error(), "image recognition", "speech to text", 1))
+		}
+		s.STTURL = u
+	}
+	if v, ok := body["sttModel"].(string); ok {
+		v = strings.TrimSpace(v)
+		if v != "" && !ixSTTModelRe.MatchString(v) {
+			return s, errors.New("the speech model name may hold letters, digits, dots, dashes, underscores and one slash")
+		}
+		s.STTModel = v
+	}
+	if v, ok := body["deadlineOrder"].(string); ok {
+		if v != "auto" && v != "on" && v != "off" {
+			return s, errors.New("deadlineOrder must be auto, on or off")
+		}
+		s.DeadlineOrder = v
 	}
 	if v, ok := body["alertWebhookKind"].(string); ok {
 		if v != "ntfy" && v != "discord" && v != "json" {

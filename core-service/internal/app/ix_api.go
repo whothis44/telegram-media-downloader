@@ -184,6 +184,7 @@ func (a *App) handleIxStatus(w http.ResponseWriter, r *http.Request) {
 		"held":      a.ixHeldStatus(ctx),
 		"fixity":    a.ixFixityStatus(ctx),
 		"ml":        a.ixMLStatusNow(ctx),
+		"deadline":  a.ixDeadlineEstimate(ctx, false),
 		"pictures":  a.ixMediaStatus(),
 	}
 	if exportErr != nil {

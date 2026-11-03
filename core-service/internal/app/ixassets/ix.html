@@ -111,6 +111,28 @@ function banner() {
 }
 
 // ---------------- Overview ----------------
+function viewDeadline() {
+  const d = state.status.deadline; if (!d) return '';
+  const days = (sec) => (sec / 86400).toFixed(1);
+  const left = d.until ? (d.until - Date.now() / 1000) : 0;
+  const rate = (b) => b > 0 ? fmtSize(b * 86400) + '/day' : '—';
+  let verdict = '';
+  if (!d.leftFiles && !d.toGetFiles) verdict = '<span class="ok">Nothing left to download.</span>';
+  else if (!d.etaSec) verdict = '<span class="muted">Speed not known yet (no download finished in the last day).</span>';
+  else verdict = `At the last day's speed that takes about <b>${days(d.etaSec)} days</b>.` + (d.until ? (d.finishes === 'yes' ? ' <span class="ok">That is before the deletion date.</span>' : ' <span class="bad">That is after the deletion date.</span>') : '');
+  const deferred = (d.deferred || []).reduce((a, b) => a + b, 0);
+  let h = `<div class="card"><h2>Before the deadline</h2>
+<div>${d.until ? `Telegram deletes this account in <b>${days(Math.max(0, left))} days</b>. ` : 'Telegram has not set a deletion date. '}<b>${fmtNum(d.toGetFiles || d.leftFiles)}</b> distinct file(s), <b>${fmtSize(d.toGetBytes || d.leftBytes)}</b>, still to download${d.copies ? ` (${fmtNum(d.copies)} more are copies of these or of saved files: they come free)` : ''}; ${fmtNum(d.leftFiles)} of them are in the download queue now${d.unscanned ? `, the rest come as the ${fmtNum(d.unscanned)} group(s) still waiting for their rescan are reached` : ''}. ${verdict}</div>
+<div class="muted">Speed: ${rate(d.rate24h)} over the last day, ${rate(d.rate1h)} over the last hour (files covered by a saved copy not counted).${d.active ? ` <b>Smaller files are going first</b>${deferred ? ` (${fmtNum(deferred)} larger file(s) set aside for now)` : ''}.` : d.mode === 'off' ? ' Order: normal (Settings).' : ''}</div>
+<div class="btns"><button class="b" data-act="dl-loss">${state.loss ? 'Refresh' : 'Show'} what would be lost today</button></div>`;
+  const L = state.loss;
+  if (L && L.error) h += `<div class="bad">${esc(L.error)}</div>`;
+  else if (L && L.loss) {
+    h += L.loss.length ? `<div class="muted">Private chats first: they cannot be read again from another account. Then chats not fully scanned, then the most data.</div><div class="list"><table><tr><th>Chat</th><th></th><th class="n">Files left</th><th class="n">Size</th><th>Messages</th></tr>${L.loss.map((x) => `<tr><td>${esc(x.name)}</td><td>${x.private ? '<span class="warn">private</span>' : '<span class="muted">public</span>'}</td><td class="n">${fmtNum(x.files)}</td><td class="n">${fmtSize(x.bytes)}</td><td>${x.scanned ? '<span class="ok">all read</span>' : '<span class="warn">not all read yet</span>'}</td></tr>`).join('')}</table></div>` : '<div class="ok">Nothing would be lost: every chat is fully read and downloaded.</div>';
+  }
+  return h + '</div>';
+}
+
 function viewOverview() {
   const s = state.status;
   const gs = (s.groups || []).slice().sort((a, b) => natural(a.name, b.name));
@@ -125,6 +147,7 @@ function viewOverview() {
 ${ex.running ? `<div class="muted">${esc(ex.progress || 'Working…')}</div>` : ''}
 ${ex.finishedAt && !ex.running ? `<div class="muted">Last written ${esc(fmtTime(ex.finishedAt))}${ex.error ? ` — <span class="bad">failed: ${esc(ex.error)}</span>` : ` (${fmtNum(ex.files)} files)`}.</div>` : ''}
 </div>`;
+  h += viewDeadline();
   h += viewDownloads();
   h += viewKeeping();
   h += `<div class="card"><h2>Messages captured</h2><div class="muted">${fmtNum(total)} messages saved across ${gs.length} group(s). ${notYet ? `<b>${notYet} group(s) have not had a full rescan yet</b> — use the Rescan tab to capture their history.` : 'Every group has had a full rescan.'} New posts are saved as the monitor sees them.</div>
@@ -360,6 +383,7 @@ ${state.diag ? `<textarea id="diag" readonly style="width:100%;min-height:260px;
 <div class="card"><h2>Account safety</h2>
 <label>Pace of rescans: <select class="t" data-set-select="pace"><option value="normal" ${s.pace === 'normal' ? 'selected' : ''}>Normal</option><option value="gentle" ${s.pace === 'gentle' ? 'selected' : ''}>Gentle (pauses more often, smaller download batches)</option></select></label>
 <div class="btns">Quiet hours (no new group starts): <input class="t" data-set-text="quietStart" value="${esc(s.quietStart)}" placeholder="22:00" style="width:80px"> to <input class="t" data-set-text="quietEnd" value="${esc(s.quietEnd)}" placeholder="07:00" style="width:80px"> <span class="muted">empty = none</span></div>
+<label>When Telegram has set a deletion date: <select class="t" data-set-select="deadlineOrder">${[['auto', 'smaller files first, only if the backup would not finish in time (recommended)'], ['on', 'smaller files first, always'], ['off', 'keep the normal order']].map(([v, l]) => `<option value="${v}" ${(s.deadlineOrder || 'auto') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
 <label><input type="checkbox" data-set="pauseOnFreeze" ${s.pauseOnFreeze ? 'checked' : ''}> Pause rescans when Telegram reports the account frozen</label>
 <label><input type="checkbox" data-set="autoRetry" ${s.autoRetry ? 'checked' : ''}> Retry failed downloads automatically every few hours (up to 5 times per file)</label>
 <label><input type="checkbox" data-set="substExact" ${s.substExact ? 'checked' : ''}> Don't download exact re-uploads: when a file is exactly as large as one already saved, compare its bytes on Telegram first (uses Telegram's own fingerprints, or three 1 MB samples)</label>
@@ -370,13 +394,31 @@ ${state.diag ? `<textarea id="diag" readonly style="width:100%;min-height:260px;
 <div class="btns"><button class="b primary" data-act="set-save">Save settings</button></div>
 ${state.setMsg ? `<div class="muted">${esc(state.setMsg)}</div>` : ''}</div>
 <div class="card"><h2>Image recognition (optional)</h2>
-<div class="muted">Lets the archive browser find pictures and videos by what they show (“bikes in the snow”, in any language), show “more like this”, and set apart files in a set that don't look like the rest. It uses the machine-learning part of Immich (a self-hosted photo app), running in Docker on this PC's graphics card; nothing is sent anywhere else, and only addresses on this computer or your local network are accepted. Each distinct picture is looked at once, in the background, a video by three of its frames. Instructions: docs/image-recognition.md.</div>
+<div class="muted">Lets the archive browser find pictures and videos by what they show (“bikes in the snow”, in any language), show “more like this”, set apart files in a set that don't look like the rest, list what pictures show (Things), and, if you turn them on, read the text in pictures and group faces into people. It uses the machine-learning part of Immich (a self-hosted photo app), running in Docker on this PC; nothing is sent anywhere else, and only addresses on this computer or your local network are accepted. Each distinct picture is looked at once, in the background. Instructions: docs/image-recognition.md.</div>
 <div class="btns">Address: <input class="t" data-set-text="mlUrl" value="${esc(s.mlUrl || '')}" placeholder="http://127.0.0.1:3003 (empty = off)" style="flex:1;min-width:240px"></div>
 <div class="btns">Model: <input class="t" data-set-text="mlModel" value="${esc(s.mlModel || '')}" placeholder="ViT-B-16-SigLIP2__webli" style="flex:1;min-width:240px"></div>
 <div class="muted">Changing the model looks at every picture again. Tested with Immich ${esc((state.status.ml && state.status.ml.immichVersion) || '')}.</div>
-${(() => { const m = state.status.ml || {}; if (!m.enabled) return ''; return `<div>${m.reachable ? '<span class="ok">Connected.</span>' : `<span class="bad">${esc(m.lastError || 'Not checked yet.')}</span>`} ${fmtNum(m.embedded || 0)} looked at, ${fmtNum(m.pending || 0)} to go${m.failed ? ', ' + fmtNum(m.failed) + ' unreadable' : ''}${m.running ? ' · working' : ''}.</div>`; })()}
+<label><input type="checkbox" data-set="mlDupes" ${s.mlDupes ? 'checked' : ''}> Send pictures that recognition finds near-identical (crops, filters, overlays) to “Review look-alikes”. Nothing is merged by itself.</label>
+<label><input type="checkbox" data-set="mlText" ${s.mlText ? 'checked' : ''}> Read the text in pictures (screenshots, signs, documents) so the search finds it.</label>
+<div class="btns" style="margin-left:22px">Script: <select class="t" data-set-select="mlTextModel">${[['', 'Chinese, English, Japanese (default)'], ['LATIN__PP-OCRv5_mobile', 'Latin script: French, Spanish, German…'], ['ESLAV__PP-OCRv5_mobile', 'Cyrillic: Russian, Ukrainian…'], ['EN__PP-OCRv5_mobile', 'English only'], ['EL__PP-OCRv5_mobile', 'Greek'], ['KOREAN__PP-OCRv5_mobile', 'Korean'], ['TH__PP-OCRv5_mobile', 'Thai'], ['PP-OCRv5_server', 'Chinese, English, Japanese (larger, slower)']].map(([v, l]) => `<option value="${v}" ${(s.mlTextModel || '') === v ? 'selected' : ''}>${l}</option>`).join('')}</select> <span class="muted">Arabic script is not offered by Immich's text reader.</span></div>
+<label><input type="checkbox" data-set="mlFaces" ${s.mlFaces ? 'checked' : ''}> Find faces and group them into people (Browser → People). Off by default: grouping the faces of people in these chats is sensitive.</label>
+<div class="btns">Things to look for, one per line (Browser → Things):</div>
+<textarea class="t" data-set-text="mlThings" rows="5" style="width:100%;font:13px/1.4 inherit" placeholder="(the standard list)">${esc(s.mlThings || '')}</textarea>
+${(() => {
+  const m = state.status.ml || {}; if (!m.enabled) return '';
+  const t = m.tasks || {};
+  const line = (label, x) => x && x.on ? `<div>${label}: ${fmtNum(x.done || 0)} done, ${fmtNum(x.pending || 0)} to go${x.failed ? ', ' + fmtNum(x.failed) + ' unreadable' : ''}${x.lastError ? ` · <span class="bad">${esc(x.lastError)}</span>` : ''}</div>` : '';
+  return `<div>${m.reachable ? '<span class="ok">Connected.</span>' : `<span class="bad">${esc(m.lastError || 'Not checked yet.')}</span>`} What pictures show: ${fmtNum(m.embedded || 0)} looked at, ${fmtNum(m.pending || 0)} to go${m.failed ? ', ' + fmtNum(m.failed) + ' unreadable' : ''}${m.running ? ' · working' : ''}.</div>${line('Text in pictures', t.text)}${line('Faces', t.faces)}`;
+})()}
 <div class="btns"><button class="b primary" data-act="set-save">Save settings</button><button class="b" data-act="ml-check">Check the connection</button></div>
 ${state.mlMsg ? `<div class="muted">${esc(state.mlMsg)}</div>` : ''}</div>
+<div class="card"><h2>Speech to text (optional)</h2>
+<div class="muted">Writes out what is said in voice notes, audio and videos, so the search finds it and the browser shows it next to the file. It uses a Whisper server (speaches) in a second Docker container on this PC; nothing is sent anywhere else. Many languages are recognised on their own. Only the first 90 minutes of a recording are written out. Instructions: docs/image-recognition.md.</div>
+<div class="btns">Address: <input class="t" data-set-text="sttUrl" value="${esc(s.sttUrl || '')}" placeholder="http://127.0.0.1:8000 (empty = off)" style="flex:1;min-width:240px"></div>
+<div class="btns">Model: <input class="t" data-set-text="sttModel" value="${esc(s.sttModel || '')}" placeholder="Systran/faster-whisper-large-v3" style="flex:1;min-width:240px"></div>
+${(() => { const x = (state.status.ml || {}).speech || {}; if (!x.on) return ''; return `<div>${x.reachable ? '<span class="ok">Connected.</span>' : `<span class="bad">${esc(x.lastError || 'Not checked yet.')}</span>`} ${fmtNum(x.done || 0)} written out, ${fmtNum(x.pending || 0)} to go${x.failed ? ', ' + fmtNum(x.failed) + ' unreadable' : ''}.</div>`; })()}
+<div class="btns"><button class="b primary" data-act="set-save">Save settings</button><button class="b" data-act="stt-check">Check the connection</button></div>
+${state.sttMsg ? `<div class="muted">${esc(state.sttMsg)}</div>` : ''}</div>
 <div class="card"><h2>Alerts</h2>
 <div class="muted">A short message when something needs you: the account frozen or logged out, a group that can no longer be read, downloads stopped for an hour, the nightly index failing, or the rescan queue finished. Alerts never include message text.</div>
 <div class="btns">Web address: <input class="t" data-set-text="alertWebhook" value="${esc(s.alertWebhook || '')}" placeholder="https://ntfy.sh/your-private-topic" style="flex:1;min-width:240px">
@@ -550,6 +592,17 @@ $app.addEventListener('click', async (ev) => {
       const r = await api('POST', '/api/ix/ml/check');
       state.mlMsg = r.ok ? 'Image recognition works.' : 'Image recognition: ' + errText(r);
       load(); break;
+    }
+    case 'stt-check': {
+      state.sttMsg = 'Checking (the first time, the service downloads its model, about 3 GB: this can take a while)…'; render();
+      const r = await api('POST', '/api/ix/stt/check');
+      state.sttMsg = r.ok ? 'Speech to text works.' : 'Speech to text: ' + errText(r);
+      load(); break;
+    }
+    case 'dl-loss': {
+      const r = await api('GET', '/api/ix/deadline');
+      state.loss = r.ok ? r.data : { error: errText(r) };
+      render(); break;
     }
     case 'set-save': {
       const body = {};

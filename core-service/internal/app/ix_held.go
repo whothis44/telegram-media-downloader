@@ -369,7 +369,10 @@ func (a *App) ixHeldStep(ctx context.Context) error {
 					return err
 				}
 				if n, _ := res.RowsAffected(); n == 0 {
-					reason = ""
+					// Taken or set aside meanwhile (claimed, or paused by the
+					// deadline order): look at it again next time.
+					tx.Rollback()
+					continue
 				}
 			}
 			released := int64(0)
@@ -395,6 +398,9 @@ func (a *App) ixHeldStep(ctx context.Context) error {
 		if err := a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM tgdl_work WHERE status='pending' AND paused=0 AND retry_at<=?`, time.Now().UnixMilli()).Scan(&waiting); err != nil {
 			return err
 		}
+		// Files set aside so that smaller ones go first (deadline order)
+		// still count as waiting: held copies go after them.
+		waiting += a.ixDeferredWaiting(ctx)
 		release = waiting == 0
 		if !release {
 			var last int64

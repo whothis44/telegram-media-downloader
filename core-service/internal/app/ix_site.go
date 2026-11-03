@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -232,8 +233,9 @@ type ixExportStatus struct {
 var ixExports sync.Map // *App -> *ixExportBox
 
 type ixExportBox struct {
-	mu sync.Mutex
-	st ixExportStatus
+	mu     sync.Mutex
+	st     ixExportStatus
+	loaded bool
 }
 
 func (a *App) ixExportBox() *ixExportBox {
@@ -245,6 +247,18 @@ func (a *App) ixExportStatus() ixExportStatus {
 	box := a.ixExportBox()
 	box.mu.Lock()
 	defer box.mu.Unlock()
+	if !box.loaded {
+		// The last write before this start of the app.
+		box.loaded = true
+		var raw string
+		if !box.st.Running && box.st.FinishedAt == 0 && a.db.Reader.QueryRow(`SELECT value FROM kv WHERE key='ix_export_last'`).Scan(&raw) == nil {
+			var last ixExportStatus
+			if json.Unmarshal([]byte(raw), &last) == nil {
+				last.Running, last.Progress = false, ""
+				box.st = last
+			}
+		}
+	}
 	return box.st
 }
 
@@ -316,7 +330,12 @@ func (a *App) ixExport(ctx context.Context) error {
 	if err != nil {
 		box.st.Error = err.Error()
 	}
+	last := box.st
 	box.mu.Unlock()
+	// Kept across restarts, so the last write is known after an update.
+	if data, jerr := json.Marshal(last); jerr == nil {
+		_, _ = a.db.Writer.ExecContext(context.WithoutCancel(ctx), `INSERT INTO kv(key,value,updated_at) VALUES('ix_export_last',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, string(data), time.Now().UnixMilli())
+	}
 	return err
 }
 

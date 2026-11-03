@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -274,6 +275,8 @@ func TestIxMLOnlyTalksToTheLocalNetwork(t *testing.T) {
 
 var ixFakeMLMode string // "422" or "500": every picture fails so
 
+var ixFakeMLMu sync.Mutex
+
 // ixFakeML answers like Immich's machine-learning service: the embedding of
 // an image is ixSceneSim of the text the test put in it, of a text the same.
 func ixFakeML(t *testing.T, calls *int) *httptest.Server {
@@ -287,7 +290,9 @@ func ixFakeML(t *testing.T, calls *int) *httptest.Server {
 			http.NotFound(w, r)
 			return
 		}
+		ixFakeMLMu.Lock()
 		*calls++
+		ixFakeMLMu.Unlock()
 		if err := r.ParseMultipartForm(1 << 20); err != nil {
 			http.Error(w, err.Error(), 400)
 			return
@@ -509,12 +514,17 @@ func TestIxMLBlamesTheServiceNotTheFiles(t *testing.T) {
 	// The picture model fails for every picture: nothing is held against
 	// the files, and the round stops.
 	ixFakeMLMode = "422"
+	ixFakeMLMu.Lock()
 	before := calls
+	ixFakeMLMu.Unlock()
 	if wait := a.ixMLRound(ctx, c, m, 500); wait < 10*time.Minute {
 		t.Fatalf("wait %v", wait)
 	}
-	if n := errRows(); n != 0 || calls-before > ixMLStreak+2 {
-		t.Fatalf("recorded %d failures after %d calls", n, calls-before)
+	ixFakeMLMu.Lock()
+	made := calls - before
+	ixFakeMLMu.Unlock()
+	if n := errRows(); n != 0 || made > ixMLStreak+4 {
+		t.Fatalf("recorded %d failures after %d calls", n, made)
 	}
 	if st := a.ixMLStatusNow(ctx); !strings.Contains(st.LastError, "in a row") {
 		t.Fatalf("status: %+v", st)

@@ -24,6 +24,8 @@ against it. The tool then runs on the real `data` folder unchanged.
 | `data/posts.jsonl` | Every post (an album counts once) with its files, repost family and role |
 | `data/families.jsonl` | Each original with its reposts, and the merged album when later posts added files |
 | `data/sets.jsonl` | Posts by different people that share some of the same pictures, grouped into sets |
+| `data/people.jsonl`, `data/faces.jsonl` | People found by face grouping, and each face with its file and place in the picture |
+| `data/media_text.jsonl` | Text read from pictures, and speech written out |
 | `data/media_clusters.jsonl` | Files that are the same picture or video, with the copy to show and how each was matched |
 | `data/covered.jsonl` | Files not downloaded because the library already has them (checked re-uploads, held probable copies) |
 | `data/entities.jsonl` | Links, @usernames, wallets and IBANs found in message text |
@@ -45,7 +47,8 @@ downloads folder.
 - 106: a GPX document that is wanted but not downloaded yet: `file_status: "missing"`.
 - 107: an edited post: `edit_date`, and the earlier text in `edits`.
 - 108: deleted on Telegram since it was archived: `deleted_at`.
-- 109: forwarded from another channel (Velo Weekly): `forwarded_from`, `forwarded_date`.
+- 109: forwarded from another channel (Velo Weekly): `forwarded_from`, `forwarded_date`. Its picture's text was read
+  (`media_text.jsonl`, kind `picture`).
 - 110: a sticker, switched off for this chat: `file_status: "not_wanted"`.
 - 111: a system notice: the admin pinned 101 (`service: "messageActionPinMessage"`, `reply_to: 101`).
 - 120–129: one post of 7 photos and 3 videos (one `album_id`), caption on 120; the last clip (129) is still
@@ -67,7 +70,10 @@ downloads folder.
   merges it into the club's album (`merged: true`, the new photo `introduced_by` the forum post).
 - 304: a donation post with a Bitcoin address, an IBAN (the standard documentation examples), a t.me link and an
   @username: `entities.jsonl`. The forum has an invite link in `groups.jsonl`.
-- 301: a voice note (`media.type: "voice"`), 302: a PDF still missing.
+- 301: a voice note (`media.type: "voice"`), written out with timings in `media_text.jsonl` (kind `speech`); 302: a PDF
+  still missing.
+- Maya Chen's face is found in club photos 130 and 131 and in her own 223 (`faces.jsonl`, person 1 in `people.jsonl`).
+  Because 223 shows the person in the set's shared photos, `sets.jsonl` gives it `likeness` 1.
 
 **Riverside Cycling Club chat** (`g_1811230004`): the club's discussion group
 - 9001, 9002: comments on club post 105 (`comment_on`), replying to the group's automatic copy of the post.

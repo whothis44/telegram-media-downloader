@@ -159,6 +159,9 @@ func (a *App) ixWriteDataModel(ctx context.Context, writeJSONL func(string, func
 	}); err != nil {
 		return err
 	}
+	if err := a.ixWriteRecognised(ctx, m, writeJSONL); err != nil {
+		return err
+	}
 	how := map[string]string{}
 	if rows, err := a.db.Reader.QueryContext(ctx, `SELECT key, how FROM ix_mcl WHERE how IN ('auto','verified')`); err == nil {
 		for rows.Next() {
@@ -310,4 +313,108 @@ func (a *App) ixWriteManifest(ctx context.Context, path string) error {
 		return err
 	}
 	return f.Close()
+}
+
+// ixWriteRecognised writes what recognition found: people and their faces,
+// text read from pictures and speech written out. Files are named by their
+// best copy (sha256 or path).
+func (a *App) ixWriteRecognised(ctx context.Context, m *ixModel, writeJSONL func(string, func(*json.Encoder) error) error) error {
+	fileOf := func(key string) (ixDataPostFile, bool) {
+		ii, ok := m.ByKey[key]
+		if !ok {
+			return ixDataPostFile{}, false
+		}
+		return ixDataFileOf(m, m.Clusters[m.Items[ii].Cluster].Canon), true
+	}
+	if err := writeJSONL("people.jsonl", func(enc *json.Encoder) error {
+		rows, err := a.db.Reader.QueryContext(ctx, `SELECT p.id, p.name, p.hidden, COUNT(f.id), COUNT(DISTINCT f.key) FROM ix_people p JOIN ix_faces f ON f.person=p.id
+			WHERE p.merged_into=0 GROUP BY p.id ORDER BY p.id`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var r struct {
+				Person int64  `json:"person"`
+				Name   string `json:"name,omitempty"`
+				Hidden bool   `json:"hidden,omitempty"`
+				Faces  int    `json:"faces"`
+				Files  int    `json:"files"`
+			}
+			if err := rows.Scan(&r.Person, &r.Name, &r.Hidden, &r.Faces, &r.Files); err != nil {
+				return err
+			}
+			if err := enc.Encode(r); err != nil {
+				return err
+			}
+		}
+		return rows.Err()
+	}); err != nil {
+		return err
+	}
+	if err := writeJSONL("faces.jsonl", func(enc *json.Encoder) error {
+		rows, err := a.db.Reader.QueryContext(ctx, `SELECT id, key, x1, y1, x2, y2, score, CASE WHEN person>0 THEN person ELSE 0 END, manual FROM ix_faces ORDER BY key, id`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var key string
+			var r struct {
+				Face   int64          `json:"face"`
+				File   ixDataPostFile `json:"file"`
+				Box    [4]float64     `json:"box"` // x1, y1, x2, y2 as shares of the picture's width and height
+				Score  float64        `json:"score"`
+				Person int64          `json:"person,omitempty"`
+				Manual bool           `json:"placed_by_person,omitempty"`
+			}
+			if err := rows.Scan(&r.Face, &key, &r.Box[0], &r.Box[1], &r.Box[2], &r.Box[3], &r.Score, &r.Person, &r.Manual); err != nil {
+				return err
+			}
+			f, ok := fileOf(key)
+			if !ok {
+				continue
+			}
+			r.File = f
+			if err := enc.Encode(r); err != nil {
+				return err
+			}
+		}
+		return rows.Err()
+	}); err != nil {
+		return err
+	}
+	return writeJSONL("media_text.jsonl", func(enc *json.Encoder) error {
+		rows, err := a.db.Reader.QueryContext(ctx, `SELECT key, 'picture', '', text, '' FROM ix_ocr WHERE text<>''
+			UNION ALL SELECT key, 'speech', language, text, segments FROM ix_stt WHERE text<>'' ORDER BY 1, 2`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var key, segs string
+			var r struct {
+				File     ixDataPostFile  `json:"file"`
+				Kind     string          `json:"kind"` // picture (text read from it) or speech (written out)
+				Language string          `json:"language,omitempty"`
+				Text     string          `json:"text"`
+				Segments json.RawMessage `json:"segments,omitempty"`
+			}
+			if err := rows.Scan(&key, &r.Kind, &r.Language, &r.Text, &segs); err != nil {
+				return err
+			}
+			f, ok := fileOf(key)
+			if !ok {
+				continue
+			}
+			r.File = f
+			if segs != "" && segs != "null" {
+				r.Segments = json.RawMessage(segs)
+			}
+			if err := enc.Encode(r); err != nil {
+				return err
+			}
+		}
+		return rows.Err()
+	})
 }

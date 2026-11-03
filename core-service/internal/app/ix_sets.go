@@ -508,6 +508,38 @@ func ixAssignSets(m *ixModel, fixes ixSetFixes, sim func(a, b string) (float32, 
 	}
 }
 
+// ixSetLikeness compares two files for the sets: files showing the same
+// person belong together (for self-filmed content this says far more than
+// what the pictures generally show); otherwise the picture embeddings
+// decide. nil when neither is available.
+func ixSetLikeness(m *ixModel, emb func(string, string) (float32, bool)) func(string, string) (float32, bool) {
+	people := map[string][]int64{}
+	for id, keys := range m.PersonKeys {
+		if m.PersonHidden[id] {
+			continue
+		}
+		for k := range keys {
+			people[k] = append(people[k], id)
+		}
+	}
+	if len(people) == 0 {
+		return emb
+	}
+	return func(a, b string) (float32, bool) {
+		for _, p := range people[a] {
+			for _, q := range people[b] {
+				if p == q {
+					return 1, true
+				}
+			}
+		}
+		if emb != nil {
+			return emb(a, b)
+		}
+		return 0, false
+	}
+}
+
 // ixSetCounts counts a set's files by role.
 func ixSetCounts(s *ixMSet) map[string]int {
 	out := map[string]int{}

@@ -1,6 +1,6 @@
 # Telegram archive: data files
 
-Everything the archive knows, in plain files for other tools. Written with the index (nightly, or with "Write the index to the NAS now"). Format version 4; `manifest.json` says which version a folder holds.
+Everything the archive knows, in plain files for other tools. Written with the index (nightly, or with "Write the index to the NAS now"). Format version 5; `manifest.json` says which version a folder holds.
 
 All files are UTF-8 [JSON Lines](https://jsonlines.org/): one JSON object per line. Message files are gzip-compressed.
 
@@ -19,6 +19,9 @@ All files are UTF-8 [JSON Lines](https://jsonlines.org/): one JSON object per li
 | `families.jsonl` | repost family: one original post and every repost of it: `family`, `lead_post`, `first_date`, `chats`, `merged` (later posts added files), `posts` (`post`, `group_id`, `date`, `role`), `files` (the merged album in order: `cluster`, `best` file, `introduced_by` post) |
 | `media_clusters.jsonl` | set of files that are the same picture or video (2 files or more): `cluster`, `kind`, `generic` (appears in many unrelated posts: a logo or sticker), `best` (the copy shown: most pixels, then most bytes), `members` (`group_id`, `message_id`, `sha256`, `path`, `status`, `matched_by`) |
 | `sets.jsonl` | media set: posts by different people or chats that share pictures or videos although none holds them all (each family is one post and its reposts): `set`, `anchor_post` (its first post: names it across exports), `first_date`, `last_date`, `chats`, `families`, `posts`, `files` (`cluster`, `best` file, `role`: `core` = in two or more of its families, `member` = in one, `loose` = in one but unlike the core pictures (only when image recognition compared them), `elsewhere` = belongs to `other_set`; `in_families`, `likeness` = cosine to the closest core file, 0 when not compared; `placed_by_person`) |
+| `people.jsonl` | person found by face grouping (only when faces are switched on): `person`, `name` (when given), `hidden`, `faces`, `files` |
+| `faces.jsonl` | face found in a picture or in one of three frames of a video: `face`, `file` (the best copy of the file), `box` (x1, y1, x2, y2 as shares of width and height), `score`, `person` (absent: not grouped), `placed_by_person` (a person placed it; with no `person`: taken out of the person it was grouped with) |
+| `media_text.jsonl` | words in a file: `file`, `kind` (`picture`: text read from it; `speech`: what is said, written out), `language`, `text`, `segments` (speech: `[start_s, end_s, text]`) |
 | `covered.jsonl` | file not downloaded because the library has it: `group_id`, `message_id`, `how` (`telegram-hashes` or `sampled-parts`: the same bytes as `of_path`, checked on Telegram; `held`: a probable copy of `like` waiting at the back of the queue), `at` |
 | `entities.jsonl` | link, @username, e-mail, phone, wallet or IBAN found in message text: `kind`, `value`, `count`, `chats`, `first`, `last`, `refs` (up to 200 messages: `group`, `msg`, `date`); wallets and IBANs pass their checksums |
 | `manifest-sha256.txt` | `<sha256>  <path>` per stored file (the `sha256sum -c` format, run from the downloads folder) |
