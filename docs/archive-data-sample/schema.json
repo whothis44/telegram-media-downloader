@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/whothis44/telegram-media-downloader/docs/archive-data-sample/schema.json",
-  "title": "Telegram archive data export, format version 1",
+  "title": "Telegram archive data export, format version 2",
   "description": "One JSON object per line in each .jsonl file. Use the $defs entry named after the file: manifest.json → manifest, groups.jsonl → group, messages/*.jsonl.gz → message, files.jsonl → file, peers.jsonl → peer, topics.jsonl → topic, near_duplicates.jsonl → nearDuplicateSet.",
   "$defs": {
     "groupId": {
@@ -9,7 +9,11 @@
       "pattern": "^-?[0-9]+$",
       "description": "The downloader's marked chat ID. Channels and supergroups: -100 followed by chat_id; basic groups: minus chat_id."
     },
-    "chatId": { "type": "string", "pattern": "^[0-9]+$", "description": "Telegram's own chat ID." },
+    "chatId": {
+      "type": "string",
+      "pattern": "^[0-9]+$",
+      "description": "Telegram's own chat ID."
+    },
     "peerId": {
       "type": "string",
       "pattern": "^(user|channel|chat):[0-9]+$",
@@ -20,172 +24,518 @@
       "pattern": "^(photo|document):-?[0-9]+:[0-9]+$",
       "description": "kind:id:size of the file on Telegram. Equal values are the same upload (for example one video forwarded to several chats)."
     },
-    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-    "unixSeconds": { "type": "integer", "minimum": 0 },
-    "unixMillis": { "type": "integer", "minimum": 0 },
-
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "unixSeconds": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "unixMillis": {
+      "type": "integer",
+      "minimum": 0
+    },
     "manifest": {
       "type": "object",
-      "required": ["format", "format_version", "exported_at", "app_version", "downloads_root", "groups", "files"],
+      "required": [
+        "format",
+        "format_version",
+        "exported_at",
+        "app_version",
+        "downloads_root",
+        "groups",
+        "files"
+      ],
       "properties": {
-        "format": { "const": "telegram-archive" },
-        "format_version": { "const": 1 },
-        "exported_at": { "type": "string", "format": "date-time" },
-        "app_version": { "type": "string" },
-        "downloads_root": { "type": "string", "description": "The downloads folder as the server saw it; file paths are relative to it." },
-        "groups": { "type": "integer", "minimum": 0 },
-        "files": { "type": "object", "additionalProperties": { "type": "string" } }
+        "format": {
+          "const": "telegram-archive"
+        },
+        "format_version": {
+          "const": 2
+        },
+        "exported_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "app_version": {
+          "type": "string"
+        },
+        "downloads_root": {
+          "type": "string",
+          "description": "The downloads folder as the server saw it; file paths are relative to it."
+        },
+        "groups": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "files": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
       }
     },
-
     "group": {
       "type": "object",
-      "required": ["group_id", "chat_id", "name", "configured", "download_settings", "messages", "files", "messages_file"],
+      "required": [
+        "group_id",
+        "chat_id",
+        "name",
+        "configured",
+        "download_settings",
+        "messages",
+        "files",
+        "messages_file"
+      ],
       "properties": {
-        "group_id": { "$ref": "#/$defs/groupId" },
-        "chat_id": { "$ref": "#/$defs/chatId" },
-        "name": { "type": "string" },
-        "category": { "type": "string", "description": "The user's own grouping of related chats." },
-        "configured": { "type": "boolean", "description": "In the downloader's list of chats (false: known only from old files or messages)." },
+        "group_id": {
+          "$ref": "#/$defs/groupId"
+        },
+        "chat_id": {
+          "$ref": "#/$defs/chatId"
+        },
+        "name": {
+          "type": "string"
+        },
+        "category": {
+          "type": "string",
+          "description": "The user's own grouping of related chats."
+        },
+        "configured": {
+          "type": "boolean",
+          "description": "In the downloader's list of chats (false: known only from old files or messages)."
+        },
         "download_settings": {
           "type": "object",
           "description": "Which kinds of media are downloaded for this chat.",
           "additionalProperties": true
         },
-        "messages": { "type": "integer", "minimum": 0, "description": "Lines in messages_file." },
-        "files": { "type": "integer", "minimum": 0 },
-        "last_full_rescan": { "$ref": "#/$defs/unixMillis" },
-        "messages_file": { "type": "string", "pattern": "^messages/g_[0-9A-Za-z_]+\\.jsonl\\.gz$" }
+        "messages": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Lines in messages_file."
+        },
+        "files": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "last_full_rescan": {
+          "$ref": "#/$defs/unixMillis"
+        },
+        "messages_file": {
+          "type": "string",
+          "pattern": "^messages/g_[0-9A-Za-z_]+\\.jsonl\\.gz$"
+        },
+        "telegram_title": {
+          "type": "string"
+        },
+        "about": {
+          "type": "string",
+          "description": "The chat's description on Telegram."
+        },
+        "username": {
+          "type": "string"
+        },
+        "members": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pinned_message_id": {
+          "type": "integer"
+        },
+        "discussion_group_id": {
+          "$ref": "#/$defs/groupId",
+          "description": "A channel's discussion group: the comments on its posts are that group's messages."
+        },
+        "telegram_message_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many messages Telegram said the chat holds at the last rescan; compare with messages for completeness."
+        },
+        "telegram_message_count_at": {
+          "$ref": "#/$defs/unixMillis"
+        },
+        "finished_at": {
+          "$ref": "#/$defs/unixMillis",
+          "description": "Marked finished: rescans leave the chat alone."
+        },
+        "info_tl_base64": {
+          "type": "string",
+          "contentEncoding": "base64",
+          "description": "messages.chatFull as Telegram sent it."
+        }
       }
     },
-
     "file": {
       "type": "object",
-      "required": ["download_id", "path", "size"],
+      "required": [
+        "download_id",
+        "path",
+        "size"
+      ],
       "description": "A downloaded file. In files.jsonl it also has group_id.",
       "properties": {
-        "group_id": { "$ref": "#/$defs/groupId" },
-        "download_id": { "type": "integer" },
-        "path": { "type": "string", "description": "Relative to the manifest's downloads_root, '/' separated. Several records can share one path: identical files are stored once." },
-        "name": { "type": "string" },
-        "size": { "type": "integer", "minimum": 0 },
-        "type": { "type": "string", "examples": ["photo", "video", "document", "audio"] },
-        "sha256": { "$ref": "#/$defs/sha256" },
-        "telegram_file": { "$ref": "#/$defs/telegramFile" },
-        "created_at": { "type": "string", "description": "When it was downloaded, UTC, \"YYYY-MM-DD HH:MM:SS\"." }
+        "group_id": {
+          "$ref": "#/$defs/groupId"
+        },
+        "download_id": {
+          "type": "integer"
+        },
+        "path": {
+          "type": "string",
+          "description": "Relative to the manifest's downloads_root, '/' separated. Several records can share one path: identical files are stored once."
+        },
+        "name": {
+          "type": "string"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "type": {
+          "type": "string",
+          "examples": [
+            "photo",
+            "video",
+            "document",
+            "audio"
+          ]
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "telegram_file": {
+          "$ref": "#/$defs/telegramFile"
+        },
+        "created_at": {
+          "type": "string",
+          "description": "When it was downloaded, UTC, \"YYYY-MM-DD HH:MM:SS\"."
+        }
       }
     },
-
     "message": {
       "type": "object",
-      "required": ["group_id", "chat_id", "message_id", "date", "text", "media", "file_status", "files", "first_seen", "last_seen"],
+      "required": [
+        "group_id",
+        "chat_id",
+        "message_id",
+        "date",
+        "text",
+        "media",
+        "file_status",
+        "files",
+        "first_seen",
+        "last_seen"
+      ],
       "properties": {
-        "group_id": { "$ref": "#/$defs/groupId" },
-        "chat_id": { "$ref": "#/$defs/chatId" },
-        "message_id": { "type": "integer", "minimum": 1 },
-        "date": { "$ref": "#/$defs/unixSeconds", "description": "0 for a stub (a downloaded file whose message was never captured)." },
-        "date_utc": { "type": "string", "format": "date-time" },
-        "edit_date": { "$ref": "#/$defs/unixSeconds" },
-        "text": { "type": "string", "description": "Plain text or caption; formatting is in raw.entities." },
-        "album_id": { "type": "string", "pattern": "^-?[0-9]+$", "description": "Telegram grouped_id: messages of one chat sharing it form one album." },
-        "sender": { "$ref": "#/$defs/peerId" },
-        "post_author": { "type": "string", "description": "Signature on a channel post." },
-        "forwarded_from": { "type": "string", "description": "A peer_id, a plain name, or \"hidden\"." },
-        "forwarded_date": { "$ref": "#/$defs/unixSeconds" },
-        "reply_to": { "type": "integer", "description": "message_id in the same chat." },
-        "topic_id": { "type": "integer", "description": "Forum topic (topics.jsonl). Absent in a forum means General (1)." },
-        "views": { "type": "integer", "minimum": 0 },
+        "group_id": {
+          "$ref": "#/$defs/groupId"
+        },
+        "chat_id": {
+          "$ref": "#/$defs/chatId"
+        },
+        "message_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "date": {
+          "$ref": "#/$defs/unixSeconds",
+          "description": "0 for a stub (a downloaded file whose message was never captured)."
+        },
+        "date_utc": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "edit_date": {
+          "$ref": "#/$defs/unixSeconds"
+        },
+        "text": {
+          "type": "string",
+          "description": "Plain text or caption; formatting is in raw.entities."
+        },
+        "album_id": {
+          "type": "string",
+          "pattern": "^-?[0-9]+$",
+          "description": "Telegram grouped_id: messages of one chat sharing it form one album."
+        },
+        "sender": {
+          "$ref": "#/$defs/peerId"
+        },
+        "post_author": {
+          "type": "string",
+          "description": "Signature on a channel post."
+        },
+        "forwarded_from": {
+          "type": "string",
+          "description": "A peer_id, a plain name, or \"hidden\"."
+        },
+        "forwarded_date": {
+          "$ref": "#/$defs/unixSeconds"
+        },
+        "reply_to": {
+          "type": "integer",
+          "description": "message_id in the same chat."
+        },
+        "topic_id": {
+          "type": "integer",
+          "description": "Forum topic (topics.jsonl). Absent in a forum means General (1)."
+        },
+        "views": {
+          "type": "integer",
+          "minimum": 0
+        },
         "media": {
           "oneOf": [
-            { "type": "null" },
+            {
+              "type": "null"
+            },
             {
               "type": "object",
-              "required": ["type"],
+              "required": [
+                "type"
+              ],
               "properties": {
-                "type": { "type": "string", "examples": ["photo", "video", "document", "audio", "voice", "gif", "sticker", "unknown"] },
-                "name": { "type": "string" },
-                "size": { "type": "integer", "minimum": 0 },
-                "telegram_file": { "$ref": "#/$defs/telegramFile" }
+                "type": {
+                  "type": "string",
+                  "examples": [
+                    "photo",
+                    "video",
+                    "document",
+                    "audio",
+                    "voice",
+                    "gif",
+                    "sticker",
+                    "unknown"
+                  ]
+                },
+                "name": {
+                  "type": "string"
+                },
+                "size": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "telegram_file": {
+                  "$ref": "#/$defs/telegramFile"
+                }
               }
             }
           ]
         },
-        "file_status": { "enum": ["downloaded", "missing", "not_wanted", "no_media"] },
-        "files": { "type": "array", "items": { "$ref": "#/$defs/file" } },
+        "file_status": {
+          "enum": [
+            "downloaded",
+            "missing",
+            "not_wanted",
+            "no_media"
+          ]
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/file"
+          }
+        },
         "edits": {
           "type": "array",
           "description": "Earlier versions of the text, oldest first.",
           "items": {
             "type": "object",
-            "required": ["edit_date", "text", "recorded_at"],
+            "required": [
+              "edit_date",
+              "text",
+              "recorded_at"
+            ],
             "properties": {
-              "edit_date": { "$ref": "#/$defs/unixSeconds" },
-              "text": { "type": "string" },
-              "recorded_at": { "$ref": "#/$defs/unixMillis" }
+              "edit_date": {
+                "$ref": "#/$defs/unixSeconds"
+              },
+              "text": {
+                "type": "string"
+              },
+              "recorded_at": {
+                "$ref": "#/$defs/unixMillis"
+              }
             }
           }
         },
-        "deleted_at": { "$ref": "#/$defs/unixMillis", "description": "When a full rescan no longer found it on Telegram." },
-        "first_seen": { "$ref": "#/$defs/unixMillis" },
-        "last_seen": { "$ref": "#/$defs/unixMillis" },
+        "deleted_at": {
+          "$ref": "#/$defs/unixMillis",
+          "description": "When a full rescan no longer found it on Telegram."
+        },
+        "first_seen": {
+          "$ref": "#/$defs/unixMillis"
+        },
+        "last_seen": {
+          "$ref": "#/$defs/unixMillis"
+        },
         "raw": {
           "type": "object",
-          "required": ["_"],
-          "description": "The complete Telegram message, decoded: every object has \"_\" (its TL constructor) and snake_case fields; bytes are base64; empty fields are left out.",
-          "properties": { "_": { "const": "message" } },
+          "required": [
+            "_"
+          ],
+          "description": "The complete Telegram message (or system notice), decoded: every object has \"_\" (its TL constructor) and snake_case fields; bytes are base64; fields that are 0, false or empty are left out.",
+          "properties": {
+            "_": {
+              "enum": [
+                "message",
+                "messageService"
+              ]
+            }
+          },
           "additionalProperties": true
         },
-        "tl_base64": { "type": "string", "contentEncoding": "base64", "description": "The original TL serialisation of the message." }
+        "tl_base64": {
+          "type": "string",
+          "contentEncoding": "base64",
+          "description": "The original TL serialisation of the message."
+        },
+        "service": {
+          "type": "string",
+          "pattern": "^messageAction",
+          "description": "Set on system notices (pin, title change, topic created...): the TL action. text describes it."
+        },
+        "comments": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "On a channel post: how many comments Telegram reports."
+        },
+        "comment_on": {
+          "type": "object",
+          "required": [
+            "group_id",
+            "message_id"
+          ],
+          "description": "On a comment: the channel post it belongs to.",
+          "properties": {
+            "group_id": {
+              "$ref": "#/$defs/groupId"
+            },
+            "message_id": {
+              "type": "integer"
+            }
+          }
+        }
       }
     },
-
     "peer": {
       "type": "object",
-      "required": ["peer_id", "kind", "name", "updated_at"],
+      "required": [
+        "peer_id",
+        "kind",
+        "name",
+        "updated_at"
+      ],
       "properties": {
-        "peer_id": { "$ref": "#/$defs/peerId" },
-        "kind": { "enum": ["user", "channel", "chat"] },
-        "name": { "type": "string" },
-        "username": { "type": "string" },
-        "updated_at": { "$ref": "#/$defs/unixMillis" }
+        "peer_id": {
+          "$ref": "#/$defs/peerId"
+        },
+        "kind": {
+          "enum": [
+            "user",
+            "channel",
+            "chat"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "username": {
+          "type": "string"
+        },
+        "updated_at": {
+          "$ref": "#/$defs/unixMillis"
+        }
       }
     },
-
     "topic": {
       "type": "object",
-      "required": ["group_id", "topic_id", "title"],
+      "required": [
+        "group_id",
+        "topic_id",
+        "title"
+      ],
       "properties": {
-        "group_id": { "$ref": "#/$defs/groupId" },
-        "topic_id": { "type": "integer", "minimum": 1 },
-        "title": { "type": "string" }
+        "group_id": {
+          "$ref": "#/$defs/groupId"
+        },
+        "topic_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "title": {
+          "type": "string"
+        }
       }
     },
-
     "nearDuplicateSet": {
       "type": "object",
-      "required": ["cluster", "kind", "members", "pairs"],
+      "required": [
+        "cluster",
+        "kind",
+        "members",
+        "pairs"
+      ],
       "properties": {
-        "cluster": { "type": "integer", "minimum": 1 },
-        "kind": { "enum": ["same", "mixed"], "description": "same: every member is the same video; mixed: some are clips of others." },
+        "cluster": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "kind": {
+          "enum": [
+            "same",
+            "mixed"
+          ],
+          "description": "same: every member is the same video; mixed: some are clips of others."
+        },
         "members": {
           "type": "array",
           "minItems": 2,
           "description": "Largest file first.",
           "items": {
             "type": "object",
-            "required": ["path", "size", "duration_s", "places"],
+            "required": [
+              "path",
+              "size",
+              "duration_s",
+              "places"
+            ],
             "properties": {
-              "download_id": { "type": "integer" },
-              "path": { "type": "string" },
-              "sha256": { "$ref": "#/$defs/sha256" },
-              "size": { "type": "integer", "minimum": 0 },
-              "duration_s": { "type": "number", "minimum": 0 },
+              "download_id": {
+                "type": "integer"
+              },
+              "path": {
+                "type": "string"
+              },
+              "sha256": {
+                "$ref": "#/$defs/sha256"
+              },
+              "size": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "duration_s": {
+                "type": "number",
+                "minimum": 0
+              },
               "places": {
                 "type": "array",
                 "items": {
                   "type": "object",
-                  "required": ["group_id", "message_id"],
-                  "properties": { "group_id": { "$ref": "#/$defs/groupId" }, "message_id": { "type": "integer" } }
+                  "required": [
+                    "group_id",
+                    "message_id"
+                  ],
+                  "properties": {
+                    "group_id": {
+                      "$ref": "#/$defs/groupId"
+                    },
+                    "message_id": {
+                      "type": "integer"
+                    }
+                  }
                 }
               }
             }
@@ -195,13 +545,38 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["a", "b", "kind", "score", "offset_s"],
+            "required": [
+              "a",
+              "b",
+              "kind",
+              "score",
+              "offset_s"
+            ],
             "properties": {
-              "a": { "type": "integer", "minimum": 0, "description": "Index into members." },
-              "b": { "type": "integer", "minimum": 0 },
-              "kind": { "enum": ["same", "clip"] },
-              "score": { "type": "number", "minimum": 0, "maximum": 1 },
-              "offset_s": { "type": "number", "description": "Where the clip starts inside the longer video, in seconds." }
+              "a": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Index into members."
+              },
+              "b": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "kind": {
+                "enum": [
+                  "same",
+                  "clip"
+                ]
+              },
+              "score": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "offset_s": {
+                "type": "number",
+                "description": "Where the clip starts inside the longer video, in seconds."
+              }
             }
           }
         }

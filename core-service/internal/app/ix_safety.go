@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -30,10 +31,29 @@ type ixSettings struct {
 	DupQuietStart string `json:"dupQuietStart"` // HH:MM; no fingerprinting between start and end
 	DupQuietEnd   string `json:"dupQuietEnd"`
 	AutoRetry     bool   `json:"autoRetry"` // put failed downloads back in the queue every few hours
+	// Alerts (see ix_alerts.go). The SMTP password is never sent back to
+	// the dashboard; AlertSMTPPassSet says whether one is saved.
+	AlertWebhook     string `json:"alertWebhook"`
+	AlertWebhookKind string `json:"alertWebhookKind"` // ntfy, discord or json
+	AlertSMTPHost    string `json:"alertSmtpHost"`
+	AlertSMTPPort    string `json:"alertSmtpPort"`
+	AlertSMTPUser    string `json:"alertSmtpUser"`
+	AlertSMTPPass    string `json:"alertSmtpPass,omitempty"`
+	AlertSMTPPassSet bool   `json:"alertSmtpPassSet"`
+	AlertEmailFrom   string `json:"alertEmailFrom"`
+	AlertEmailTo     string `json:"alertEmailTo"`
+	AlertNames       bool   `json:"alertNames"` // name the groups in alerts
+}
+
+// public is the settings as the dashboard may see them.
+func (s ixSettings) public() ixSettings {
+	s.AlertSMTPPassSet = s.AlertSMTPPass != ""
+	s.AlertSMTPPass = ""
+	return s
 }
 
 func ixDefaultSettings() ixSettings {
-	return ixSettings{ExportEnabled: true, ExportTime: "03:30", Pace: "normal", DupEnabled: true, DupHWAccel: "cuda", AutoRetry: true}
+	return ixSettings{ExportEnabled: true, ExportTime: "03:30", Pace: "normal", DupEnabled: true, DupHWAccel: "cuda", AutoRetry: true, AlertWebhookKind: "ntfy", AlertSMTPPort: "587"}
 }
 
 func (a *App) ixLoadSettings(ctx context.Context) ixSettings {
@@ -235,6 +255,35 @@ func ixParseSettings(body map[string]any, s ixSettings) (ixSettings, error) {
 	}
 	if v, ok := body["autoRetry"].(bool); ok {
 		s.AutoRetry = v
+	}
+	if v, ok := body["alertNames"].(bool); ok {
+		s.AlertNames = v
+	}
+	for key, dst := range map[string]*string{"alertWebhook": &s.AlertWebhook, "alertSmtpHost": &s.AlertSMTPHost, "alertSmtpPort": &s.AlertSMTPPort,
+		"alertSmtpUser": &s.AlertSMTPUser, "alertEmailFrom": &s.AlertEmailFrom, "alertEmailTo": &s.AlertEmailTo} {
+		if v, ok := body[key].(string); ok {
+			*dst = strings.TrimSpace(v)
+		}
+	}
+	if v, ok := body["alertSmtpPass"].(string); ok && v != "" {
+		s.AlertSMTPPass = v // empty: keep the saved password
+	}
+	if v, ok := body["alertSmtpPassClear"].(bool); ok && v {
+		s.AlertSMTPPass = ""
+	}
+	if v, ok := body["alertWebhookKind"].(string); ok {
+		if v != "ntfy" && v != "discord" && v != "json" {
+			return s, errors.New("alertWebhookKind must be ntfy, discord or json")
+		}
+		s.AlertWebhookKind = v
+	}
+	if s.AlertWebhook != "" && !strings.HasPrefix(s.AlertWebhook, "https://") && !strings.HasPrefix(s.AlertWebhook, "http://") {
+		return s, errors.New("the alert web address must start with https://")
+	}
+	if s.AlertSMTPPort != "" {
+		if n, err := strconv.Atoi(s.AlertSMTPPort); err != nil || n <= 0 || n > 65535 {
+			return s, errors.New("the mail server port must be a number")
+		}
 	}
 	if v, ok := body["dupHwaccel"].(string); ok {
 		v = strings.ToLower(strings.TrimSpace(v))

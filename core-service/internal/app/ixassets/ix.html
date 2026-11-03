@@ -16,6 +16,7 @@ header.top h1{font-size:19px;margin:0}.grow{flex:1}
 .status{padding:10px 12px;border-radius:10px;background:var(--soft);margin:0 0 12px}.status.bad{border:1px solid var(--bad)}.status.warn{border:1px solid var(--warn)}
 .card{border:1px solid var(--line);border-radius:10px;padding:12px;margin:0 0 12px;display:flex;flex-direction:column;gap:8px}
 .card h2{font-size:16px;margin:0}
+.fin{font:inherit;font-size:12px;padding:2px 9px;border-radius:999px;border:1px solid var(--line);background:transparent;color:var(--muted);cursor:pointer;white-space:nowrap}.fin:hover{border-color:var(--accent);color:var(--accent)}.fin.on{border-color:var(--ok);color:var(--ok)}
 .muted{color:var(--muted);font-size:13px}.warn{color:var(--warn)}.bad{color:var(--bad)}.ok{color:var(--ok)}
 table{border-collapse:collapse;width:100%;font-size:13.5px}th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}th{color:var(--muted);font-weight:600;position:sticky;top:0;background:var(--bg)}td.n{text-align:right;font-variant-numeric:tabular-nums}
 .btns{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
@@ -117,9 +118,16 @@ ${ex.finishedAt && !ex.running ? `<div class="muted">Last written ${esc(fmtTime(
 </div>`;
   h += viewDownloads();
   h += `<div class="card"><h2>Messages captured</h2><div class="muted">${fmtNum(total)} messages saved across ${gs.length} group(s). ${notYet ? `<b>${notYet} group(s) have not had a full rescan yet</b> — use the Rescan tab to capture their history.` : 'Every group has had a full rescan.'} New posts are saved as the monitor sees them.</div>
-<div class="list"><table><tr><th>Group</th><th>Category</th><th>Messages saved</th><th>Deleted on Telegram</th><th>Files</th><th>Dates</th><th>Last full rescan</th></tr>`;
+<div class="btns"><button class="b" data-act="g-finish-complete" ${gs.some((g) => !g.finishedAt && g.tgCount && g.lastWalk && g.tgCount - (g.messages - g.deleted) <= 0) ? '' : 'disabled'} title="Every group marked ✓ complete is set to finished; rescans then leave it alone">✓ Finish all complete groups</button><span class="muted">Finished groups are skipped by every rescan. To finish or reopen several at once, tick them in Rescan → Choose groups.</span></div>
+<div class="muted">Complete: every message Telegram says the group holds has been saved, checked at each rescan. Groups rescanned before version ix.5 may show a few short: system notices (pins, renames) are only saved from ix.5 on; a new rescan fills them in.</div>
+<div class="list"><table><tr><th>Group</th><th>Category</th><th>Messages saved</th><th>Telegram says</th><th>Complete?</th><th>Finished</th><th>Deleted on Telegram</th><th>Files</th><th>Dates</th><th>Last full rescan</th></tr>`;
   for (const g of gs) {
-    h += `<tr><td><a href="/ix/view/${esc(g.dir)}/index.html" target="_blank">${esc(g.name)}</a></td><td>${esc(g.category || '')}</td><td class="n">${g.messages ? fmtNum(g.messages) : '<span class="warn">none yet</span>'}</td><td class="n">${fmtNum(g.deleted)}</td><td class="n">${fmtNum(g.files)}</td><td class="muted">${esc(fmtDate(g.firstDate))}${g.firstDate ? ' – ' : ''}${esc(fmtDate(g.lastDate))}</td><td>${g.lastWalk ? esc(fmtTime(g.lastWalk)) : '<span class="warn">never</span>'}</td></tr>`;
+    const saved = g.messages - g.deleted;
+    const short = g.tgCount ? g.tgCount - saved : null;
+    const complete = short === null ? '<span class="muted" title="Telegram\'s count is read at the next rescan">not checked yet</span>'
+      : short <= 0 ? (g.lastWalk ? '<span class="ok">✓ complete</span>' : '<span class="muted">all seen so far</span>')
+      : `<span class="warn">${fmtNum(short)} short</span>`;
+    h += `<tr><td><a href="/ix/view/${esc(g.dir)}/index.html" target="_blank">${esc(g.name)}</a>${g.about ? `<div class="muted" style="max-width:340px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(g.about)}">${esc(g.about)}</div>` : ''}</td><td>${esc(g.category || '')}</td><td class="n">${g.messages ? fmtNum(g.messages) : '<span class="warn">none yet</span>'}${g.comments ? `<div class="muted">+${fmtNum(g.comments)} comments</div>` : ''}</td><td class="n">${g.tgCount ? fmtNum(g.tgCount) : '<span class="muted">–</span>'}</td><td>${complete}</td><td>${g.finishedAt ? `<button class="fin on" data-act="g-open" data-id="${esc(g.id)}" title="Finished ${esc(fmtDate(Math.floor(g.finishedAt / 1000)))}: rescans leave it alone. Click to reopen.">✓ Finished</button>` : `<button class="fin" data-act="g-finish" data-id="${esc(g.id)}" title="Mark finished: rescans will leave it alone">Finish</button>`}</td><td class="n">${fmtNum(g.deleted)}</td><td class="n">${fmtNum(g.files)}</td><td class="muted">${esc(fmtDate(g.firstDate))}${g.firstDate ? ' – ' : ''}${esc(fmtDate(g.lastDate))}</td><td>${g.lastWalk ? esc(fmtTime(g.lastWalk)) : '<span class="warn">never</span>'}</td></tr>`;
   }
   h += `</table></div></div>`;
   return h;
@@ -157,7 +165,7 @@ function viewRescan() {
   else if (items.length && counts.waiting + counts.running) head = `<b>Paused</b> — ${counts.done} of ${items.length} group(s) done.`;
   else if (items.length) head = `<b>Finished</b> — ${counts.done} of ${items.length} group(s) done${counts.failed ? `, ${counts.failed} failed` : ''}.`;
   else head = '<b>Nothing queued.</b> Tick groups below and add them.';
-  const notQueued = groups().filter((g) => !items.some((i) => i.groupId === g.id && (i.state === 'waiting' || i.state === 'running')));
+  const notQueued = groups().filter((g) => !g.finishedAt && !items.some((i) => i.groupId === g.id && (i.state === 'waiting' || i.state === 'running')));
   let h = `<div class="card"><h2>Rescan everything</h2><div class="muted">Full history of every group, one group after another, with photos, videos <b>and files/documents</b> switched on. Groups already in the queue are skipped.</div>
 <div class="btns"><button class="b primary" data-act="p-everything" ${notQueued.length ? '' : 'disabled'}>Rescan all ${notQueued.length} group(s)</button></div></div>`;
   h += `<div class="status">${head} Two lanes run side by side, one group each. <b>Messages:</b> every group's history is saved, without waiting for downloads. <b>Files:</b> as soon as a group's messages are saved, it is walked again to fetch the files still missing (failed files get another try too). <b>★ First</b> groups go first in both lanes. Runs inside the server — you can close this page.${q.notice ? `<div class="muted" style="margin-top:4px">${esc(q.notice)}</div>` : ''}</div>`;
@@ -166,22 +174,26 @@ function viewRescan() {
 <span class="muted">Retries: ${q.maxAttempts ? 'up to ' + q.maxAttempts : 'unlimited'}</span></div>`;
   if (items.length) {
     h += `<div class="list" style="margin-bottom:12px"><table><tr><th>#</th><th>Group</th><th>Step</th><th>Messages saved</th><th>Files missing</th><th title="New downloads this group's files pass has added to the download queue">Files queued</th><th>Tries</th><th></th></tr>`;
-    items.forEach((it, i) => {
+    // Shown in the order they run: running, then waiting (★ first), failed, done.
+    const order = { running: 0, waiting: 1, failed: 2, done: 3 };
+    const shownItems = items.map((it, i) => ({ it, i })).sort((a, b) => ((order[a.it.state] ?? 4) - (order[b.it.state] ?? 4))
+      || (a.it.state === 'waiting' ? ((b.it.priority ? 1 : 0) - (a.it.priority ? 1 : 0)) : 0) || (a.i - b.i)).map((x) => x.it);
+    shownItems.forEach((it, i) => {
       const when = (it.state === 'waiting' && it.nextAt > Date.now() ? ` · retry ${esc(fmtTime(it.nextAt))}` : '') + (it.resumeFrom && it.state !== 'done' ? ` · continues below message #${it.resumeFrom}` : '');
       const files = it.phase === 'files';
       const label = { waiting: files ? 'files: waiting' : 'messages: waiting', running: files ? 'fetching files' : 'saving messages', done: 'done', failed: 'failed' }[it.state] || it.state;
       const msgs = it.messagesAt ? it.messages : (it.state === 'running' && !files) || (it.state === 'done' && !it.phase) ? (it.carried || 0) + it.processed : it.carried ? it.carried : null;
       const missing = it.messagesAt ? it.missing : null;
       h += `<tr><td class="n">${i + 1}</td><td>${it.priority ? '<b title="Goes first, files included">★</b> ' : ''}${esc(it.name)}${it.error ? `<div class="muted bad">${esc(it.error)}</div>` : ''}</td><td><span class="pill ${esc(it.state)}">${esc(label)}</span><span class="muted">${when}</span></td><td class="n">${msgs === null ? '<span class="muted">–</span>' : fmtNum(msgs)}</td><td class="n">${missing === null ? '<span class="muted">–</span>' : fmtNum(missing)}</td><td class="n">${(files && it.state !== 'waiting') || !it.phase ? fmtNum(it.downloaded) : '<span class="muted">–</span>'}</td><td class="n">${it.attempts || 0}</td>
-<td>${it.state === 'running' || it.state === 'waiting' ? `<button class="mini" data-act="q-priority" data-id="${esc(it.groupId)}" data-on="${it.priority ? '' : '1'}">${it.priority ? 'Normal order' : '★ First'}</button>` : `<button class="mini" data-act="q-retry" data-id="${esc(it.groupId)}">Run again</button>`}<button class="mini" data-act="q-remove" data-id="${esc(it.groupId)}">${it.state === 'running' ? 'Stop' : 'Remove'}</button></td></tr>`;
+<td>${it.state === 'running' || it.state === 'waiting' ? `<button class="mini" data-act="q-priority" data-id="${esc(it.groupId)}" data-on="${it.priority ? '' : '1'}">${it.priority ? 'Remove ★' : '★ First'}</button>` : `<button class="mini" data-act="q-retry" data-id="${esc(it.groupId)}">Run again</button>`}<button class="mini" data-act="q-remove" data-id="${esc(it.groupId)}">${it.state === 'running' ? 'Stop' : 'Remove'}</button></td></tr>`;
     });
     h += `</table></div>`;
   }
   // picker
   const queued = new Set(items.filter((i) => i.state === 'waiting' || i.state === 'running').map((i) => i.groupId));
-  let list = groups().map((g) => ({ id: g.id, name: g.name, files: g.files, never: !g.lastWalk,
-    sub: (g.category ? esc(g.category) + ' · ' : '') + (g.files ? fmtNum(g.files) + ' files downloaded · ' : 'no files yet · ') + (g.lastWalk ? 'messages captured, last rescan ' + fmtTime(g.lastWalk) : (g.files ? '<b>messages not captured yet</b>' : 'never rescanned')) }));
-  const withFiles = groups().filter((g) => g.files > 0 && !g.lastWalk && !queued.has(g.id)).length;
+  let list = groups().map((g) => ({ id: g.id, name: g.name, files: g.files, never: !g.lastWalk, finished: !!g.finishedAt,
+    sub: (g.finishedAt ? '<b>finished</b> — rescans leave it alone (undo on the Overview) · ' : '') + (g.category ? esc(g.category) + ' · ' : '') + (g.files ? fmtNum(g.files) + ' files downloaded · ' : 'no files yet · ') + (g.lastWalk ? 'messages captured, last rescan ' + fmtTime(g.lastWalk) : (g.files ? '<b>messages not captured yet</b>' : 'never rescanned')) }));
+  const withFiles = groups().filter((g) => g.files > 0 && !g.lastWalk && !g.finishedAt && !queued.has(g.id)).length;
   if (state.showAll && state.dialogs) {
     const have = new Set(list.map((x) => x.id));
     for (const d of state.dialogs) if (!have.has(d.id)) list.push({ id: d.id, name: d.name, sub: 'not in the downloader yet (' + (d.type || 'chat') + ')', extra: true });
@@ -193,9 +205,9 @@ function viewRescan() {
 <div class="btns"><input class="t" style="flex:1;min-width:200px" placeholder="Search ${list.length} chats…" data-in="pickSearch" data-focus="pick" value="${esc(state.pickSearch)}">
 <button class="mini" data-act="p-clear-search" ${state.pickSearch ? '' : 'disabled'}>Clear search</button><button class="mini" data-act="p-all">Tick all ${shown.length} shown</button><button class="mini" data-act="p-files" ${withFiles ? '' : 'disabled'}>Tick the ${withFiles} with files but no messages captured</button><button class="mini" data-act="p-never">Tick never rescanned</button><button class="mini" data-act="p-none">Untick all</button>
 <button class="mini" data-act="p-dialogs" ${state.dialogsLoading ? 'disabled' : ''}>${state.dialogsLoading ? 'Loading chats…' : state.showAll ? 'Hide other chats' : 'Show all my chats'}</button></div>
-<div class="list">${shown.map((x) => `<div class="row" style="grid-template-columns:1fr"><label><input type="checkbox" data-pick="${esc(x.id)}" data-name="${esc(x.name)}" ${state.pick.has(x.id) ? 'checked' : ''}><span><b>${esc(x.name)}</b> <span class="muted">${x.extra ? esc(x.sub) : x.sub}${queued.has(x.id) ? ' · in the queue' : ''}</span></span></label></div>`).join('') || '<div class="muted" style="padding:8px">No chats match.</div>'}</div>
+<div class="list">${shown.map((x) => `<div class="row" style="grid-template-columns:1fr"><label><input type="checkbox" data-pick="${esc(x.id)}" data-name="${esc(x.name)}" data-finished="${x.finished ? '1' : ''}" ${state.pick.has(x.id) ? 'checked' : ''}><span><b>${esc(x.name)}</b> <span class="muted">${x.extra ? esc(x.sub) : x.sub}${queued.has(x.id) ? ' · in the queue' : ''}</span></span></label></div>`).join('') || '<div class="muted" style="padding:8px">No chats match.</div>'}</div>
 <label class="muted"><input type="checkbox" data-in-check="ensureFilters" ${state.ensureFilters ? 'checked' : ''}> Switch on photos, videos <b>and files/documents</b> for these groups (recommended)</label>
-<div class="btns"><button class="b primary" data-act="p-add" ${state.pick.size ? '' : 'disabled'}>Rescan ${state.pick.size} ticked group(s)</button><button class="b" data-act="p-add-first" ${state.pick.size ? '' : 'disabled'}>★ Rescan ${state.pick.size} ticked first</button></div>
+<div class="btns"><button class="b primary" data-act="p-add" ${state.pick.size ? '' : 'disabled'}>Rescan ${state.pick.size} ticked group(s)</button><button class="b" data-act="p-add-first" ${state.pick.size ? '' : 'disabled'}>★ Rescan ${state.pick.size} ticked first</button><span class="grow"></span><button class="b" data-act="p-finish" ${state.pick.size ? '' : 'disabled'}>✓ Mark ${state.pick.size} ticked finished</button><button class="mini" data-act="p-reopen" ${state.pick.size ? '' : 'disabled'}>Reopen ticked</button></div>
 <div class="muted">★ First: these groups go ahead of all others, for their messages and then their files. Ticking a group that is already queued just moves it to the front, keeping its progress.</div></div>`;
   return h;
 }
@@ -324,7 +336,18 @@ function viewSettings() {
 <label><input type="checkbox" data-set="autoRetry" ${s.autoRetry ? 'checked' : ''}> Retry failed downloads automatically every few hours (up to 5 times per file)</label>
 <div class="muted">A frozen account can still read history. Leave this off to keep capturing messages while you can.</div>
 <div class="btns"><button class="b primary" data-act="set-save">Save settings</button></div>
-${state.setMsg ? `<div class="muted">${esc(state.setMsg)}</div>` : ''}</div>`;
+${state.setMsg ? `<div class="muted">${esc(state.setMsg)}</div>` : ''}</div>
+<div class="card"><h2>Alerts</h2>
+<div class="muted">A short message when something needs you: the account frozen or logged out, a group that can no longer be read, downloads stopped for an hour, the nightly index failing, or the rescan queue finished. Alerts never include message text.</div>
+<div class="btns">Web address: <input class="t" data-set-text="alertWebhook" value="${esc(s.alertWebhook || '')}" placeholder="https://ntfy.sh/your-private-topic" style="flex:1;min-width:240px">
+<select class="t" data-set-select="alertWebhookKind"><option value="ntfy" ${s.alertWebhookKind !== 'discord' && s.alertWebhookKind !== 'json' ? 'selected' : ''}>ntfy (phone app)</option><option value="discord" ${s.alertWebhookKind === 'discord' ? 'selected' : ''}>Discord</option><option value="json" ${s.alertWebhookKind === 'json' ? 'selected' : ''}>Other (JSON)</option></select></div>
+<div class="muted">With ntfy, anyone who knows the topic name can read the alerts: pick a long random name, or use your own ntfy server.</div>
+<div class="btns">Email to: <input class="t" data-set-text="alertEmailTo" value="${esc(s.alertEmailTo || '')}" placeholder="you@example.com" style="flex:1;min-width:200px"> from: <input class="t" data-set-text="alertEmailFrom" value="${esc(s.alertEmailFrom || '')}" placeholder="(the login)" style="width:180px"></div>
+<div class="btns">Mail server: <input class="t" data-set-text="alertSmtpHost" value="${esc(s.alertSmtpHost || '')}" placeholder="smtp.gmail.com" style="flex:1;min-width:160px"> port <input class="t" data-set-text="alertSmtpPort" value="${esc(s.alertSmtpPort || '587')}" style="width:70px"></div>
+<div class="btns">Login: <input class="t" data-set-text="alertSmtpUser" value="${esc(s.alertSmtpUser || '')}" style="flex:1;min-width:160px"> password: <input class="t" type="password" autocomplete="new-password" data-set-text="alertSmtpPass" value="" placeholder="${s.alertSmtpPassSet ? 'saved (leave empty to keep)' : 'app password'}" style="width:200px"></div>
+<div class="muted">Gmail: use an app password (Google account → Security → App passwords), server smtp.gmail.com, port 587.</div>
+<label><input type="checkbox" data-set="alertNames" ${s.alertNames ? 'checked' : ''}> Name the groups in alerts (otherwise only counts)</label>
+<div class="btns"><button class="b primary" data-act="set-save">Save settings</button><button class="b" data-act="alert-test">Send a test alert</button></div></div>`;
 }
 
 const TABS = [['overview', 'Overview'], ['rescan', 'Rescan'], ['categories', 'Categories'], ['duplicates', 'Duplicates'], ['search', 'Search'], ['settings', 'Settings']];
@@ -418,17 +441,29 @@ $app.addEventListener('click', async (ev) => {
     }
     case 'q-retry': case 'q-remove': { const r = await api('POST', '/api/ix/queue/' + act.slice(2), { groupId: id }); if (!r.ok) state.error = errText(r); load(); break; }
     case 'p-all': for (const x of $app.querySelectorAll('input[data-pick]:not([disabled])')) state.pick.add(x.getAttribute('data-pick')); render(); break;
-    case 'p-never': for (const g of all) if (!g.lastWalk) state.pick.add(g.id); render(); break;
-    case 'p-files': for (const g of all) if (g.files > 0 && !g.lastWalk) state.pick.add(g.id); render(); break;
+    case 'p-never': for (const g of all) if (!g.lastWalk && !g.finishedAt) state.pick.add(g.id); render(); break;
+    case 'p-files': for (const g of all) if (g.files > 0 && !g.lastWalk && !g.finishedAt) state.pick.add(g.id); render(); break;
     case 'p-none': state.pick.clear(); state.pickOnly = false; render(); break;
     case 'p-only': state.pickOnly = !state.pickOnly; render(); break;
     case 'p-clear-search': state.pickSearch = ''; state.pickOnly = false; render(); { const el = $app.querySelector('[data-focus="pick"]'); if (el) el.focus(); } break;
     case 'p-dialogs': if (state.showAll) { state.showAll = false; render(); } else if (state.dialogs) { state.showAll = true; render(); } else loadDialogs(); break;
     case 'p-everything': {
-      const list = groups().filter((g) => !(state.status.queue.items || []).some((i) => i.groupId === g.id && (i.state === 'waiting' || i.state === 'running'))).map((g) => ({ id: g.id, name: g.name }));
+      const list = groups().filter((g) => !g.finishedAt && !(state.status.queue.items || []).some((i) => i.groupId === g.id && (i.state === 'waiting' || i.state === 'running'))).map((g) => ({ id: g.id, name: g.name }));
       const r = await api('POST', '/api/ix/queue/add', { groups: list, ensureFilters: true, start: true });
       if (!r.ok) state.error = 'Could not add: ' + errText(r);
       load(); break;
+    }
+    case 'p-finish': case 'p-reopen': {
+      const ids = [...state.pick];
+      const r = await api('POST', '/api/ix/groups/finished', { groupIds: ids, finished: act === 'p-finish' });
+      if (r.ok) { state.pick.clear(); state.pickOnly = false; } else state.error = errText(r);
+      load(); break;
+    }
+    case 'g-finish': case 'g-open': { const r = await api('POST', '/api/ix/groups/finished', { groupIds: [id], finished: act === 'g-finish' }); if (!r.ok) state.error = errText(r); load(); break; }
+    case 'g-finish-complete': {
+      const ids = (state.status.groups || []).filter((g) => !g.finishedAt && g.tgCount && g.lastWalk && g.tgCount - (g.messages - g.deleted) <= 0).map((g) => g.id);
+      if (!ids.length || !confirm(`Mark ${ids.length} complete group(s) as finished? Rescans will leave them alone (you can undo each one).`)) break;
+      const r = await api('POST', '/api/ix/groups/finished', { groupIds: ids, finished: true }); if (!r.ok) state.error = errText(r); load(); break;
     }
     case 'q-priority': { const r = await api('POST', '/api/ix/queue/priority', { groupId: id, priority: el.getAttribute('data-on') === '1' }); if (!r.ok) state.error = errText(r); load(); break; }
     case 'p-add': case 'p-add-first': {
@@ -436,7 +471,7 @@ $app.addEventListener('click', async (ev) => {
       for (const x of $app.querySelectorAll('input[data-pick]')) names.set(x.getAttribute('data-pick'), x.getAttribute('data-name'));
       const list = [...state.pick].map((gid) => ({ id: gid, name: names.get(gid) || gid }));
       const r = await api('POST', '/api/ix/queue/add', { groups: list, ensureFilters: state.ensureFilters, start: true, priority: act === 'p-add-first' });
-      if (r.ok) { state.pick.clear(); state.pickOnly = false; state.pickSearch = ''; } else state.error = 'Could not add: ' + errText(r);
+      if (r.ok) { state.pick.clear(); state.pickOnly = false; state.pickSearch = ''; if (r.data.skippedFinished) state.error = `${r.data.skippedFinished} finished group(s) were left out.`; } else state.error = 'Could not add: ' + errText(r);
       load(); break;
     }
     case 'c-filter': state.filter = key; render(); break;
@@ -451,6 +486,11 @@ $app.addEventListener('click', async (ev) => {
     case 'c-save': saveCategories(); break;
     case 's-go': runSearch(false); break;
     case 's-more': runSearch(true); break;
+    case 'alert-test': {
+      const r = await api('POST', '/api/ix/alerts/test');
+      state.setMsg = r.ok ? 'Test alert sent. Check your phone or inbox.' : 'Test alert failed: ' + errText(r);
+      render(); break;
+    }
     case 'set-save': {
       const body = {};
       for (const x of $app.querySelectorAll('[data-set]')) body[x.getAttribute('data-set')] = x.checked;

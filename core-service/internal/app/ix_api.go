@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"database/sql"
 	"net/http"
 	"strconv"
@@ -20,6 +21,8 @@ func registerIxRoutes(mux *http.ServeMux, a *App) {
 	mux.Handle("POST /api/ix/settings", a.requireAdmin(http.HandlerFunc(a.handleIxSettings)))
 	mux.Handle("POST /api/ix/export", a.requireAdmin(http.HandlerFunc(a.handleIxExport)))
 	mux.Handle("POST /api/ix/downloads/retry", a.requireAdmin(http.HandlerFunc(a.handleIxDownloadsRetry)))
+	mux.Handle("POST /api/ix/alerts/test", a.requireAdmin(http.HandlerFunc(a.handleIxAlertTest)))
+	mux.Handle("POST /api/ix/groups/finished", a.requireAdmin(http.HandlerFunc(a.handleIxFinished)))
 	mux.Handle("GET /api/ix/dups", a.requireAdmin(http.HandlerFunc(a.handleIxDups)))
 	mux.Handle("POST /api/ix/dups/retry", a.requireAdmin(http.HandlerFunc(a.handleIxDupsRetry)))
 }
@@ -38,6 +41,15 @@ type ixGroupStatus struct {
 	Files      int64  `json:"files"`
 	LastWalk   int64  `json:"lastWalk,omitempty"`
 	Dir        string `json:"dir"`
+	// Completeness: what Telegram last said the chat holds.
+	TgCount   int64  `json:"tgCount,omitempty"`
+	TgCountAt int64  `json:"tgCountAt,omitempty"`
+	Comments  int64  `json:"comments,omitempty"` // comments kept on its posts
+	About     string `json:"about,omitempty"`
+	Members   int64  `json:"members,omitempty"`
+	Linked    string `json:"linked,omitempty"` // its discussion group
+	// Marked finished: every rescan shortcut leaves it alone.
+	FinishedAt int64 `json:"finishedAt,omitempty"`
 }
 
 func (a *App) handleIxStatus(w http.ResponseWriter, r *http.Request) {
@@ -73,6 +85,38 @@ func (a *App) handleIxStatus(w http.ResponseWriter, r *http.Request) {
 		rows.Close()
 	}
 	walks := a.ixLatestWalks(ctx)
+	type info struct {
+		count, countAt, members, finished int64
+		about, linked                     string
+	}
+	infos := map[string]info{}
+	if rows, err := a.db.Reader.QueryContext(ctx, `SELECT group_id, tg_count, tg_count_at, members, about, linked_group, finished_at FROM ix_group_info`); err == nil {
+		for rows.Next() {
+			var id string
+			var v info
+			if rows.Scan(&id, &v.count, &v.countAt, &v.members, &v.about, &v.linked, &v.finished) == nil {
+				infos[id] = v
+			}
+		}
+		rows.Close()
+	}
+	comments := map[string]int64{}
+	if rows, err := a.db.Reader.QueryContext(ctx, `SELECT substr(comment_on, 1, instr(comment_on, ':')-1), COUNT(*) FROM ix_messages WHERE comment_on<>'' GROUP BY 1`); err == nil {
+		for rows.Next() {
+			var id string
+			var n int64
+			if rows.Scan(&id, &n) == nil {
+				comments[id] = n
+			}
+		}
+		rows.Close()
+	}
+	withInfo := func(g ixGroupStatus) ixGroupStatus {
+		v := infos[g.ID]
+		g.TgCount, g.TgCountAt, g.Members, g.About, g.Linked, g.Comments = v.count, v.countAt, v.members, v.about, v.linked, comments[g.ID]
+		g.FinishedAt = v.finished
+		return g
+	}
 	var groups []ixGroupStatus
 	seen := map[string]bool{}
 	for _, g := range configuredGroupList(cfg) {
@@ -87,12 +131,12 @@ func (a *App) handleIxStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		m := msgs[id]
 		category := strings.TrimSpace(toString(g["category"]))
-		groups = append(groups, ixGroupStatus{ID: id, Name: name, Category: category, Suggested: ixSuggestCategory(name), Configured: true, Enabled: g["enabled"] == true,
-			Messages: m.n, Deleted: m.deleted, FirstDate: m.first, LastDate: m.last, Files: files[id], LastWalk: walks[id], Dir: ixDirOf(id)})
+		groups = append(groups, withInfo(ixGroupStatus{ID: id, Name: name, Category: category, Suggested: ixSuggestCategory(name), Configured: true, Enabled: g["enabled"] == true,
+			Messages: m.n, Deleted: m.deleted, FirstDate: m.first, LastDate: m.last, Files: files[id], LastWalk: walks[id], Dir: ixDirOf(id)}))
 	}
 	for id, m := range msgs {
 		if !seen[id] {
-			groups = append(groups, ixGroupStatus{ID: id, Name: "Chat " + id, Messages: m.n, Deleted: m.deleted, FirstDate: m.first, LastDate: m.last, Files: files[id], LastWalk: walks[id], Dir: ixDirOf(id)})
+			groups = append(groups, withInfo(ixGroupStatus{ID: id, Name: "Chat " + id, Messages: m.n, Deleted: m.deleted, FirstDate: m.first, LastDate: m.last, Files: files[id], LastWalk: walks[id], Dir: ixDirOf(id)}))
 		}
 	}
 	queue, _ := a.ixLoadQueue(ctx)
@@ -104,7 +148,7 @@ func (a *App) handleIxStatus(w http.ResponseWriter, r *http.Request) {
 		"version":   version.AppVersion,
 		"groups":    groups,
 		"queue":     queue,
-		"settings":  settings,
+		"settings":  settings.public(),
 		"account":   a.ixAccount(),
 		"export":    a.ixExportStatus(),
 		"exportDir": exportDir,
@@ -130,6 +174,8 @@ func (a *App) handleIxQueueAdd(w http.ResponseWriter, r *http.Request) {
 		EnsureFilters bool `json:"ensureFilters"`
 		Start         bool `json:"start"`
 		Priority      bool `json:"priority"` // before every other group, files included
+		// Groups marked finished are skipped unless this is set.
+		IncludeFinished bool `json:"includeFinished"`
 	}
 	if err := decodeBody(w, r, &body); err != nil {
 		return
@@ -149,9 +195,15 @@ func (a *App) handleIxQueueAdd(w http.ResponseWriter, r *http.Request) {
 		known[toString(g["id"])] = g
 	}
 	var added []ixQueueItem
+	finished := a.ixFinishedGroups(ctx)
+	skipped := 0
 	for _, g := range body.Groups {
 		id := strings.TrimSpace(toString(g.ID))
 		if id == "" {
+			continue
+		}
+		if finished[id] && !body.IncludeFinished {
+			skipped++
 			continue
 		}
 		name := ixCleanName(g.Name, id)
@@ -198,7 +250,7 @@ func (a *App) handleIxQueueAdd(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"success": true, "queue": st})
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "queue": st, "skippedFinished": skipped})
 }
 
 func (a *App) handleIxQueueAction(w http.ResponseWriter, r *http.Request) {
@@ -315,7 +367,7 @@ func (a *App) handleIxSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	a.ixWake()
-	writeJSON(w, http.StatusOK, map[string]any{"success": true, "settings": s})
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "settings": s.public()})
 }
 
 func (a *App) handleIxExport(w http.ResponseWriter, r *http.Request) {
@@ -480,4 +532,54 @@ func (a *App) handleIxSearch(w http.ResponseWriter, r *http.Request) {
 		hits = hits[:limit]
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"hits": hits, "more": more, "mode": map[bool]string{true: "full-text", false: "simple"}[fts > 0]})
+}
+
+// handleIxFinished marks groups finished (or open again). A finished group
+// is skipped when groups are added to the rescan queue.
+func (a *App) handleIxFinished(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		GroupIDs []any `json:"groupIds"`
+		Finished bool  `json:"finished"`
+	}
+	if err := decodeBody(w, r, &body); err != nil {
+		return
+	}
+	if len(body.GroupIDs) == 0 || len(body.GroupIDs) > 5000 {
+		writeJSONError(w, http.StatusBadRequest, "groupIds: 1 to 5000 groups")
+		return
+	}
+	at := int64(0)
+	if body.Finished {
+		at = time.Now().UnixMilli()
+	}
+	ctx := r.Context()
+	for _, raw := range body.GroupIDs {
+		id := strings.TrimSpace(toString(raw))
+		if id == "" {
+			continue
+		}
+		if _, err := a.db.Writer.ExecContext(ctx, `INSERT INTO ix_group_info(group_id,finished_at) VALUES(?,?)
+			ON CONFLICT(group_id) DO UPDATE SET finished_at=excluded.finished_at`, id, at); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true})
+}
+
+// ixFinishedGroups is the set of groups marked finished.
+func (a *App) ixFinishedGroups(ctx context.Context) map[string]bool {
+	out := map[string]bool{}
+	rows, err := a.db.Reader.QueryContext(ctx, `SELECT group_id FROM ix_group_info WHERE finished_at>0`)
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil {
+			out[id] = true
+		}
+	}
+	return out
 }

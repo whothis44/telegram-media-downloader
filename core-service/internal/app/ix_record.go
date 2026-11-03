@@ -71,6 +71,8 @@ type ixRow struct {
 	MediaKey   string
 	Views      int
 	TL         []byte
+	Service    string // a service message's action: messageActionPinMessage...
+	Comments   int    // comments on a channel post
 }
 
 type ixPeer struct {
@@ -127,6 +129,9 @@ func ixRowFromMessage(m *tg.Message) ixRow {
 	if v, ok := m.GetViews(); ok {
 		row.Views = v
 	}
+	if replies, ok := m.GetReplies(); ok && replies.Comments {
+		row.Comments = replies.Replies
+	}
 	if fwd, ok := m.GetFwdFrom(); ok {
 		row.FwdDate = fwd.Date
 		if name, ok := fwd.GetFromName(); ok && name != "" {
@@ -159,6 +164,89 @@ func ixRowFromMessage(m *tg.Message) ixRow {
 		row.TL = buf.Copy()
 	}
 	return row
+}
+
+// ixRowFromService keeps a service message (pin, title or photo change,
+// members joining...) as a line of the chat with a plain description.
+func ixRowFromService(m *tg.MessageService) ixRow {
+	row := ixRow{MessageID: m.ID, Date: m.Date, TopicID: ixServiceTopic(m), Text: ixServiceText(m.Action)}
+	if m.Action != nil {
+		row.Service = m.Action.TypeName()
+	}
+	if v, ok := m.GetFromID(); ok {
+		row.SenderID = ixPeerKey(v)
+	}
+	if header, ok := m.ReplyTo.(*tg.MessageReplyHeader); ok && (!header.ForumTopic || header.ReplyToTopID != 0) {
+		row.ReplyTo = header.ReplyToMsgID // a pin points at the pinned message
+	}
+	var buf bin.Buffer
+	if err := m.Encode(&buf); err == nil {
+		row.TL = buf.Copy()
+	}
+	return row
+}
+
+func ixServiceTopic(m *tg.MessageService) int {
+	header, ok := m.ReplyTo.(*tg.MessageReplyHeader)
+	if !ok || !header.ForumTopic {
+		return 0
+	}
+	if header.ReplyToTopID != 0 {
+		return header.ReplyToTopID
+	}
+	return header.ReplyToMsgID
+}
+
+// ixServiceText describes a service message in a few words.
+func ixServiceText(action tg.MessageActionClass) string {
+	switch a := action.(type) {
+	case *tg.MessageActionPinMessage:
+		return "pinned a message"
+	case *tg.MessageActionChatEditTitle:
+		return "changed the title to “" + a.Title + "”"
+	case *tg.MessageActionChatEditPhoto:
+		return "changed the photo"
+	case *tg.MessageActionChatDeletePhoto:
+		return "removed the photo"
+	case *tg.MessageActionChatCreate:
+		return "created the group “" + a.Title + "”"
+	case *tg.MessageActionChannelCreate:
+		return "created the channel “" + a.Title + "”"
+	case *tg.MessageActionChatAddUser:
+		if len(a.Users) == 1 {
+			return "added a member"
+		}
+		return "added " + strconv.Itoa(len(a.Users)) + " members"
+	case *tg.MessageActionChatJoinedByLink, *tg.MessageActionChatJoinedByRequest:
+		return "joined"
+	case *tg.MessageActionChatDeleteUser:
+		return "removed a member"
+	case *tg.MessageActionChatMigrateTo:
+		return "upgraded to a supergroup"
+	case *tg.MessageActionChannelMigrateFrom:
+		return "moved here from the old group “" + a.Title + "”"
+	case *tg.MessageActionTopicCreate:
+		return "created the topic “" + a.Title + "”"
+	case *tg.MessageActionTopicEdit:
+		if title, ok := a.GetTitle(); ok && title != "" {
+			return "renamed the topic to “" + title + "”"
+		}
+		if closed, ok := a.GetClosed(); ok {
+			if closed {
+				return "closed the topic"
+			}
+			return "reopened the topic"
+		}
+		return "edited the topic"
+	case *tg.MessageActionGroupCall:
+		return "voice chat"
+	case *tg.MessageActionHistoryClear:
+		return "cleared the history"
+	case nil:
+		return "service message"
+	}
+	name := strings.TrimPrefix(action.TypeName(), "messageAction")
+	return "service message: " + name
 }
 
 // ixTopicFromService reads a forum topic's name from the service message
@@ -250,14 +338,15 @@ func ixWriteTx(ctx context.Context, tx *sql.Tx, groupID string, rows []ixRow, to
 				return err
 			}
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO ix_messages(group_id,message_id,date,edit_date,text,grouped_id,sender_id,post_author,fwd_from,fwd_date,reply_to,topic_id,media_type,media_name,media_size,media_key,views,tl,first_seen,seen_at,deleted_at)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)
+		_, err = tx.ExecContext(ctx, `INSERT INTO ix_messages(group_id,message_id,date,edit_date,text,grouped_id,sender_id,post_author,fwd_from,fwd_date,reply_to,topic_id,media_type,media_name,media_size,media_key,views,tl,first_seen,seen_at,deleted_at,service,comments)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?)
 			ON CONFLICT(group_id,message_id) DO UPDATE SET date=excluded.date, edit_date=excluded.edit_date, text=excluded.text, grouped_id=excluded.grouped_id,
 				sender_id=excluded.sender_id, post_author=excluded.post_author, fwd_from=excluded.fwd_from, fwd_date=excluded.fwd_date, reply_to=excluded.reply_to,
 				topic_id=excluded.topic_id, media_type=excluded.media_type, media_name=excluded.media_name, media_size=excluded.media_size, media_key=excluded.media_key,
-				views=MAX(ix_messages.views, excluded.views), tl=excluded.tl, seen_at=excluded.seen_at, deleted_at=0`,
+				views=MAX(ix_messages.views, excluded.views), tl=excluded.tl, seen_at=excluded.seen_at, deleted_at=0,
+				service=excluded.service, comments=MAX(ix_messages.comments, excluded.comments)`,
 			groupID, r.MessageID, r.Date, r.EditDate, r.Text, r.GroupedID, r.SenderID, r.PostAuthor, r.FwdFrom, r.FwdDate, r.ReplyTo, r.TopicID,
-			r.MediaType, r.MediaName, r.MediaSize, r.MediaKey, r.Views, r.TL, now, now)
+			r.MediaType, r.MediaName, r.MediaSize, r.MediaKey, r.Views, r.TL, now, now, r.Service, r.Comments)
 		if err != nil {
 			return err
 		}
@@ -297,6 +386,9 @@ func ixSplit(messages []tg.MessageClass) ([]ixRow, []ixTopic) {
 			if t, ok := ixTopicFromService(m); ok {
 				topics = append(topics, t)
 			}
+			if m.ID > 0 {
+				rows = append(rows, ixRowFromService(m))
+			}
 		}
 	}
 	return rows, topics
@@ -305,6 +397,13 @@ func ixSplit(messages []tg.MessageClass) ([]ixRow, []ixTopic) {
 // ixRecordHistoryPage stores one page of a backfill before its messages are
 // queued, so every message read is kept even when it has no media.
 func (a *App) ixRecordHistoryPage(ctx context.Context, groupID string, page telegram.HistoryPage) error {
+	if groupID != "" && page.Count > 0 {
+		// How many messages Telegram says the chat has: the completeness check.
+		if _, err := a.db.Writer.ExecContext(ctx, `INSERT INTO ix_group_info(group_id,tg_count,tg_count_at) VALUES(?,?,?)
+			ON CONFLICT(group_id) DO UPDATE SET tg_count=excluded.tg_count, tg_count_at=excluded.tg_count_at`, groupID, page.Count, time.Now().UnixMilli()); err != nil {
+			return fmt.Errorf("record message count: %w", err)
+		}
+	}
 	if groupID == "" || len(page.Messages) == 0 {
 		return nil
 	}

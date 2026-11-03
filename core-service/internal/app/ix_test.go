@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -654,7 +656,7 @@ func TestIxIndexPagesCategoriesTopicsAndSharedFiles(t *testing.T) {
 	}
 	var manifest map[string]any
 	raw, err := os.ReadFile(filepath.Join(dir, "data", "manifest.json"))
-	if err != nil || json.Unmarshal(raw, &manifest) != nil || manifest["format_version"] != float64(1) || manifest["downloads_root"] == "" {
+	if err != nil || json.Unmarshal(raw, &manifest) != nil || manifest["format_version"] != float64(2) || manifest["downloads_root"] == "" {
 		t.Fatalf("manifest: %s %v", raw, err)
 	}
 	if readme, err := os.ReadFile(filepath.Join(dir, "data", "README.md")); err != nil || !strings.Contains(string(readme), "album_id") {
@@ -960,5 +962,202 @@ func TestIxQueueCarriesOnAStoppedPassWhereItLeftOff(t *testing.T) {
 	}
 	if !historyConnectionLost(errors.New(msg)) || historyConnectionLost(errors.New("rpc error code 420: FLOOD_WAIT_30")) {
 		t.Fatal("connection-lost detection")
+	}
+}
+
+// ixDetailsAccount adds chat details and comments to the history fixture.
+type ixDetailsAccount struct {
+	*historyTestAccount
+	replies func(msgID, offset int) (telegram.HistoryPage, error)
+}
+
+func (a *ixDetailsAccount) ChatInfo(context.Context, telegram.Dialog) (telegram.ChatInfo, error) {
+	return telegram.ChatInfo{Title: "Native history", About: "Rides, routes and repairs.", Username: "native", Members: 1234, PinnedID: 30,
+		Chats: []tg.ChatClass{&tg.Channel{ID: 777, Title: "Native history chat"}}}, nil
+}
+
+func (a *ixDetailsAccount) RepliesPage(_ context.Context, _ telegram.Dialog, msgID, offset, _ int) (telegram.HistoryPage, error) {
+	return a.replies(msgID, offset)
+}
+
+func TestIxMessagesPassKeepsDetailsNoticesAndComments(t *testing.T) {
+	ixBackgroundQueue.Store(false)
+	defer ixBackgroundQueue.Store(true)
+	savedPause := ixCommentsPause
+	ixCommentsPause = time.Millisecond
+	defer func() { ixCommentsPause = savedPause }()
+	var transfers atomic.Int64
+	post := ixTestMessage(30, "ride report")
+	post.SetReplies(tg.MessageReplies{Comments: true, Replies: 2})
+	pin := &tg.MessageService{ID: 31, Date: 1700000100, PeerID: &tg.PeerChannel{ChannelID: 42}, Action: &tg.MessageActionPinMessage{}}
+	pin.SetReplyTo(&tg.MessageReplyHeader{ReplyToMsgID: 30})
+	page := func(_ context.Context, r telegram.HistoryRequest) (telegram.HistoryPage, error) {
+		if r.OffsetID == 0 {
+			return telegram.HistoryPage{Messages: []tg.MessageClass{pin, post}, NextOffset: 30, Count: 2, Entities: &tg.Updates{}}, nil
+		}
+		return telegram.HistoryPage{Done: true, Count: 2}, nil
+	}
+	comment := func(id int, text string) *tg.Message {
+		m := &tg.Message{ID: id, Date: 1700000200 + id, Message: text, PeerID: &tg.PeerChannel{ChannelID: 777}}
+		m.SetFromID(&tg.PeerUser{UserID: 6})
+		return m
+	}
+	var asked []string
+	base := historyFactory(t, page, nil, &transfers)
+	factory := func(c engine.AccountConfig, st *telegram.UpdateState, h func(context.Context, tg.UpdatesClass) error, g func(int64)) (engine.Account, error) {
+		acc, err := base(c, st, h, g)
+		if err != nil {
+			return nil, err
+		}
+		return &ixDetailsAccount{historyTestAccount: acc.(*historyTestAccount), replies: func(msgID, offset int) (telegram.HistoryPage, error) {
+			asked = append(asked, fmt.Sprintf("%d@%d", msgID, offset))
+			if offset == 0 {
+				return telegram.HistoryPage{Messages: []tg.MessageClass{comment(502, "great ride"), comment(501, "count me in")}, NextOffset: 501, Done: true, Entities: &tg.Updates{}}, nil
+			}
+			return telegram.HistoryPage{Done: true}, nil
+		}}, nil
+	}
+	ctx := context.Background()
+	a, err := newConfiguredTestApp(ctx, Config{DataDir: t.TempDir(), AccountFactory: factory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	configureDisabledHistory(t, a)
+	group := "-1000000000042"
+	if res := historyHTTP(t, a, "POST", "/api/ix/queue/add", `{"groups":[{"id":"-1000000000042","name":"Test"}],"start":true}`); res["success"] != true {
+		t.Fatalf("add: %v", res)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if err = a.ixQueueStep(ctx, a.ixDeps()); err != nil {
+			t.Fatal(err)
+		}
+		st, _ := a.ixLoadQueue(ctx)
+		if len(st.Items) == 1 && st.Items[0].State == "done" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	var about string
+	var members, pinned, count int
+	if err = a.db.Reader.QueryRow(`SELECT about, members, pinned_id, tg_count FROM ix_group_info WHERE group_id=?`, group).Scan(&about, &members, &pinned, &count); err != nil {
+		t.Fatal(err)
+	}
+	if about != "Rides, routes and repairs." || members != 1234 || pinned != 30 || count != 2 {
+		t.Fatalf("details: %q %d %d %d", about, members, pinned, count)
+	}
+	var service, text string
+	var replyTo int
+	if err = a.db.Reader.QueryRow(`SELECT service, text, reply_to FROM ix_messages WHERE group_id=? AND message_id=31`, group).Scan(&service, &text, &replyTo); err != nil {
+		t.Fatal(err)
+	}
+	if service != "messageActionPinMessage" || text != "pinned a message" || replyTo != 30 {
+		t.Fatalf("notice: %q %q %d", service, text, replyTo)
+	}
+	var comments int
+	a.db.Reader.QueryRow(`SELECT comments FROM ix_messages WHERE group_id=? AND message_id=30`, group).Scan(&comments)
+	var kept int
+	a.db.Reader.QueryRow(`SELECT COUNT(*) FROM ix_messages WHERE group_id='-1000000000777' AND comment_on='-1000000000042:30'`).Scan(&kept)
+	if comments != 2 || kept != 2 || strings.Join(asked, " ") != "30@0" {
+		t.Fatalf("comments: post says %d, kept %d, asked %v", comments, kept, asked)
+	}
+	// A second messages pass does not fetch comments it already has.
+	if err = a.ixSaveComments(ctx, nil, telegram.Dialog{}, group); err != nil {
+		t.Fatal(err)
+	}
+	// The discussion group is named from Telegram, and the status shows it all.
+	groups, err := a.ixGroups(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	named := false
+	for _, g := range groups {
+		if g.ID == "-1000000000777" && g.Name == "Native history chat" {
+			named = true
+		}
+	}
+	if !named {
+		t.Fatalf("discussion group name: %+v", groups)
+	}
+	token, _ := a.sessions.Create(ctx, "admin")
+	rec := requestPurge(a, token, "GET", "/api/ix/status", "")
+	var status struct {
+		Groups []ixGroupStatus `json:"groups"`
+	}
+	if err = json.Unmarshal(rec.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range status.Groups {
+		if g.ID == group && (g.TgCount != 2 || g.Comments != 2 || g.About == "") {
+			t.Fatalf("status: %+v", g)
+		}
+	}
+	// Finished groups are left out of the queue.
+	if res := historyHTTP(t, a, "POST", "/api/ix/groups/finished", `{"groupIds":["-1000000000042"],"finished":true}`); res["success"] != true {
+		t.Fatalf("finish: %v", res)
+	}
+	res := historyHTTP(t, a, "POST", "/api/ix/queue/add", `{"groups":[{"id":"-1000000000042","name":"Test"}]}`)
+	if res["skippedFinished"] != float64(1) {
+		t.Fatalf("finished group queued: %v", res)
+	}
+}
+
+func TestIxAlertsReachAWebAddressAndStayQuietOnRepeat(t *testing.T) {
+	ctx := context.Background()
+	a, err := newConfiguredTestApp(ctx, Config{DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	var got []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		got = append(got, r.Header.Get("Title")+"|"+string(body))
+	}))
+	defer srv.Close()
+	s := ixDefaultSettings()
+	s.AlertWebhook, s.AlertWebhookKind = srv.URL, "ntfy"
+	if err = a.ixSaveSettings(ctx, s); err != nil {
+		t.Fatal(err)
+	}
+	// A group that failed for good, and the account frozen.
+	if _, err = a.ixQueueEdit(ctx, func(st *ixQueueState) error {
+		st.Items = append(st.Items, ixQueueItem{GroupID: "-1001", Name: "Secret group", State: "failed"})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ixAccountState.Store(a, ixAccountStatus{Frozen: true, LastError: "FROZEN_METHOD_INVALID"})
+	defer ixAccountState.Delete(a)
+	conds := a.ixAlertConditions(ctx, s, time.Now())
+	if len(conds) != 2 {
+		t.Fatalf("conditions: %+v", conds)
+	}
+	for _, c := range conds {
+		if strings.Contains(c.Message, "Secret group") {
+			t.Fatal("group names must stay out of alerts unless allowed")
+		}
+		if err := a.ixSendAlert(ctx, s, c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(got) != 2 || !strings.HasPrefix(got[0], "Telegram account frozen|") {
+		t.Fatalf("delivered: %v", got)
+	}
+	// Discord gets JSON; the test endpoint works; the password never leaves.
+	s.AlertWebhookKind, s.AlertSMTPPass = "discord", "hunter2"
+	if err = a.ixSaveSettings(ctx, s); err != nil {
+		t.Fatal(err)
+	}
+	if res := historyHTTP(t, a, "POST", "/api/ix/alerts/test", ""); res["success"] != true {
+		t.Fatalf("test alert: %v", res)
+	}
+	if last := got[len(got)-1]; !strings.Contains(last, `"content":"**Test alert**`) {
+		t.Fatalf("discord body: %s", last)
+	}
+	token, _ := a.sessions.Create(ctx, "admin")
+	if rec := requestPurge(a, token, "GET", "/api/ix/status", ""); strings.Contains(rec.Body.String(), "hunter2") || !strings.Contains(rec.Body.String(), `"alertSmtpPassSet":true`) {
+		t.Fatalf("status leaks or loses the password: %s", rec.Body.String())
 	}
 }

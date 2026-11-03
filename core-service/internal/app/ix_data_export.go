@@ -28,7 +28,7 @@ import (
 // both decoded (raw) and as the original bytes (tl_base64). It is written
 // with the index, into its data folder; see ixDataReadme for the format.
 
-const ixDataFormat = 1
+const ixDataFormat = 2
 
 type ixDataFile struct {
 	DownloadID int64  `json:"download_id"`
@@ -45,6 +45,12 @@ type ixDataEdit struct {
 	EditDate   int    `json:"edit_date"`
 	Text       string `json:"text"`
 	RecordedAt int64  `json:"recorded_at"`
+}
+
+// ixDataRef points at a message of another chat.
+type ixDataRef struct {
+	GroupID   string `json:"group_id"`
+	MessageID int    `json:"message_id"`
 }
 
 type ixDataMedia struct {
@@ -77,6 +83,9 @@ type ixDataMessage struct {
 	DeletedAt  int64        `json:"deleted_at,omitempty"`
 	FirstSeen  int64        `json:"first_seen"`
 	LastSeen   int64        `json:"last_seen"`
+	Service    string       `json:"service,omitempty"`  // a system notice: its TL action (messageActionPinMessage...)
+	Comments   int          `json:"comments,omitempty"` // channel post: comments Telegram reports
+	CommentOn  *ixDataRef   `json:"comment_on,omitempty"`
 	Raw        any          `json:"raw,omitempty"`
 	TLBase64   string       `json:"tl_base64,omitempty"`
 }
@@ -268,7 +277,7 @@ func (a *App) ixWriteGroupMessages(ctx context.Context, meta ixGroupMeta, files 
 	enc := json.NewEncoder(bw)
 	enc.SetEscapeHTML(false)
 	rows, err := a.db.Reader.QueryContext(ctx, `SELECT message_id,date,edit_date,text,grouped_id,sender_id,post_author,fwd_from,fwd_date,reply_to,topic_id,
-		media_type,media_name,media_size,media_key,views,tl,first_seen,seen_at,deleted_at FROM ix_messages WHERE group_id=? ORDER BY message_id`, meta.ID)
+		media_type,media_name,media_size,media_key,views,tl,first_seen,seen_at,deleted_at,service,comments,comment_on FROM ix_messages WHERE group_id=? ORDER BY message_id`, meta.ID)
 	if err != nil {
 		return 0, err
 	}
@@ -281,9 +290,15 @@ func (a *App) ixWriteGroupMessages(ctx context.Context, meta ixGroupMeta, files 
 		var mediaType, mediaName, mediaKey string
 		var mediaSize int64
 		var tl []byte
+		var commentOn string
 		if err := rows.Scan(&m.MessageID, &m.Date, &m.EditDate, &m.Text, &m.AlbumID, &m.Sender, &m.PostAuthor, &m.FwdFrom, &m.FwdDate, &m.ReplyTo, &m.TopicID,
-			&mediaType, &mediaName, &mediaSize, &mediaKey, &m.Views, &tl, &m.FirstSeen, &m.LastSeen, &m.DeletedAt); err != nil {
+			&mediaType, &mediaName, &mediaSize, &mediaKey, &m.Views, &tl, &m.FirstSeen, &m.LastSeen, &m.DeletedAt, &m.Service, &m.Comments, &commentOn); err != nil {
 			return n, err
+		}
+		if i := strings.LastIndex(commentOn, ":"); i > 0 {
+			if id, err := strconv.Atoi(commentOn[i+1:]); err == nil {
+				m.CommentOn = &ixDataRef{GroupID: commentOn[:i], MessageID: id}
+			}
 		}
 		m.GroupID, m.ChatID = meta.ID, chat
 		if m.Date > 0 {
@@ -300,9 +315,16 @@ func (a *App) ixWriteGroupMessages(ctx context.Context, meta ixGroupMeta, files 
 		m.Edits = edits[m.MessageID]
 		if len(tl) > 0 {
 			m.TLBase64 = base64.StdEncoding.EncodeToString(tl)
-			var msg tg.Message
-			if msg.Decode(&bin.Buffer{Buf: tl}) == nil {
-				m.Raw = ixTL(&msg)
+			if m.Service != "" {
+				var msg tg.MessageService
+				if msg.Decode(&bin.Buffer{Buf: tl}) == nil {
+					m.Raw = ixTL(&msg)
+				}
+			} else {
+				var msg tg.Message
+				if msg.Decode(&bin.Buffer{Buf: tl}) == nil {
+					m.Raw = ixTL(&msg)
+				}
 			}
 		}
 		if err := enc.Encode(m); err != nil {
@@ -363,6 +385,17 @@ type ixDataGroup struct {
 	Files      int            `json:"files"`
 	LastWalk   int64          `json:"last_full_rescan,omitempty"`
 	File       string         `json:"messages_file"`
+	// From Telegram's chat details, as last read.
+	Title      string `json:"telegram_title,omitempty"`
+	About      string `json:"about,omitempty"`
+	Username   string `json:"username,omitempty"`
+	Members    int    `json:"members,omitempty"`
+	PinnedID   int    `json:"pinned_message_id,omitempty"`
+	Linked     string `json:"discussion_group_id,omitempty"` // a channel's comments live there
+	TgCount    int    `json:"telegram_message_count,omitempty"`
+	TgCountAt  int64  `json:"telegram_message_count_at,omitempty"`
+	FinishedAt int64  `json:"finished_at,omitempty"`
+	InfoBase64 string `json:"info_tl_base64,omitempty"` // messages.chatFull as Telegram sent it
 }
 
 // ixWriteData writes the data folder into fresh (the export being built),
@@ -435,6 +468,12 @@ func (a *App) ixWriteData(ctx context.Context, fresh, prev, downloads string, pr
 		*count++
 		g := ixDataGroup{GroupID: meta.ID, ChatID: ixBare(meta.ID), Name: meta.Name, Category: meta.Category, Configured: meta.Configured,
 			Filters: normalizedGroupFilters(meta.Filters), Messages: n, Files: len(files), LastWalk: walks[meta.ID], File: name}
+		var info []byte
+		_ = a.db.Reader.QueryRowContext(ctx, `SELECT title, about, username, members, pinned_id, linked_group, tg_count, tg_count_at, finished_at, tl FROM ix_group_info WHERE group_id=?`, meta.ID).
+			Scan(&g.Title, &g.About, &g.Username, &g.Members, &g.PinnedID, &g.Linked, &g.TgCount, &g.TgCountAt, &g.FinishedAt, &info)
+		if len(info) > 0 {
+			g.InfoBase64 = base64.StdEncoding.EncodeToString(info)
+		}
 		groups = append(groups, g)
 	}
 	progress("Data export: files, people, topics, duplicates…")
@@ -635,12 +674,12 @@ func ixCopyFile(src, dst string) error {
 
 const ixDataReadme = "# Telegram archive: data files\n\n" +
 	"Everything the archive knows, in plain files for other tools. Written with the index (nightly, or with " +
-	"\"Write the index to the NAS now\"). Format version 1; `manifest.json` says which version a folder holds.\n\n" +
+	"\"Write the index to the NAS now\"). Format version 2; `manifest.json` says which version a folder holds.\n\n" +
 	"All files are UTF-8 [JSON Lines](https://jsonlines.org/): one JSON object per line. Message files are gzip-compressed.\n\n" +
 	"## Files\n\n" +
 	"| File | One line per |\n|---|---|\n" +
 	"| `manifest.json` | (one object) export time, app version, `downloads_root`: the downloads folder as the server saw it |\n" +
-	"| `groups.jsonl` | chat: `group_id`, `chat_id`, `name`, `category`, `download_settings`, counts, `messages_file` |\n" +
+	"| `groups.jsonl` | chat: `group_id`, `chat_id`, `name`, `category`, `download_settings`, counts, `messages_file`; from Telegram's chat details: `telegram_title`, `about`, `username`, `members`, `pinned_message_id`, `discussion_group_id`, `telegram_message_count` (what Telegram says the chat holds; compare with `messages`), `info_tl_base64`; `finished_at` when marked finished |\n" +
 	"| `messages/g_<chat_id>.jsonl.gz` | message of that chat, oldest first |\n" +
 	"| `files.jsonl` | downloaded file: `group_id`, `download_id`, `path`, `size`, `type`, `sha256`, `telegram_file`, `created_at` |\n" +
 	"| `peers.jsonl` | sender or source: `peer_id` (`user:<id>`, `channel:<id>`, `chat:<id>`), `name`, `username` |\n" +
@@ -662,7 +701,9 @@ const ixDataReadme = "# Telegram archive: data files\n\n" +
 	"- `deleted_at`: set when a full rescan no longer found the message on Telegram (it is kept here).\n" +
 	"- `raw`: the complete Telegram message, decoded: every object has `_` (its TL constructor name, such as `message` or `messageMediaPhoto`) and its fields in the TL schema's snake_case; bytes are base64. Fields that are 0, false, empty or absent are left out: read a missing number as 0 and a missing flag as false (an entity at the start of the text has no `offset`). Formatting (`entities`), reactions, buttons and full media details are here.\n" +
 	"- `tl_base64`: the same message as Telegram's original binary (TL) serialisation, for exact decoding with any MTProto library (gotd/td, Telethon...).\n" +
-	"- A line with no `raw` and `date` 0 stands for a downloaded file whose message was never captured.\n\n" +
+	"- A line with no `raw` and `date` 0 stands for a downloaded file whose message was never captured.\n" +
+	"- `service`: set on system notices (pinned a message, changed the title or photo, created a topic, members joined...): the TL action name; `text` describes it, `raw._` is `messageService`.\n" +
+	"- `comments`: on a channel post, how many comments Telegram reports. The comments themselves are messages of the channel's discussion group (`discussion_group_id` in `groups.jsonl`), in that group's own messages file, each with `comment_on` pointing at the channel post (`group_id`, `message_id`).\n\n" +
 	"## Files on disk\n\n" +
 	"`path` is relative to `downloads_root`, with `/` separators. `sha256` is the SHA-256 of the file's bytes when the app has computed it (it may be missing for some files; compute it yourself if needed).\n\n" +
 	"## Duplicates\n\n" +
