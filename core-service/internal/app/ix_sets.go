@@ -515,6 +515,9 @@ func ixAssignSets(m *ixModel, fixes ixSetFixes, sim func(a, b string) (float32, 
 func ixSetLikeness(m *ixModel, emb func(string, string) (float32, bool)) func(string, string) (float32, bool) {
 	people := map[string][]int64{}
 	for id, keys := range m.PersonKeys {
+		if m.PersonHidden[id] {
+			continue
+		}
 		for k := range keys {
 			people[k] = append(people[k], id)
 		}

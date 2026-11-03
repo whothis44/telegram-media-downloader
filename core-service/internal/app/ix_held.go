@@ -369,7 +369,10 @@ func (a *App) ixHeldStep(ctx context.Context) error {
 					return err
 				}
 				if n, _ := res.RowsAffected(); n == 0 {
-					reason = ""
+					// Taken or set aside meanwhile (claimed, or paused by the
+					// deadline order): look at it again next time.
+					tx.Rollback()
+					continue
 				}
 			}
 			released := int64(0)

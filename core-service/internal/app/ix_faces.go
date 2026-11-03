@@ -24,7 +24,7 @@ import (
 )
 
 // Faces and people (optional, off unless switched on). Immich's face model
-// finds the faces in each distinct picture (and in one frame of each
+// finds the faces in each distinct picture (and in three frames of each
 // video) and describes each by an embedding; faces whose embeddings are
 // close are the same person. They are grouped the way Immich groups them:
 // a face joins the person of its closest grouped look-alike, and a new
@@ -90,6 +90,7 @@ func ixParseFaces(raw []byte) ([]ixFaceFound, error) {
 // ---------- the faces in memory ----------
 
 type ixFaceStore struct {
+	group  sync.Mutex // grouping and people changes, one at a time
 	mu     sync.RWMutex
 	model  string
 	dim    int
@@ -319,22 +320,44 @@ func (a *App) ixFaceItem(ctx context.Context, c *ixMLClient, it *ixMItem) error 
 	if err := box.faces.load(ctx, a.db.Reader, ixFaceModel); err != nil {
 		return err
 	}
-	decoded := map[*byte]image.Image{}
-	for _, k := range found {
+	// The file's faces and its "done" mark are written together, so a file
+	// stopped part-way is done again from scratch, never twice.
+	tx, err := a.db.Writer.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM ix_faces WHERE key=? AND model=? AND manual=0 AND person=0`, it.Key, ixFaceModel); err != nil {
+		return err
+	}
+	ids := make([]int64, len(found))
+	qs := make([][]int8, len(found))
+	for i, k := range found {
 		f := k.f
 		q, _ := ixQuantise(f.Vec)
 		blob := make([]byte, len(q))
-		for i, x := range q {
-			blob[i] = byte(x)
+		for j, x := range q {
+			blob[j] = byte(x)
 		}
-		res, err := a.db.Writer.ExecContext(ctx, `INSERT INTO ix_faces(key,model,x1,y1,x2,y2,score,vec,person,at) VALUES(?,?,?,?,?,?,?,?,0,?)`,
+		res, err := tx.ExecContext(ctx, `INSERT INTO ix_faces(key,model,x1,y1,x2,y2,score,vec,person,at) VALUES(?,?,?,?,?,?,?,?,0,?)`,
 			it.Key, ixFaceModel, f.X1, f.Y1, f.X2, f.Y2, f.Score, blob, ixNowMs())
 		if err != nil {
 			return err
 		}
-		id, _ := res.LastInsertId()
+		ids[i], _ = res.LastInsertId()
+		qs[i] = q
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO ix_face_done(key,model,faces,at) VALUES(?,?,?,?)
+		ON CONFLICT(key) DO UPDATE SET model=excluded.model, faces=excluded.faces, at=excluded.at`, it.Key, ixFaceModel, len(found), ixNowMs()); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	decoded := map[*byte]image.Image{}
+	for i, k := range found {
 		box.faces.mu.Lock()
-		box.faces.addLocked(id, q, 0)
+		box.faces.addLocked(ids[i], qs[i], 0)
 		box.faces.mu.Unlock()
 		img, seen := decoded[&k.pic[0]]
 		if !seen {
@@ -342,15 +365,11 @@ func (a *App) ixFaceItem(ctx context.Context, c *ixMLClient, it *ixMItem) error 
 			decoded[&k.pic[0]] = img
 		}
 		if img != nil {
-			a.ixWriteFaceCrop(id, img, f)
+			a.ixWriteFaceCrop(ids[i], img, k.f)
 		}
-		if err := a.ixGroupFace(ctx, id, q); err != nil {
+		if err := a.ixGroupFace(ctx, ids[i], qs[i]); err != nil {
 			return err
 		}
-	}
-	if _, err := a.db.Writer.ExecContext(ctx, `INSERT INTO ix_face_done(key,model,faces,at) VALUES(?,?,?,?)
-		ON CONFLICT(key) DO UPDATE SET model=excluded.model, faces=excluded.faces, at=excluded.at`, it.Key, ixFaceModel, len(found), ixNowMs()); err != nil {
-		return err
 	}
 	_, _ = a.db.Writer.ExecContext(ctx, `DELETE FROM ix_ml_err WHERE task='faces' AND key=?`, it.Key)
 	a.ixMLMarkDone("faces", it.Key)
@@ -362,6 +381,10 @@ func (a *App) ixFaceItem(ctx context.Context, c *ixMLClient, it *ixMItem) error 
 // alike.
 func (a *App) ixGroupFace(ctx context.Context, id int64, v []int8) error {
 	box := a.ixMLBox()
+	// Grouping and a person's changes (merge, taking a face out) take turns,
+	// so a face never joins a person merged away a moment before.
+	box.faces.group.Lock()
+	defer box.faces.group.Unlock()
 	box.faces.mu.Lock()
 	near := box.faces.nearLocked(v, ixFaceSameSim, id)
 	box.faces.mu.Unlock()
@@ -392,6 +415,9 @@ func (a *App) ixGroupFace(ctx context.Context, id int64, v []int8) error {
 // been made near them since. A few hundred per round, in turn.
 func (a *App) ixRegroupFaces(ctx context.Context, n int) {
 	box := a.ixMLBox()
+	if box.faces.load(ctx, a.db.Reader, ixFaceModel) != nil {
+		return
+	}
 	box.mu.Lock()
 	after := box.regroupAfter
 	box.mu.Unlock()
@@ -431,6 +457,14 @@ func (a *App) ixRegroupFaces(ctx context.Context, n int) {
 
 func (a *App) ixSetFacePerson(ctx context.Context, ids []int64, person int64) error {
 	box := a.ixMLBox()
+	// A person merged into another is that other person now.
+	for i := 0; i < 20; i++ {
+		var into int64
+		if a.db.Reader.QueryRowContext(ctx, `SELECT merged_into FROM ix_people WHERE id=?`, person).Scan(&into) != nil || into == 0 {
+			break
+		}
+		person = into
+	}
 	for _, id := range ids {
 		if _, err := a.db.Writer.ExecContext(ctx, `UPDATE ix_faces SET person=? WHERE id=? AND manual=0`, person, id); err != nil {
 			return err
@@ -503,6 +537,9 @@ func (a *App) ixPeople(ctx context.Context) ([]ixPerson, error) {
 // ixPersonChange: rename, hide, show, merge (into another person), or take
 // a face out (it is never put with anyone again by itself).
 func (a *App) ixPersonChange(ctx context.Context, id int64, action, name string, other, face int64) error {
+	box := a.ixMLBox()
+	box.faces.group.Lock()
+	defer box.faces.group.Unlock()
 	var exists int
 	if err := a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM ix_people WHERE id=? AND merged_into=0`, id).Scan(&exists); err != nil || exists == 0 {
 		return errors.New("no such person")
@@ -541,7 +578,7 @@ func (a *App) ixPersonChange(ctx context.Context, id int64, action, name string,
 			return err
 		}
 		if err = tx.Commit(); err == nil {
-			a.ixMLBox().faces.repoint(id, other)
+			box.faces.repoint(id, other)
 		}
 	case "remove-face":
 		var res sql.Result
@@ -550,7 +587,6 @@ func (a *App) ixPersonChange(ctx context.Context, id int64, action, name string,
 			if n, _ := res.RowsAffected(); n == 0 {
 				return errors.New("that face is not this person's")
 			}
-			box := a.ixMLBox()
 			box.faces.mu.Lock()
 			box.faces.setPersonLocked(face, -1)
 			box.faces.mu.Unlock()
@@ -593,7 +629,8 @@ func (a *App) ixFacesOf(ctx context.Context, key string) []ixJFace {
 func (a *App) ixLoadPeople(ctx context.Context, m *ixModel) {
 	m.PersonKeys = map[int64]map[string]bool{}
 	m.PersonName = map[int64]string{}
-	rows, err := a.db.Reader.QueryContext(ctx, `SELECT DISTINCT f.person, f.key, p.name FROM ix_faces f JOIN ix_people p ON p.id=f.person WHERE f.person>0 AND p.merged_into=0`)
+	m.PersonHidden = map[int64]bool{}
+	rows, err := a.db.Reader.QueryContext(ctx, `SELECT DISTINCT f.person, f.key, p.name, p.hidden FROM ix_faces f JOIN ix_people p ON p.id=f.person WHERE f.person>0 AND p.merged_into=0`)
 	if err != nil {
 		return
 	}
@@ -601,9 +638,11 @@ func (a *App) ixLoadPeople(ctx context.Context, m *ixModel) {
 	for rows.Next() {
 		var id int64
 		var key, name string
-		if rows.Scan(&id, &key, &name) != nil {
+		var hidden bool
+		if rows.Scan(&id, &key, &name, &hidden) != nil {
 			continue
 		}
+		m.PersonHidden[id] = hidden
 		if m.PersonKeys[id] == nil {
 			m.PersonKeys[id] = map[string]bool{}
 		}

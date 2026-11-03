@@ -350,10 +350,24 @@ for (const id of ['type', 'status', 'sort']) $('#' + id).addEventListener('chang
 $('#dups').addEventListener('change', () => { S.dups = $('#dups').checked; resetFeed(); });
 $('#qml').addEventListener('change', () => { S.ml = $('#qml').checked; S.like = ''; resetFeed(); });
 
+// A card's menu is placed over the page (cards clip what overflows them),
+// below the button, or above it when there is no room below.
+function toggleMenu(btn) {
+  const menu = btn.parentElement, pop = menu.querySelector('.pop');
+  if (!menu.classList.toggle('open')) return;
+  const r = btn.getBoundingClientRect();
+  pop.style.position = 'fixed';
+  pop.style.right = 'auto';
+  pop.style.zIndex = '40';
+  const w = pop.offsetWidth, h = pop.offsetHeight;
+  pop.style.left = Math.max(8, Math.min(r.right - w, window.innerWidth - w - 8)) + 'px';
+  pop.style.top = (r.bottom + 4 + h <= window.innerHeight - 8 ? r.bottom + 4 : Math.max(8, r.top - h - 4)) + 'px';
+}
+window.addEventListener('scroll', () => $$('.menu.open').forEach((m) => m.classList.remove('open')), { passive: true });
 document.addEventListener('click', async (e) => {
   const menuBtn = e.target.closest('[data-menu]');
   $$('.menu.open').forEach((m) => { if (!menuBtn || m !== menuBtn.parentElement) m.classList.remove('open'); });
-  if (menuBtn) { menuBtn.parentElement.classList.toggle('open'); return; }
+  if (menuBtn) { toggleMenu(menuBtn); return; }
   const act = e.target.closest('[data-act]');
   if (act) {
     const card = S.cards[Number(act.closest('.card').dataset.key)];
@@ -677,7 +691,7 @@ function sideHTML(x, where, date) {
 function renderReview() {
   const p = R.pairs[R.i];
   if (!p) { $('#review').innerHTML = `<p class="muted">Nothing left to review${R.pairs.length ? ' in this batch' : ''}.</p>`; loadInfo(); return; }
-  $('#review').innerHTML = `<p class="muted">${R.i + 1} of ${R.pairs.length} in this batch · ${p.kind === 'video' ? 'videos sharing part of their footage' : 'pictures ' + p.distance + ' bits apart (31 or fewer may be the same)'}</p>
+  $('#review').innerHTML = `<p class="muted">${R.i + 1} of ${R.pairs.length} in this batch · ${p.kind === 'video' ? 'videos sharing part of their footage' : p.kind === 'look' ? 'pictures image recognition finds nearly identical (' + Math.round((1 - p.distance) * 1000) / 10 + '% alike): crops, filters or added text' : 'pictures ' + p.distance + ' bits apart (31 or fewer may be the same)'}</p>
     <div class="pair">${sideHTML(p.a, p.aWhere, p.aDate)}${sideHTML(p.b, p.bWhere, p.bDate)}</div>
     <div class="row" style="margin-top:10px"><button class="b primary" data-d="1">1 · Same, keep left</button><button class="b primary" data-d="2">2 · Same, keep right</button><button class="b" data-d="s">S · Same</button><button class="b danger" data-d="n">N · Different</button><button class="b" data-d="skip">→ Skip</button></div>`;
   $$('#review [data-d]').forEach((b) => b.onclick = () => decide(b.dataset.d));

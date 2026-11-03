@@ -125,8 +125,8 @@ func (a *App) ixOCRTask(ctx context.Context, c *ixMLClient) *ixMLTask {
 
 const (
 	ixSTTDefaultModel = "Systran/faster-whisper-large-v3"
-	ixSTTMaxSeconds   = 3 * 3600 // longer recordings are left alone
-	ixSTTVersion      = "0.8.3"  // the speaches release the instructions use
+	ixSTTMaxSeconds   = 90 * 60 // only the first 90 minutes of a recording are written out
+	ixSTTVersion      = "0.8.3" // the speaches release the instructions use
 )
 
 var ixSTTModelRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.\-]{0,80}(/[A-Za-z0-9][A-Za-z0-9_.\-]{0,80})?$`)
@@ -146,7 +146,7 @@ func (a *App) ixSTTClientNow(ctx context.Context) *ixSTTClient {
 	if model == "" {
 		model = ixSTTDefaultModel
 	}
-	return &ixSTTClient{base: s.STTURL, model: model, http: ixMLHTTP}
+	return &ixSTTClient{base: s.STTURL, model: model, http: ixSTTHTTP}
 }
 
 func (c *ixSTTClient) ping(ctx context.Context) error {
@@ -199,28 +199,50 @@ type ixSTTPiece struct {
 	Text  string  `json:"text"`
 }
 
-// transcribe sends a WAV recording to /v1/audio/transcriptions.
-func (c *ixSTTClient) transcribe(ctx context.Context, wav []byte) (ixTranscript, error) {
-	var body bytes.Buffer
-	w := multipart.NewWriter(&body)
-	part, err := w.CreateFormFile("file", "audio.wav")
-	if err != nil {
-		return ixTranscript{}, err
+// ixSTTHTTP is ixMLHTTP's local-only connection without its overall time
+// limit: each recording gets a limit by its length (transcribe).
+var ixSTTHTTP = &http.Client{Transport: ixMLHTTP.Transport, CheckRedirect: ixMLHTTP.CheckRedirect}
+
+// transcribe sends a recording (FLAC or WAV) to /v1/audio/transcriptions,
+// streaming it rather than copying it. seconds is its length (0: unknown)
+// and sets how long the service may take before the file counts as failed.
+func (c *ixSTTClient) transcribe(ctx context.Context, audio []byte, seconds ...float64) (ixTranscript, error) {
+	dur := float64(ixSTTMaxSeconds)
+	if len(seconds) > 0 && seconds[0] > 0 {
+		dur = min(seconds[0], dur)
 	}
-	_, _ = part.Write(wav)
-	_ = w.WriteField("model", c.model)
-	_ = w.WriteField("response_format", "verbose_json")
-	_ = w.WriteField("vad_filter", "true")
-	if err := w.Close(); err != nil {
-		return ixTranscript{}, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/v1/audio/transcriptions", &body)
+	rctx, cancel := context.WithTimeout(ctx, 5*time.Minute+time.Duration(dur*1.5)*time.Second)
+	defer cancel()
+	pr, pw := io.Pipe()
+	w := multipart.NewWriter(pw)
+	go func() {
+		part, err := w.CreateFormFile("file", "audio.flac")
+		if err == nil {
+			_, err = part.Write(audio)
+		}
+		for _, f := range [][2]string{{"model", c.model}, {"response_format", "verbose_json"}, {"vad_filter", "true"}} {
+			if err == nil {
+				err = w.WriteField(f[0], f[1])
+			}
+		}
+		if err == nil {
+			err = w.Close()
+		}
+		pw.CloseWithError(err)
+	}()
+	req, err := http.NewRequestWithContext(rctx, http.MethodPost, c.base+"/v1/audio/transcriptions", pr)
 	if err != nil {
+		pr.Close()
 		return ixTranscript{}, err
 	}
 	req.Header.Set("Content-Type", w.FormDataContentType())
 	resp, err := c.http.Do(req)
 	if err != nil {
+		pr.Close()
+		if ctx.Err() == nil && rctx.Err() != nil {
+			// The service works but this recording took too long.
+			return ixTranscript{}, fmt.Errorf("writing it out took longer than %s", (5*time.Minute + time.Duration(dur*1.5)*time.Second).Round(time.Minute))
+		}
 		return ixTranscript{}, ixMLUnreachable{err}
 	}
 	defer resp.Body.Close()
@@ -254,8 +276,8 @@ func (c *ixSTTClient) transcribe(ctx context.Context, wav []byte) (ixTranscript,
 	return t, nil
 }
 
-// ixSTTAudioHook reads a file's sound as 16 kHz mono WAV (nil when it has
-// none). Replaceable in tests.
+// ixSTTAudioHook reads a file's sound as 16 kHz mono FLAC (errIxNoAudio
+// when it has none). Replaceable in tests.
 var ixSTTAudioHook = func(a *App, ctx context.Context, it *ixMItem) ([]byte, error) {
 	return a.ixSTTAudio(ctx, it)
 }
@@ -278,15 +300,15 @@ func (a *App) ixSTTAudio(ctx context.Context, it *ixMItem) ([]byte, error) {
 	fctx, cancel := context.WithTimeout(ctx, 20*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(fctx, bin, "-hide_banner", "-nostdin", "-loglevel", "error", "-i", full, "-vn", "-sn", "-dn",
-		"-ac", "1", "-ar", "16000", "-t", strconv.Itoa(ixSTTMaxSeconds), "-c:a", "pcm_s16le", "-f", "wav", "pipe:1")
+		"-ac", "1", "-ar", "16000", "-t", strconv.Itoa(ixSTTMaxSeconds), "-c:a", "flac", "-f", "flac", "pipe:1")
 	var out, errOut bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errOut
 	err := cmd.Run()
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
-	if err != nil || out.Len() <= 44 {
-		if strings.Contains(errOut.String(), "does not contain any stream") || strings.Contains(errOut.String(), "matches no streams") || out.Len() <= 44 {
+	if err != nil || out.Len() <= 128 {
+		if strings.Contains(errOut.String(), "does not contain any stream") || strings.Contains(errOut.String(), "matches no streams") || out.Len() <= 128 {
 			return nil, errIxNoAudio
 		}
 		return nil, fmt.Errorf("the sound could not be read: %s", strings.TrimSpace(errOut.String()))
@@ -297,9 +319,9 @@ func (a *App) ixSTTAudio(ctx context.Context, it *ixMItem) ([]byte, error) {
 func ixSTTWanted(it *ixMItem) bool {
 	switch it.Type {
 	case "voice", "audio", "round", "video_note":
-		return it.Dur <= ixSTTMaxSeconds
+		return true // only the first 90 minutes are read
 	case "video":
-		return it.Dur <= ixSTTMaxSeconds // unknown length (0) too: only the first hours are read
+		return true // only the first 90 minutes are read
 	}
 	return false
 }
@@ -319,7 +341,7 @@ func (a *App) ixSTTTask(ctx context.Context, c *ixSTTClient) *ixMLTask {
 			case err != nil:
 				return a.ixMLReadErr(ctx, err)
 			default:
-				if t, err = c.transcribe(ctx, wav); err != nil {
+				if t, err = c.transcribe(ctx, wav, it.Dur); err != nil {
 					return ixMLFileErrOf(ctx, err)
 				}
 			}
@@ -465,7 +487,7 @@ func (a *App) handleIxSTTCheck(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleIxExtra(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	key := r.URL.Query().Get("key")
-	if m := a.ixModelBox().model; m != nil {
+	if m := a.ixModelLast(); m != nil {
 		if ii, ok := m.ByKey[key]; ok {
 			if canon := m.Clusters[m.Items[ii].Cluster].Canon; canon >= 0 && m.Items[canon].Key != "" {
 				key = m.Items[canon].Key // looked at once per duplicate set, by its best copy

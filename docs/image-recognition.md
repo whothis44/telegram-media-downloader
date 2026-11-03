@@ -109,7 +109,7 @@ How it behaves:
 
 - **Languages:** they are recognised on their own.
 - **Order:** files are written out one at a time, after everything else.
-- **Long recordings:** only the first three hours of each are written out.
+- **Long recordings:** only the first 90 minutes of each are written out.
 - **No sound:** videos without a sound track are noted and skipped.
 
 **Voice notes are off by default** in each chat's download filters. Switch on **voice** for the chats where they

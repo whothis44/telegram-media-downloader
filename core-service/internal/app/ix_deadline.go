@@ -204,21 +204,61 @@ func (a *App) ixRunDeadline(ctx context.Context) {
 // band that still has work, and lets go those of that band.
 func (a *App) ixDeadlineStep(ctx context.Context) error {
 	d := a.ixDeadlineEstimate(ctx, false)
-	now := time.Now().UnixMilli()
-	// Items no longer waiting (done, failed, removed) are let go.
-	if _, err := a.db.Writer.ExecContext(ctx, `UPDATE ix_deferred SET released_at=? WHERE released_at=0
-		AND NOT EXISTS (SELECT 1 FROM tgdl_work w WHERE w.id=ix_deferred.work_id AND w.status='pending')`, now); err != nil {
+	nowT := time.Now()
+	now := nowT.UnixMilli()
+	for _, q := range []string{
+		// Items no longer waiting (done, failed, removed) are let go.
+		`UPDATE ix_deferred SET released_at=? WHERE released_at=0
+			AND NOT EXISTS (SELECT 1 FROM tgdl_work w WHERE w.id=ix_deferred.work_id AND w.status='pending')`,
+		// An item a person resumed is theirs: never set aside again (-1).
+		`UPDATE ix_deferred SET released_at=-1 WHERE released_at=0 AND ? > 0
+			AND EXISTS (SELECT 1 FROM tgdl_work w WHERE w.id=ix_deferred.work_id AND w.status='pending' AND w.paused=0)`,
+	} {
+		if _, err := a.db.Writer.ExecContext(ctx, q, now); err != nil {
+			return err
+		}
+	}
+	// Items that became an explicit request or self-destructing media go
+	// now; the others' bands follow their current size.
+	if err := a.ixDeadlineLetGo(ctx, `(w.origin<>'history' OR w.ttl_seconds>0)`); err != nil {
 		return err
 	}
-	if !d.Active {
+	if _, err := a.db.Writer.ExecContext(ctx, `UPDATE ix_deferred SET band=(SELECT `+strings.ReplaceAll(ixBandSQL, "file_size", "w.file_size")+` FROM tgdl_work w WHERE w.id=ix_deferred.work_id)
+		WHERE released_at=0 AND EXISTS (SELECT 1 FROM tgdl_work w WHERE w.id=ix_deferred.work_id)`); err != nil {
+		return err
+	}
+	if !d.Active || a.ixDeadlineSuspended(ctx, nowT) {
 		return a.ixDeadlineRelease(ctx, -1)
 	}
-	// The smallest band with work the downloader could take now (not items
-	// waiting to retry), counting what was set aside.
+	// Nothing finished for half an hour while files are set aside: the
+	// order may be what holds things up. Let everything go and stand back
+	// for two hours.
+	if a.ixDeferredWaiting(ctx) > 0 {
+		var lastDone, firstSet int64
+		_ = a.db.Reader.QueryRowContext(ctx, `SELECT COALESCE(MAX(updated_at),0) FROM tgdl_work WHERE status='completed'`).Scan(&lastDone)
+		_ = a.db.Reader.QueryRowContext(ctx, `SELECT COALESCE(MIN(deferred_at),0) FROM ix_deferred WHERE released_at=0`).Scan(&firstSet)
+		if stall := 30 * time.Minute.Milliseconds(); now-lastDone > stall && firstSet > 0 && now-firstSet > stall {
+			a.ixLog("deadline order: nothing finished for 30 minutes; letting every set-aside file go for 2 hours")
+			_, _ = a.db.Writer.ExecContext(ctx, `INSERT INTO kv(key,value,updated_at) VALUES('ix_deadline_suspend',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`,
+				strconv.FormatInt(nowT.Add(2*time.Hour).UnixMilli(), 10), now)
+			return a.ixDeadlineRelease(ctx, -1)
+		}
+	}
+	// The smallest band with work the downloader could take now: not items
+	// waiting to retry, and only of accounts that are downloading (an item
+	// of an account that is not running must not hold the others back).
+	accounts := a.ixWorkingAccounts(ctx, nowT)
+	acctClause, args := "", []any{now}
+	if len(accounts) > 0 {
+		acctClause = " AND account_id IN (" + strings.TrimSuffix(strings.Repeat("?,", len(accounts)), ",") + ")"
+		for _, id := range accounts {
+			args = append(args, id)
+		}
+	}
 	var cur sql.NullInt64
 	if err := a.db.Reader.QueryRowContext(ctx, `SELECT MIN(b) FROM (
-			SELECT `+ixBandSQL+` AS b FROM tgdl_work WHERE status='pending' AND paused=0 AND origin='history' AND ttl_seconds=0 AND retry_at<=?
-			UNION ALL SELECT x.band FROM ix_deferred x JOIN tgdl_work w ON w.id=x.work_id WHERE x.released_at=0 AND w.status='pending')`, now).Scan(&cur); err != nil {
+			SELECT `+ixBandSQL+` AS b FROM tgdl_work WHERE status='pending' AND paused=0 AND origin='history' AND ttl_seconds=0 AND retry_at<=?`+acctClause+`
+			UNION ALL SELECT x.band FROM ix_deferred x JOIN tgdl_work w ON w.id=x.work_id WHERE x.released_at=0 AND w.status='pending')`, args...).Scan(&cur); err != nil {
 		return err
 	}
 	if !cur.Valid {
@@ -231,7 +271,8 @@ func (a *App) ixDeadlineStep(ctx context.Context) error {
 	}
 	defer tx.Rollback()
 	if _, err = tx.ExecContext(ctx, `INSERT OR REPLACE INTO ix_deferred(work_id,band,deferred_at,released_at)
-		SELECT id, `+ixBandSQL+`, ?, 0 FROM tgdl_work WHERE status='pending' AND paused=0 AND origin='history' AND ttl_seconds=0 AND `+ixBandSQL+`>?`, now, band); err != nil {
+		SELECT id, `+ixBandSQL+`, ?, 0 FROM tgdl_work WHERE status='pending' AND paused=0 AND origin='history' AND ttl_seconds=0 AND `+ixBandSQL+`>?
+		AND id NOT IN (SELECT work_id FROM ix_deferred WHERE released_at=-1)`, now, band); err != nil {
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE tgdl_work SET paused=1 WHERE status='pending' AND paused=0 AND origin='history' AND ttl_seconds=0 AND `+ixBandSQL+`>?
@@ -242,6 +283,53 @@ func (a *App) ixDeadlineStep(ctx context.Context) error {
 		return err
 	}
 	return a.ixDeadlineRelease(ctx, band)
+}
+
+// ixWorkingAccounts are the accounts that downloaded something in the last
+// day or are downloading now (none known: no limit).
+func (a *App) ixWorkingAccounts(ctx context.Context, now time.Time) []string {
+	var out []string
+	rows, err := a.db.Reader.QueryContext(ctx, `SELECT DISTINCT account_id FROM tgdl_work WHERE status='processing' OR (status='completed' AND updated_at>=?)`, now.Add(-24*time.Hour).UnixMilli())
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+func (a *App) ixDeadlineSuspended(ctx context.Context, now time.Time) bool {
+	var v string
+	if a.db.Reader.QueryRowContext(ctx, `SELECT value FROM kv WHERE key='ix_deadline_suspend'`).Scan(&v) != nil {
+		return false
+	}
+	until, _ := strconv.ParseInt(v, 10, 64)
+	return now.UnixMilli() < until
+}
+
+// ixDeadlineLetGo unpauses set-aside items matching cond (on w) and marks
+// them let go.
+func (a *App) ixDeadlineLetGo(ctx context.Context, cond string) error {
+	tx, err := a.db.Writer.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := time.Now().UnixMilli()
+	if _, err = tx.ExecContext(ctx, `UPDATE tgdl_work SET paused=0 WHERE id IN (SELECT w.id FROM tgdl_work w JOIN ix_deferred x ON x.work_id=w.id
+		WHERE x.released_at=0 AND w.status='pending' AND w.paused=1 AND `+cond+`)
+		AND id NOT IN (SELECT work_id FROM ix_held WHERE released_at=0 AND reason<>'')`); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE ix_deferred SET released_at=? WHERE released_at=0 AND work_id IN (SELECT w.id FROM tgdl_work w WHERE `+cond+`)`, now); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ixDeadlineRelease lets go the set-aside items of bands up to band (all

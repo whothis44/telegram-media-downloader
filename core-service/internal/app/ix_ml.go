@@ -949,7 +949,7 @@ func (a *App) ixMLLookAlikes(ctx context.Context, key string) {
 	if !a.ixLoadSettings(ctx).MLDupes {
 		return
 	}
-	m := a.ixModelBox().model // the last model built; nil before the first
+	m := a.ixModelLast() // the last model built; nil before the first
 	if m == nil {
 		return
 	}
@@ -975,7 +975,7 @@ func (a *App) ixMLLookAlikes(ctx context.Context, key string) {
 		if kb < ka {
 			ka, kb = kb, ka
 		}
-		_, _ = a.db.Writer.ExecContext(ctx, `INSERT OR IGNORE INTO ix_msug(key_a,key_b,kind,distance,found_at) VALUES(?,?,'photo',?,?)`, ka, kb, -float64(h.Sim), ixNowMs())
+		_, _ = a.db.Writer.ExecContext(ctx, `INSERT OR IGNORE INTO ix_msug(key_a,key_b,kind,distance,found_at) VALUES(?,?,'look',?,?)`, ka, kb, 1-float64(h.Sim), ixNowMs())
 	}
 }
 

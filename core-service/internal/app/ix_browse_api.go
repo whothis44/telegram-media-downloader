@@ -825,7 +825,7 @@ func (a *App) handleIxBrowseReview(w http.ResponseWriter, r *http.Request) {
 	}
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 	rows, err := a.db.Reader.QueryContext(ctx, `SELECT s.key_a, s.key_b, s.kind, s.distance FROM ix_msug s
-		WHERE NOT EXISTS (SELECT 1 FROM ix_org_pairs o WHERE o.key_a=s.key_a AND o.key_b=s.key_b) ORDER BY s.kind, s.distance, s.found_at LIMIT 50 OFFSET ?`, max(0, offset))
+		WHERE NOT EXISTS (SELECT 1 FROM ix_org_pairs o WHERE o.key_a=s.key_a AND o.key_b=s.key_b) ORDER BY CASE s.kind WHEN 'photo' THEN 0 WHEN 'video' THEN 1 ELSE 2 END, s.distance, s.found_at LIMIT 50 OFFSET ?`, max(0, offset))
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return

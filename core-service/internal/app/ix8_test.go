@@ -492,3 +492,90 @@ func TestIxSetsCountTheSamePersonAsBelonging(t *testing.T) {
 		t.Fatalf("people alone marked files loose: %v", roles)
 	}
 }
+
+func TestIxDeadlineRespectsPeopleAndOtherAccounts(t *testing.T) {
+	a, ctx := ix8App(t, map[string]any{"deadlineOrder": "on"})
+	now := time.Now()
+	add := func(acct string, msg int, size int64, status string) int64 {
+		res, err := a.db.Writer.Exec(`INSERT INTO tgdl_work(account_id,group_id,group_name,message_id,version,identity,media_type,file_name,file_size,body,status,origin,created_at,updated_at)
+			VALUES(?,'-1001','G',?,1,?,'video','f',?,X'',?,'history',?,?)`, acct, msg, fmt.Sprint(msg), size, status, now.UnixMilli(), now.UnixMilli())
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, _ := res.LastInsertId()
+		return id
+	}
+	paused := func(id int64) bool {
+		var p int
+		_ = a.db.Reader.QueryRow(`SELECT paused FROM tgdl_work WHERE id=?`, id).Scan(&p)
+		return p == 1
+	}
+	add("main", 1, 5<<20, "completed")        // the working account
+	stuck := add("gone", 2, 1<<20, "pending") // an account that is not running
+	big := add("main", 3, 800<<20, "pending")
+	mid := add("main", 4, 50<<20, "pending")
+	_ = a.ixDeadlineStep(ctx)
+	if paused(stuck) || paused(mid) || !paused(big) {
+		t.Fatalf("a small file of an idle account held the working one back: big %v mid %v", paused(big), paused(mid))
+	}
+	// A person resumes the big file: it is never set aside again.
+	_, _ = a.db.Writer.Exec(`UPDATE tgdl_work SET paused=0 WHERE id=?`, big)
+	_ = a.ixDeadlineStep(ctx)
+	_ = a.ixDeadlineStep(ctx)
+	if paused(big) {
+		t.Fatal("set a file aside again after a person resumed it")
+	}
+	// A set-aside file that becomes self-destructing goes at once.
+	huge := add("main", 5, 900<<20, "pending")
+	_ = a.ixDeadlineStep(ctx)
+	if !paused(huge) {
+		t.Fatal("huge not set aside")
+	}
+	_, _ = a.db.Writer.Exec(`UPDATE tgdl_work SET ttl_seconds=60 WHERE id=?`, huge)
+	_ = a.ixDeadlineStep(ctx)
+	if paused(huge) {
+		t.Fatal("self-destructing media kept waiting")
+	}
+	// Nothing finished for half an hour: everything goes, for two hours.
+	other := add("main", 6, 700<<20, "pending")
+	_ = a.ixDeadlineStep(ctx)
+	if !paused(other) {
+		t.Fatal("other not set aside")
+	}
+	old := now.Add(-time.Hour).UnixMilli()
+	_, _ = a.db.Writer.Exec(`UPDATE tgdl_work SET updated_at=? WHERE status='completed'`, old)
+	_, _ = a.db.Writer.Exec(`UPDATE ix_deferred SET deferred_at=?`, old)
+	_ = a.ixDeadlineStep(ctx)
+	if paused(other) || !a.ixDeadlineSuspended(ctx, now) {
+		t.Fatal("a stalled queue was not let go")
+	}
+}
+
+func TestIxFacesNeverJoinAMergedPerson(t *testing.T) {
+	a, ctx := ix8App(t, map[string]any{})
+	box := a.ixMLBox()
+	_ = box.faces.load(ctx, a.db.Reader, ixFaceModel)
+	now := ixNowMs()
+	_, _ = a.db.Writer.Exec(`INSERT INTO ix_people(id,name,created_at,updated_at) VALUES(1,'',?,?),(2,'Q',?,?)`, now, now, now, now)
+	_, _ = a.db.Writer.Exec(`INSERT INTO ix_faces(id,key,model,x1,y1,x2,y2,score,vec,person,at) VALUES(1,'k',?,0,0,1,1,0.9,zeroblob(4),1,?)`, ixFaceModel, now)
+	if err := a.ixPersonChange(ctx, 1, "merge", "", 2, 0); err != nil {
+		t.Fatal(err)
+	}
+	// A face grouped with person 1 a moment after the merge lands on 2.
+	_, _ = a.db.Writer.Exec(`INSERT INTO ix_faces(id,key,model,x1,y1,x2,y2,score,vec,person,at) VALUES(2,'k2',?,0,0,1,1,0.9,zeroblob(4),0,?)`, ixFaceModel, now)
+	if err := a.ixSetFacePerson(ctx, []int64{2}, 1); err != nil {
+		t.Fatal(err)
+	}
+	var p int64
+	_ = a.db.Reader.QueryRow(`SELECT person FROM ix_faces WHERE id=2`).Scan(&p)
+	if p != 2 {
+		t.Fatalf("face joined person %d", p)
+	}
+	// Hidden people do not tie sets together.
+	m := ixSetScene()
+	m.PersonKeys = map[int64]map[string]bool{2: {"s00": true, "o1": true}}
+	m.PersonHidden = map[int64]bool{2: true}
+	if ixSetLikeness(m, nil) != nil {
+		t.Fatal("a hidden person counts for sets")
+	}
+}

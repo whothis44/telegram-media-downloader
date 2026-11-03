@@ -94,24 +94,25 @@ type ixMCluster struct {
 }
 
 type ixModel struct {
-	Built      time.Time
-	Took       time.Duration
-	Stamp      string
-	Items      []ixMItem
-	Posts      []ixMPost
-	Families   []ixMFamily
-	Clusters   []ixMCluster
-	ByMsg      map[string]int32 // "group:msg" -> post
-	ByKey      map[string]int32 // file key -> an item with it
-	ByID       map[int64]int32  // download ID -> item
-	GroupName  map[string]string
-	GroupCat   map[string]string
-	Groups     []string
-	Suggest    map[string]ixCatSuggest   // a category per chat, from what it posts
-	Sets       []ixMSet                  // families that share pictures, oldest first
-	PersonKeys map[int64]map[string]bool // person -> files they appear in (best copies)
-	PersonName map[int64]string
-	FamSet     []int32 // family -> set (-1: none)
+	Built        time.Time
+	Took         time.Duration
+	Stamp        string
+	Items        []ixMItem
+	Posts        []ixMPost
+	Families     []ixMFamily
+	Clusters     []ixMCluster
+	ByMsg        map[string]int32 // "group:msg" -> post
+	ByKey        map[string]int32 // file key -> an item with it
+	ByID         map[int64]int32  // download ID -> item
+	GroupName    map[string]string
+	GroupCat     map[string]string
+	Groups       []string
+	Suggest      map[string]ixCatSuggest   // a category per chat, from what it posts
+	Sets         []ixMSet                  // families that share pictures, oldest first
+	PersonKeys   map[int64]map[string]bool // person -> files they appear in (best copies)
+	PersonName   map[int64]string
+	PersonHidden map[int64]bool // hidden people (a presenter, a cartoon) do not tie sets together
+	FamSet       []int32        // family -> set (-1: none)
 }
 
 type ixModelBox struct {
@@ -126,6 +127,15 @@ var ixModelState sync.Map // *App -> *ixModelBox
 func (a *App) ixModelBox() *ixModelBox {
 	v, _ := ixModelState.LoadOrStore(a, &ixModelBox{})
 	return v.(*ixModelBox)
+}
+
+// ixModelLast is the last model built, without building one (nil before
+// the first).
+func (a *App) ixModelLast() *ixModel {
+	box := a.ixModelBox()
+	box.mu.Lock()
+	defer box.mu.Unlock()
+	return box.model
 }
 
 // ixModelNow returns the current model, building it the first time.
