@@ -95,6 +95,11 @@ CREATE TABLE IF NOT EXISTS ix_vdup (
 	found_at INTEGER NOT NULL DEFAULT 0,
 	PRIMARY KEY (key_a, key_b)
 );
+CREATE TABLE IF NOT EXISTS ix_retry (
+	work_key TEXT PRIMARY KEY,
+	rounds   INTEGER NOT NULL DEFAULT 0,
+	last_at  INTEGER NOT NULL DEFAULT 0
+);
 `
 
 func ixEnsureSchema(ctx context.Context, db *sql.DB) error {

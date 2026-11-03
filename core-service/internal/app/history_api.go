@@ -40,6 +40,10 @@ type historyJob struct {
 	cursor      int
 	minID       int
 	initialized bool
+
+	// MessagesOnly reads and records every message but queues no
+	// downloads, so it is not held back by the download queue.
+	MessagesOnly bool `json:"messagesOnly,omitempty"`
 }
 
 type historyRecord struct {
@@ -122,6 +126,8 @@ func (a *App) handleHistoryStart(w http.ResponseWriter, r *http.Request) {
 		// offset_date (messages sent before it); minDate ends the walk.
 		OffsetDate any `json:"offsetDate"`
 		MinDate    any `json:"minDate"`
+		// Archive: record messages only, without queueing any download.
+		MessagesOnly bool `json:"messagesOnly"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
 		writeJSONError(w, 400, "Invalid JSON body")
@@ -209,7 +215,7 @@ func (a *App) handleHistoryStart(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, 500, err.Error())
 		return
 	}
-	j := &historyJob{ID: hex.EncodeToString(buf), State: "running", Group: id, GroupID: id, StartedAt: time.Now().UnixMilli(), Mode: mode, OffsetDate: offsetDate, MinDate: minDate, query: id, cursor: offset}
+	j := &historyJob{ID: hex.EncodeToString(buf), State: "running", Group: id, GroupID: id, StartedAt: time.Now().UnixMilli(), Mode: mode, OffsetDate: offsetDate, MinDate: minDate, MessagesOnly: body.MessagesOnly, query: id, cursor: offset}
 	if limit != 0 {
 		j.Limit = &limit
 	}
@@ -252,6 +258,9 @@ func (a *App) handleHistoryStart(w http.ResponseWriter, r *http.Request) {
 	}
 	if j.MinDate > 0 {
 		response["minDate"] = j.MinDate
+	}
+	if j.MessagesOnly {
+		response["messagesOnly"] = true
 	}
 	a.historyMu.Unlock()
 	a.startHistoryWorker(jobID)

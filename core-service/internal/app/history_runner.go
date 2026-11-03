@@ -102,6 +102,9 @@ func (a *App) runHistory(ctx context.Context, id string) error {
 		if err != nil {
 			return err
 		}
+		if j.MessagesOnly {
+			pending = 0 // archive: this walk queues nothing, so the queue never holds it back
+		}
 		// Progress is a shrinking queue or bytes still arriving: several
 		// backfills feeding one queue with large files can keep it full for
 		// longer than the stall window while downloads are healthy.
@@ -137,7 +140,7 @@ func (a *App) runHistory(ctx context.Context, id string) error {
 			var target engine.Target
 			allowed := false
 			message, _ := raw.(*tg.Message)
-			if message != nil {
+			if message != nil && !j.MessagesOnly {
 				target, allowed, err = session.Filter(ctx, message, page.Entities)
 				if err != nil {
 					return err

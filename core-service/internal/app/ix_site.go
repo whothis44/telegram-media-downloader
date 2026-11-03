@@ -391,6 +391,9 @@ func (a *App) ixExportTo(ctx context.Context, progress func(string), count *int)
 			}
 		}
 	}
+	if err = a.ixWriteData(ctx, fresh, target, downloads, progress, count); err != nil {
+		return target, fmt.Errorf("data files: %w", err)
+	}
 	progress("Swapping in the new index…")
 	if err = os.RemoveAll(old); err != nil {
 		return target, err

@@ -95,7 +95,7 @@ function banner() {
   let h = '';
   const acct = s.account || {};
   if (acct.deactivated) h += `<div class="status bad"><b>Telegram reports this account is logged out or deactivated</b> (${esc(acct.lastError)}). Rescans are paused.</div>`;
-  else if (acct.frozen) h += `<div class="status warn"><b>Telegram reports this account is frozen</b> (${esc(acct.lastError)}). Reading history still works, so rescans continue${s.settings && s.settings.pauseOnFreeze ? ' — except that you chose to pause them on a freeze (Settings)' : ''}. Messages saved here stay saved even if the account is later deleted.</div>`;
+  else if (acct.frozen) h += `<div class="status warn"><b>Telegram reports this account is frozen</b> (${esc(acct.lastError)}). Rescans keep going for as long as Telegram still lets the account read history${s.settings && s.settings.pauseOnFreeze ? ' — except that you chose to pause them on a freeze (Settings)' : ''}. Messages saved here stay saved even if the account is later deleted.</div>`;
   else if (acct.floodWait) h += `<div class="status"><b>Telegram asked the app to slow down</b> (${esc(acct.lastError)}). The app waits as asked; nothing to do.</div>`;
   if (s.hold && (!acct.deactivated)) h += `<div class="status warn">${esc(s.hold)}</div>`;
   return h;
@@ -111,16 +111,36 @@ function viewOverview() {
   let h = `<div class="card"><h2>Your index</h2>
 <div class="btns"><a class="b" style="text-decoration:none;padding:7px 12px;border-radius:8px;border:1px solid var(--accent);background:var(--accent);color:var(--accent-fg);font-weight:600" href="/ix/view/" target="_blank">Open the index</a>
 <button class="b" data-act="export" ${ex.running ? 'disabled' : ''}>${ex.running ? 'Writing…' : 'Write the index to the NAS now'}</button></div>
-<div class="muted">The index opens here in the dashboard, always up to date. A copy is also written to <code>${esc(s.exportDir || '?')}</code> ${s.settings.exportEnabled ? 'every night at ' + esc(s.settings.exportTime) : '(nightly copy turned off in Settings)'}, so you can open <code>index.html</code> there without the app.${s.exportDirError ? ` <span class="bad">${esc(s.exportDirError)}</span>` : ''}</div>
+<div class="muted">The index opens here in the dashboard, always up to date. A copy is also written to <code>${esc(s.exportDir || '?')}</code> ${s.settings.exportEnabled ? 'every night at ' + esc(s.settings.exportTime) : '(nightly copy turned off in Settings)'}, so you can open <code>index.html</code> there without the app. Its <code>data</code> folder holds everything in plain files for other tools (every message with its full Telegram record, albums, files with checksums, duplicates; see <code>data/README.md</code>).${s.exportDirError ? ` <span class="bad">${esc(s.exportDirError)}</span>` : ''}</div>
 ${ex.running ? `<div class="muted">${esc(ex.progress || 'Working…')}</div>` : ''}
 ${ex.finishedAt && !ex.running ? `<div class="muted">Last written ${esc(fmtTime(ex.finishedAt))}${ex.error ? ` — <span class="bad">failed: ${esc(ex.error)}</span>` : ` (${fmtNum(ex.files)} files)`}.</div>` : ''}
 </div>`;
+  h += viewDownloads();
   h += `<div class="card"><h2>Messages captured</h2><div class="muted">${fmtNum(total)} messages saved across ${gs.length} group(s). ${notYet ? `<b>${notYet} group(s) have not had a full rescan yet</b> — use the Rescan tab to capture their history.` : 'Every group has had a full rescan.'} New posts are saved as the monitor sees them.</div>
 <div class="list"><table><tr><th>Group</th><th>Category</th><th>Messages saved</th><th>Deleted on Telegram</th><th>Files</th><th>Dates</th><th>Last full rescan</th></tr>`;
   for (const g of gs) {
     h += `<tr><td><a href="/ix/view/${esc(g.dir)}/index.html" target="_blank">${esc(g.name)}</a></td><td>${esc(g.category || '')}</td><td class="n">${g.messages ? fmtNum(g.messages) : '<span class="warn">none yet</span>'}</td><td class="n">${fmtNum(g.deleted)}</td><td class="n">${fmtNum(g.files)}</td><td class="muted">${esc(fmtDate(g.firstDate))}${g.firstDate ? ' – ' : ''}${esc(fmtDate(g.lastDate))}</td><td>${g.lastWalk ? esc(fmtTime(g.lastWalk)) : '<span class="warn">never</span>'}</td></tr>`;
   }
   h += `</table></div></div>`;
+  return h;
+}
+
+function viewDownloads() {
+  const d = state.status.downloads;
+  if (!d) return '';
+  let state1;
+  if (!d.engineRunning) state1 = `<span class="warn"><b>The download engine is not running</b>, so nothing is downloading. Start the monitor on the dashboard.</span>`;
+  else if (d.queuePaused) state1 = `<span class="warn"><b>The download queue is paused</b> on the dashboard, so nothing is downloading.</span>`;
+  else if (d.downloading || d.lastHour) state1 = `<b>Downloading.</b> ${fmtNum(d.lastHour)} file(s) finished in the last hour${d.lastAt ? ' (latest: ' + esc(fmtTime(d.lastAt)) + ')' : ''}.`;
+  else if (d.waiting) state1 = `<span class="warn">${fmtNum(d.waiting)} file(s) waiting, but none finished in the last hour.</span> Telegram may have asked the app to slow down; if this lasts, check the dashboard's queue.`;
+  else state1 = `Nothing to download right now${d.lastAt ? ' — the latest file finished ' + esc(fmtTime(d.lastAt)) : ''}.`;
+  let h = `<div class="card"><h2>Downloads</h2><div>${state1}</div>
+<div class="muted" style="margin-top:6px">${fmtNum(d.downloading)} downloading · ${fmtNum(d.waiting)} waiting · <span class="${d.failed ? 'bad' : ''}">${fmtNum(d.failed)} failed</span>${d.givenUp ? ` (${fmtNum(d.givenUp)} no longer retried automatically)` : ''}</div>
+<div class="muted">A failed file is first retried a few times by the download engine. ${state.status.settings.autoRetry ? `After that, it goes back in the queue every ${Math.round(d.retryAfterMin / 60)} hours, up to ${d.retryRounds} times (Settings).` : 'Automatic retries every few hours are <b>off</b> (Settings).'} A group's files pass also tries its failed files again.</div>`;
+  if (d.errors && d.errors.length) {
+    h += `<div class="list" style="margin-top:8px"><table><tr><th>Why files failed</th><th>Files</th></tr>${d.errors.map((e) => `<tr><td class="muted">${esc(e.error)}</td><td class="n">${fmtNum(e.count)}</td></tr>`).join('')}</table></div>`;
+  }
+  h += `<div class="btns"><button class="b" data-act="dl-retry" ${d.failed && d.engineRunning ? '' : 'disabled'}>Retry all ${fmtNum(d.failed)} failed now</button>${state.dlMsg ? `<span class="muted">${esc(state.dlMsg)}</span>` : ''}</div></div>`;
   return h;
 }
 
@@ -131,23 +151,28 @@ function viewRescan() {
   const items = q.items || [];
   const counts = { waiting: 0, running: 0, done: 0, failed: 0 };
   items.forEach((i) => (counts[i.state] = (counts[i.state] || 0) + 1));
+  const saved = items.filter((i) => i.messagesAt || (i.state === 'done' && !i.phase)).length;
   let head;
-  if (q.running) head = `<b>Running</b> — ${counts.done} of ${items.length} group(s) done${counts.failed ? `, ${counts.failed} failed` : ''}.`;
+  if (q.running) head = `<b>Running</b> — messages saved for ${saved} of ${items.length} group(s); ${counts.done} fully done${counts.failed ? `, ${counts.failed} failed` : ''}.`;
   else if (items.length && counts.waiting + counts.running) head = `<b>Paused</b> — ${counts.done} of ${items.length} group(s) done.`;
   else if (items.length) head = `<b>Finished</b> — ${counts.done} of ${items.length} group(s) done${counts.failed ? `, ${counts.failed} failed` : ''}.`;
   else head = '<b>Nothing queued.</b> Tick groups below and add them.';
   const notQueued = groups().filter((g) => !items.some((i) => i.groupId === g.id && (i.state === 'waiting' || i.state === 'running')));
   let h = `<div class="card"><h2>Rescan everything</h2><div class="muted">Full history of every group, one group after another, with photos, videos <b>and files/documents</b> switched on. Groups already in the queue are skipped.</div>
 <div class="btns"><button class="b primary" data-act="p-everything" ${notQueued.length ? '' : 'disabled'}>Rescan all ${notQueued.length} group(s)</button></div></div>`;
-  h += `<div class="status">${head} Each group gets a full walk of its history, one group at a time: every message is saved, and any file not downloaded yet is fetched. Runs inside the server — you can close this page.${q.notice ? `<div class="muted" style="margin-top:4px">${esc(q.notice)}</div>` : ''}</div>`;
+  h += `<div class="status">${head} Two passes, one group at a time. <b>First pass:</b> every group's messages are saved — quick, and it doesn't wait for downloads. <b>Second pass</b>, once every queued group's messages are saved: each group with files still missing is walked again to fetch them (failed files get another try too). Runs inside the server — you can close this page.${q.notice ? `<div class="muted" style="margin-top:4px">${esc(q.notice)}</div>` : ''}</div>`;
   h += `<div class="btns" style="margin-bottom:12px">${q.running ? `<button class="b" data-act="q-pause">Pause</button>` : `<button class="b primary" data-act="q-start" ${counts.waiting ? '' : 'disabled'}>Start</button>`}
 <button class="b" data-act="q-clear-finished" ${counts.done + counts.failed ? '' : 'disabled'}>Remove finished</button><button class="b" data-act="q-clear" ${items.length ? '' : 'disabled'}>Clear queue</button>
 <span class="muted">Retries: ${q.maxAttempts ? 'up to ' + q.maxAttempts : 'unlimited'}</span></div>`;
   if (items.length) {
-    h += `<div class="list" style="margin-bottom:12px"><table><tr><th>#</th><th>Group</th><th>State</th><th>Messages read</th><th>Files queued</th><th>Tries</th><th></th></tr>`;
+    h += `<div class="list" style="margin-bottom:12px"><table><tr><th>#</th><th>Group</th><th>Step</th><th>Messages saved</th><th>Files missing</th><th>Files queued</th><th>Tries</th><th></th></tr>`;
     items.forEach((it, i) => {
       const when = it.state === 'waiting' && it.nextAt > Date.now() ? ` · retry ${esc(fmtTime(it.nextAt))}` : '';
-      h += `<tr><td class="n">${i + 1}</td><td>${esc(it.name)}${it.error ? `<div class="muted bad">${esc(it.error)}</div>` : ''}</td><td><span class="pill ${esc(it.state)}">${esc(it.state)}</span><span class="muted">${when}</span></td><td class="n">${fmtNum(it.processed)}</td><td class="n">${fmtNum(it.downloaded)}</td><td class="n">${it.attempts || 0}</td>
+      const files = it.phase === 'files';
+      const label = { waiting: files ? 'files: waiting' : 'messages: waiting', running: files ? 'fetching files' : 'saving messages', done: 'done', failed: 'failed' }[it.state] || it.state;
+      const msgs = it.messagesAt ? it.messages : (it.state === 'running' && !files) || (it.state === 'done' && !it.phase) ? it.processed : null;
+      const missing = it.messagesAt ? it.missing : null;
+      h += `<tr><td class="n">${i + 1}</td><td>${esc(it.name)}${it.error ? `<div class="muted bad">${esc(it.error)}</div>` : ''}</td><td><span class="pill ${esc(it.state)}">${esc(label)}</span><span class="muted">${when}</span></td><td class="n">${msgs === null ? '<span class="muted">–</span>' : fmtNum(msgs)}</td><td class="n">${missing === null ? '<span class="muted">–</span>' : fmtNum(missing)}</td><td class="n">${files || !it.phase ? fmtNum(it.downloaded) : '<span class="muted">–</span>'}</td><td class="n">${it.attempts || 0}</td>
 <td>${it.state !== 'running' && it.state !== 'waiting' ? `<button class="mini" data-act="q-retry" data-id="${esc(it.groupId)}">Run again</button>` : ''}<button class="mini" data-act="q-remove" data-id="${esc(it.groupId)}">${it.state === 'running' ? 'Stop' : 'Remove'}</button></td></tr>`;
     });
     h += `</table></div>`;
@@ -295,6 +320,7 @@ function viewSettings() {
 <label>Pace of rescans: <select class="t" data-set-select="pace"><option value="normal" ${s.pace === 'normal' ? 'selected' : ''}>Normal</option><option value="gentle" ${s.pace === 'gentle' ? 'selected' : ''}>Gentle (pauses more often, smaller download batches)</option></select></label>
 <div class="btns">Quiet hours (no new group starts): <input class="t" data-set-text="quietStart" value="${esc(s.quietStart)}" placeholder="22:00" style="width:80px"> to <input class="t" data-set-text="quietEnd" value="${esc(s.quietEnd)}" placeholder="07:00" style="width:80px"> <span class="muted">empty = none</span></div>
 <label><input type="checkbox" data-set="pauseOnFreeze" ${s.pauseOnFreeze ? 'checked' : ''}> Pause rescans when Telegram reports the account frozen</label>
+<label><input type="checkbox" data-set="autoRetry" ${s.autoRetry ? 'checked' : ''}> Retry failed downloads automatically every few hours (up to 5 times per file)</label>
 <div class="muted">A frozen account can still read history. Leave this off to keep capturing messages while you can.</div>
 <div class="btns"><button class="b primary" data-act="set-save">Save settings</button></div>
 ${state.setMsg ? `<div class="muted">${esc(state.setMsg)}</div>` : ''}</div>`;
@@ -379,6 +405,11 @@ $app.addEventListener('click', async (ev) => {
       await load(); loadDups(false); break;
     }
     case 'reload': load(); break;
+    case 'dl-retry': {
+      const r = await api('POST', '/api/ix/downloads/retry');
+      state.dlMsg = r.ok ? `${fmtNum(r.data.retried)} file(s) put back in the queue.` : 'Could not retry: ' + errText(r);
+      load(); break;
+    }
     case 'export': { const r = await api('POST', '/api/ix/export'); if (!r.ok) state.error = errText(r); load(); break; }
     case 'q-start': case 'q-pause': case 'q-clear-finished': case 'q-clear': {
       if (act === 'q-clear' && !confirm('Remove every group from the queue? A group being rescanned now is kept.')) break;

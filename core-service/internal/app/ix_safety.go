@@ -29,10 +29,11 @@ type ixSettings struct {
 	DupHWAccel    string `json:"dupHwaccel"`    // "cuda" (default), "none", or another ffmpeg backend
 	DupQuietStart string `json:"dupQuietStart"` // HH:MM; no fingerprinting between start and end
 	DupQuietEnd   string `json:"dupQuietEnd"`
+	AutoRetry     bool   `json:"autoRetry"` // put failed downloads back in the queue every few hours
 }
 
 func ixDefaultSettings() ixSettings {
-	return ixSettings{ExportEnabled: true, ExportTime: "03:30", Pace: "normal", DupEnabled: true, DupHWAccel: "cuda"}
+	return ixSettings{ExportEnabled: true, ExportTime: "03:30", Pace: "normal", DupEnabled: true, DupHWAccel: "cuda", AutoRetry: true}
 }
 
 func (a *App) ixLoadSettings(ctx context.Context) ixSettings {
@@ -231,6 +232,9 @@ func ixParseSettings(body map[string]any, s ixSettings) (ixSettings, error) {
 	}
 	if v, ok := body["dupEnabled"].(bool); ok {
 		s.DupEnabled = v
+	}
+	if v, ok := body["autoRetry"].(bool); ok {
+		s.AutoRetry = v
 	}
 	if v, ok := body["dupHwaccel"].(string); ok {
 		v = strings.ToLower(strings.TrimSpace(v))
