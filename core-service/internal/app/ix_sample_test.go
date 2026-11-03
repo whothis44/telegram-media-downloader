@@ -124,7 +124,7 @@ func TestIxDataSample(t *testing.T) {
 		if i == 0 {
 			m.Message = "Photos from the ride: 64 riders, no flats (almost)."
 		}
-		m.GroupedID, m.Media, m.PostAuthor, m.Views = 3711000000000000001, photo(5100000000000000102+int64(i), 412000+int64(i)*9000), "Liam Ortiz", 1388
+		m.GroupedID, m.Media, m.PostAuthor, m.Views = 3711000000000000001, photo(5100000000000000102+int64(i), 412000+i*9000), "Liam Ortiz", 1388
 		add(club, m)
 	}
 	m = post(club, 105, 7200, "Ride recap video, 4K on the club drive.")
