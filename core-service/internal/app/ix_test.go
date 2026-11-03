@@ -831,3 +831,67 @@ func TestIxDownloadStatsExplainFailures(t *testing.T) {
 		t.Fatal("automatic retry must be on by default")
 	}
 }
+
+func TestIxQueuePriorityGroupsGetBothPassesFirst(t *testing.T) {
+	ixBackgroundQueue.Store(false)
+	defer ixBackgroundQueue.Store(true)
+	ctx := context.Background()
+	a, err := newConfiguredTestApp(ctx, Config{DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	now := time.Unix(1_800_000_000, 0)
+	jobs := map[string]historyJob{}
+	var started []string
+	deps := ixQueueDeps{
+		start: func(_ context.Context, id string, messagesOnly bool) (string, error) {
+			started = append(started, fmt.Sprintf("%s:%v", id, messagesOnly))
+			jid := fmt.Sprintf("job-%d", len(started))
+			jobs[jid] = historyJob{ID: jid, State: "running", GroupID: id}
+			return jid, nil
+		},
+		job:     func(_ context.Context, id string) (historyJob, bool) { j, ok := jobs[id]; return j, ok },
+		missing: func(context.Context, string) (int, error) { return 2, nil },
+		finish:  func(context.Context, ixQueueItem, historyJob) error { return nil },
+		now:     func() time.Time { return now },
+	}
+	if _, err = a.ixQueueEdit(ctx, func(st *ixQueueState) error {
+		st.Running = true
+		st.Items = append(st.Items,
+			ixQueueItem{GroupID: "x", Name: "x", State: "waiting", Phase: ixPhaseMessages},
+			ixQueueItem{GroupID: "p", Name: "p", State: "waiting", Phase: ixPhaseMessages, Priority: true})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 12 && len(started) < 4; i++ {
+		if err := a.ixQueueStep(ctx, deps); err != nil {
+			t.Fatal(err)
+		}
+		j := jobs[fmt.Sprintf("job-%d", len(started))]
+		if j.State == "running" {
+			j.State, j.Processed = "done", 5
+			jobs[j.ID] = j
+		}
+	}
+	if want := "p:true p:false x:true x:false"; strings.Join(started, " ") != want {
+		t.Fatalf("order %v, want %s", started, want)
+	}
+	// Re-adding a queued group keeps its progress and only raises priority.
+	if _, err = a.ixQueueEdit(ctx, func(st *ixQueueState) error {
+		st.Items = append(st.Items, ixQueueItem{GroupID: "y", Name: "y", State: "waiting", Phase: ixPhaseFiles, MessagesAt: 1, Messages: 7})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	res := historyHTTP(t, a, "POST", "/api/ix/queue/add", `{"groups":[{"id":"y","name":"y"}],"priority":true}`)
+	if res["success"] != true {
+		t.Fatalf("add: %v", res)
+	}
+	st, _ := a.ixLoadQueue(ctx)
+	y := st.Items[ixQueueIndex(&st, "y")]
+	if !y.Priority || y.Phase != ixPhaseFiles || y.Messages != 7 {
+		t.Fatalf("re-added: %+v", y)
+	}
+}

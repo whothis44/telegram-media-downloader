@@ -16,7 +16,8 @@ import (
 )
 
 // The rescan queue walks whole groups, one at a time, with the backfill
-// engine. Each group gets two passes. The first reads and records every
+// engine. Groups marked as priority go first, with both passes; then each
+// other group gets two passes. The first reads and records every
 // message and queues no downloads, so it is quick and is never held back by
 // the download queue; every queued group has its messages saved before any
 // second pass starts. The second pass walks again and queues the files the
@@ -57,6 +58,8 @@ type ixQueueItem struct {
 	MessagesAt int64  `json:"messagesAt,omitempty"` // when the messages pass finished
 	Messages   int    `json:"messages,omitempty"`   // messages read by that pass
 	Missing    int    `json:"missing,omitempty"`    // files still missing after it
+	// Priority groups get both passes before any other group starts.
+	Priority bool `json:"priority,omitempty"`
 }
 
 type ixQueueState struct {
@@ -278,28 +281,31 @@ func (a *App) ixQueueStep(ctx context.Context, deps ixQueueDeps) error {
 		}
 		break
 	}
-	// Messages passes first, in queue order; files passes after them.
-	next, nextFiles := -1, -1
-	remaining, messagesLeft := 0, 0
+	// Order: prioritised groups first, both their passes; then everyone
+	// else's messages, then their files; queue order within each. A group
+	// waiting to retry does not hold the others up.
+	next, remaining := -1, 0
+	rank := func(it ixQueueItem) int {
+		r := 0
+		if !it.Priority {
+			r = 2
+		}
+		if it.Phase == ixPhaseFiles {
+			r++
+		}
+		return r
+	}
 	for i, item := range st.Items {
 		if item.State != "waiting" {
 			continue
 		}
 		remaining++
-		due := item.NextAt <= now.UnixMilli()
-		if item.Phase == ixPhaseFiles {
-			if due && nextFiles < 0 {
-				nextFiles = i
-			}
+		if item.NextAt > now.UnixMilli() {
 			continue
 		}
-		messagesLeft++
-		if due && next < 0 {
+		if next < 0 || rank(item) < rank(st.Items[next]) {
 			next = i
 		}
-	}
-	if next < 0 && messagesLeft == 0 {
-		next = nextFiles
 	}
 	if remaining == 0 {
 		st.Running = false
@@ -307,11 +313,7 @@ func (a *App) ixQueueStep(ctx context.Context, deps ixQueueDeps) error {
 		return save()
 	}
 	if next < 0 {
-		if messagesLeft > 0 && nextFiles >= 0 {
-			st.Notice = "Waiting to retry a messages pass that failed; files passes start once every group's messages are saved."
-		} else {
-			st.Notice = "Waiting to retry groups that failed."
-		}
+		st.Notice = "Waiting to retry groups that failed."
 		return save()
 	}
 	if deps.hold != nil {

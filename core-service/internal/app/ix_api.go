@@ -129,6 +129,7 @@ func (a *App) handleIxQueueAdd(w http.ResponseWriter, r *http.Request) {
 		} `json:"groups"`
 		EnsureFilters bool `json:"ensureFilters"`
 		Start         bool `json:"start"`
+		Priority      bool `json:"priority"` // before every other group, files included
 	}
 	if err := decodeBody(w, r, &body); err != nil {
 		return
@@ -170,14 +171,18 @@ func (a *App) handleIxQueueAdd(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		added = append(added, ixQueueItem{GroupID: id, Name: name, State: "waiting", Phase: ixPhaseMessages, AddedAt: time.Now().UnixMilli()})
+		added = append(added, ixQueueItem{GroupID: id, Name: name, State: "waiting", Phase: ixPhaseMessages, Priority: body.Priority, AddedAt: time.Now().UnixMilli()})
 	}
 	a.ixForgetGroups()
 	st, err := a.ixQueueEdit(ctx, func(st *ixQueueState) error {
 		for _, item := range added {
 			if i := ixQueueIndex(st, item.GroupID); i >= 0 {
-				if st.Items[i].State != "running" {
-					st.Items[i] = item // queue it again
+				switch st.Items[i].State {
+				case "running", "waiting":
+					// Already queued: keep its progress; it can only gain priority.
+					st.Items[i].Priority = st.Items[i].Priority || item.Priority
+				default:
+					st.Items[i] = item // finished or failed: queue it again
 				}
 				continue
 			}
@@ -249,6 +254,11 @@ func (a *App) handleIxQueueAction(w http.ResponseWriter, r *http.Request) {
 				// Again from the start: messages first, then missing files.
 				st.Items[i].State, st.Items[i].NextAt, st.Items[i].Error = "waiting", 0, ""
 				st.Items[i].Phase, st.Items[i].Attempts = ixPhaseMessages, 0
+			}
+		case "priority":
+			if i := ixQueueIndex(st, groupID); i >= 0 {
+				on, _ := body["priority"].(bool)
+				st.Items[i].Priority = on
 			}
 		case "attempts":
 			st.MaxAttempts = max(0, min(1000, int(number(body["maxAttempts"], 0))))

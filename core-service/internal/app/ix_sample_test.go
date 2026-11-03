@@ -1,10 +1,12 @@
 package app
 
 import (
+	"archive/tar"
 	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -294,6 +296,8 @@ func TestIxDataSample(t *testing.T) {
 	club101 := ixSampleLine(t, filepath.Join(data, "messages", "g_1811230001.jsonl"), 101)
 	if rawMsg, _ := club101["raw"].(map[string]any); rawMsg == nil || len(rawMsg["entities"].([]any)) != 2 {
 		t.Fatalf("formatting entities missing from raw: %v", club101)
+	} else if _, ok := rawMsg["fwd_from"]; ok {
+		t.Fatalf("raw shows a forward header on a message that was not forwarded: %v", rawMsg)
 	}
 	forum203 := ixSampleLine(t, filepath.Join(data, "messages", "g_1811230002.jsonl"), 203)
 	if forum203["topic_id"] != float64(14) || forum203["file_status"] != "downloaded" || forum203["forwarded_from"] != "channel:1811230001" {
@@ -326,6 +330,42 @@ func TestIxDataSample(t *testing.T) {
 			}
 		}
 		t.Logf("sample written to %s", dst)
+	}
+	if os.Getenv("IX_SAMPLE_PRINT") != "" {
+		// The sample as a base64 .tar.gz in the test log, for copying out of
+		// CI where artifacts cannot be fetched.
+		var packed bytes.Buffer
+		zw := gzip.NewWriter(&packed)
+		tw := tar.NewWriter(zw)
+		var all []string
+		for rel := range files {
+			all = append(all, rel)
+		}
+		sort.Strings(all)
+		for _, rel := range all {
+			body, err := os.ReadFile(filepath.Join(data, filepath.FromSlash(rel)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = tw.WriteHeader(&tar.Header{Name: "data/" + rel, Mode: 0o644, Size: int64(len(body))}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = tw.Write(body); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := tw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := zw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		text := base64.StdEncoding.EncodeToString(packed.Bytes())
+		const chunk = 3000
+		n := (len(text) + chunk - 1) / chunk
+		for i := 0; i < n; i++ {
+			t.Logf("sample-b64 %d/%d %s", i+1, n, text[i*chunk:min(len(text), (i+1)*chunk)])
+		}
 	}
 	// The copy kept in the repository must match what the exporter writes
 	// now (compressed files and the manifest's version aside).
