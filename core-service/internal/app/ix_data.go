@@ -115,11 +115,19 @@ type ixGroup struct {
 	Last     int
 }
 
+// ixBare is Telegram's own ID of a chat: -1000000000042 (a channel or
+// supergroup, marked -1000000000000-ID) is 42; -55 (a basic group) is 55.
 func ixBare(id string) string {
-	if strings.HasPrefix(id, "-100") && len(id) > 4 {
-		return id[4:]
+	v, err := strconv.ParseInt(strings.TrimSpace(id), 10, 64)
+	switch {
+	case err != nil:
+		return strings.TrimPrefix(id, "-")
+	case v <= -1000000000000:
+		return strconv.FormatInt(-v-1000000000000, 10)
+	case v < 0:
+		return strconv.FormatInt(-v, 10)
 	}
-	return strings.TrimPrefix(id, "-")
+	return strconv.FormatInt(v, 10)
 }
 
 var ixDirRe = regexp.MustCompile(`[^0-9A-Za-z_-]+`)

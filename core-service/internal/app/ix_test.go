@@ -237,7 +237,7 @@ func TestIxQueueRescansWholeGroupAndRecordsEveryMessage(t *testing.T) {
 	var found struct {
 		Hits []ixHit `json:"hits"`
 	}
-	if err = json.Unmarshal(rec.Body.Bytes(), &found); err != nil || len(found.Hits) != 1 || found.Hits[0].MessageID != 30 || !strings.HasPrefix(found.Hits[0].Link, "/ix/view/g_1000000000042/") {
+	if err = json.Unmarshal(rec.Body.Bytes(), &found); err != nil || len(found.Hits) != 1 || found.Hits[0].MessageID != 30 || !strings.HasPrefix(found.Hits[0].Link, "/ix/view/g_42/") {
 		t.Fatalf("search: %d %s", rec.Code, rec.Body.String())
 	}
 	rec = requestPurge(a, token, "GET", "/ix", "")
@@ -452,13 +452,13 @@ func TestIxIndexPagesCategoriesTopicsAndSharedFiles(t *testing.T) {
 		t.Fatalf("category: %s", sports)
 	}
 	a1 := d.byID["-1000000000101"]
-	page := get("g_1000000000101/" + a1.Pages[0].File)
+	page := get("g_101/" + a1.Pages[0].File)
 	for _, want := range []string{"album of 2", "deleted on Telegram", "Edited — 1 earlier version", "old caption", "Ann Lee (@ann)", `href="https://example.com/a"`, "also in", "football-2 › Match clips #11", "/api/thumbs/", "Not downloaded yet: photo (message #4)", `reply to <a href="` + a1.Pages[0].File + `#m1">#1</a>`} {
 		if !strings.Contains(page, want) {
 			t.Errorf("group page lacks %q", want)
 		}
 	}
-	forum := get("g_1000000000102/index.html")
+	forum := get("g_102/index.html")
 	if !strings.Contains(forum, "<h2>Topics</h2>") || !strings.Contains(forum, "<b>Match clips</b>") || !strings.Contains(forum, "<b>General</b>") {
 		t.Fatalf("forum: %s", forum)
 	}
@@ -466,21 +466,21 @@ func TestIxIndexPagesCategoriesTopicsAndSharedFiles(t *testing.T) {
 	var topicPage string
 	for _, pg := range b.Pages {
 		if pg.Topic == 10 {
-			topicPage = get("g_1000000000102/" + pg.File)
+			topicPage = get("g_102/" + pg.File)
 		}
 	}
 	if !strings.Contains(topicPage, "Topic: <b>Match clips</b>") || !strings.Contains(topicPage, "reply to <a") || strings.Contains(topicPage, "hello general") {
 		t.Fatalf("topic page: %s", topicPage)
 	}
-	news := get("g_1000000000103/index.html")
+	news := get("g_103/index.html")
 	if !strings.Contains(news, "No messages captured yet") {
 		t.Fatalf("uncaptured group: %s", news)
 	}
-	csv := get("g_1000000000101/posts.csv")
+	csv := get("g_101/posts.csv")
 	if !strings.HasPrefix(csv, "\xef\xbb\xbfmessage_id,album_id,topic_id") || !strings.Contains(csv, "gone text") {
 		t.Fatalf("csv: %s", csv)
 	}
-	if sums := get("g_1000000000101/sha256.txt"); !strings.Contains(sums, strings.Repeat("ab", 32)+"  sports-1/images/shared.jpg") {
+	if sums := get("g_101/sha256.txt"); !strings.Contains(sums, strings.Repeat("ab", 32)+"  sports-1/images/shared.jpg") {
 		t.Fatalf("sha256: %s", sums)
 	}
 
@@ -492,12 +492,12 @@ func TestIxIndexPagesCategoriesTopicsAndSharedFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := a.downloadsDir + " index"
-	for _, f := range []string{"index.html", "style.css", "c_sports/index.html", "g_1000000000101/index.html", "g_1000000000102/index.html", "g_1000000000103/posts.csv"} {
+	for _, f := range []string{"index.html", "style.css", "c_sports/index.html", "g_101/index.html", "g_102/index.html", "g_103/posts.csv"} {
 		if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(f))); err != nil {
 			t.Errorf("static copy lacks %s: %v", f, err)
 		}
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "g_1000000000101", a1.Pages[0].File))
+	data, err := os.ReadFile(filepath.Join(dir, "g_101", a1.Pages[0].File))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -543,7 +543,7 @@ func TestIxSmallRules(t *testing.T) {
 	if got := ixFilesBase(filepath.Join("x", "Telegram index"), filepath.Join("x", "Telegram")); got != "../Telegram" {
 		t.Fatalf("files base: %s", got)
 	}
-	if ixBare("-1001234") != "1234" || ixBare("-55") != "55" || ixDirOf("-1001234") != "g_1234" {
+	if ixBare("-1001234567890") != "1234567890" || ixBare("-1000000000042") != "42" || ixBare("-55") != "55" || ixDirOf("-1001234567890") != "g_1234567890" {
 		t.Fatal("ids")
 	}
 }

@@ -154,7 +154,9 @@ function viewRescan() {
   }
   // picker
   const queued = new Set(items.filter((i) => i.state === 'waiting' || i.state === 'running').map((i) => i.groupId));
-  let list = groups().map((g) => ({ id: g.id, name: g.name, sub: (g.category ? g.category + ' · ' : '') + (g.lastWalk ? 'last rescan ' + fmtTime(g.lastWalk) : 'never fully rescanned'), never: !g.lastWalk }));
+  let list = groups().map((g) => ({ id: g.id, name: g.name, files: g.files, never: !g.lastWalk,
+    sub: (g.category ? esc(g.category) + ' · ' : '') + (g.files ? fmtNum(g.files) + ' files downloaded · ' : 'no files yet · ') + (g.lastWalk ? 'messages captured, last rescan ' + fmtTime(g.lastWalk) : (g.files ? '<b>messages not captured yet</b>' : 'never rescanned')) }));
+  const withFiles = groups().filter((g) => g.files > 0 && !g.lastWalk && !queued.has(g.id)).length;
   if (state.showAll && state.dialogs) {
     const have = new Set(list.map((x) => x.id));
     for (const d of state.dialogs) if (!have.has(d.id)) list.push({ id: d.id, name: d.name, sub: 'not in the downloader yet (' + (d.type || 'chat') + ')', extra: true });
@@ -164,9 +166,9 @@ function viewRescan() {
   const shown = list.filter((x) => (state.pickOnly ? state.pick.has(x.id) : !qq || x.name.toLowerCase().includes(qq))).sort((a, b) => natural(a.name, b.name));
   h += `<div class="card"><h2>Choose groups</h2><div class="muted">Search, tick, then search for the next ones: ticks stay when you change or clear the search. <b>${state.pick.size} ticked</b> ${state.pick.size ? `<button class="mini" data-act="p-only">${state.pickOnly ? 'Show all' : 'Show only ticked'}</button>` : ''}</div>
 <div class="btns"><input class="t" style="flex:1;min-width:200px" placeholder="Search ${list.length} chats…" data-in="pickSearch" data-focus="pick" value="${esc(state.pickSearch)}">
-<button class="mini" data-act="p-clear-search" ${state.pickSearch ? '' : 'disabled'}>Clear search</button><button class="mini" data-act="p-all">Tick all ${shown.length} shown</button><button class="mini" data-act="p-never">Tick never rescanned</button><button class="mini" data-act="p-none">Untick all</button>
+<button class="mini" data-act="p-clear-search" ${state.pickSearch ? '' : 'disabled'}>Clear search</button><button class="mini" data-act="p-all">Tick all ${shown.length} shown</button><button class="mini" data-act="p-files" ${withFiles ? '' : 'disabled'}>Tick the ${withFiles} with files but no messages captured</button><button class="mini" data-act="p-never">Tick never rescanned</button><button class="mini" data-act="p-none">Untick all</button>
 <button class="mini" data-act="p-dialogs" ${state.dialogsLoading ? 'disabled' : ''}>${state.dialogsLoading ? 'Loading chats…' : state.showAll ? 'Hide other chats' : 'Show all my chats'}</button></div>
-<div class="list">${shown.map((x) => `<div class="row" style="grid-template-columns:1fr"><label><input type="checkbox" data-pick="${esc(x.id)}" data-name="${esc(x.name)}" ${state.pick.has(x.id) ? 'checked' : ''} ${queued.has(x.id) ? 'disabled' : ''}><span><b>${esc(x.name)}</b> <span class="muted">${esc(x.sub)}${queued.has(x.id) ? ' · in the queue' : ''}</span></span></label></div>`).join('') || '<div class="muted" style="padding:8px">No chats match.</div>'}</div>
+<div class="list">${shown.map((x) => `<div class="row" style="grid-template-columns:1fr"><label><input type="checkbox" data-pick="${esc(x.id)}" data-name="${esc(x.name)}" ${state.pick.has(x.id) ? 'checked' : ''} ${queued.has(x.id) ? 'disabled' : ''}><span><b>${esc(x.name)}</b> <span class="muted">${x.extra ? esc(x.sub) : x.sub}${queued.has(x.id) ? ' · in the queue' : ''}</span></span></label></div>`).join('') || '<div class="muted" style="padding:8px">No chats match.</div>'}</div>
 <label class="muted"><input type="checkbox" data-in-check="ensureFilters" ${state.ensureFilters ? 'checked' : ''}> Switch on photos, videos <b>and files/documents</b> for these groups (recommended)</label>
 <div class="btns"><button class="b primary" data-act="p-add" ${state.pick.size ? '' : 'disabled'}>Rescan ${state.pick.size} ticked group(s)</button></div></div>`;
   return h;
@@ -334,6 +336,7 @@ $app.addEventListener('click', async (ev) => {
     case 'q-retry': case 'q-remove': { const r = await api('POST', '/api/ix/queue/' + act.slice(2), { groupId: id }); if (!r.ok) state.error = errText(r); load(); break; }
     case 'p-all': for (const x of $app.querySelectorAll('input[data-pick]:not([disabled])')) state.pick.add(x.getAttribute('data-pick')); render(); break;
     case 'p-never': for (const g of all) if (!g.lastWalk) state.pick.add(g.id); render(); break;
+    case 'p-files': for (const g of all) if (g.files > 0 && !g.lastWalk) state.pick.add(g.id); render(); break;
     case 'p-none': state.pick.clear(); state.pickOnly = false; render(); break;
     case 'p-only': state.pickOnly = !state.pickOnly; render(); break;
     case 'p-clear-search': state.pickSearch = ''; state.pickOnly = false; render(); { const el = $app.querySelector('[data-focus="pick"]'); if (el) el.focus(); } break;
