@@ -85,13 +85,16 @@ type ixDataMessage struct {
 // gets "_" with its TL constructor name (message, messageMediaPhoto...),
 // field names follow the TL schema's snake_case, bytes are base64, and
 // empty or zero fields are left out.
-func ixTL(v any) any { return ixTLValue(reflect.ValueOf(v), 0) }
+func ixTL(v any) any { return ixTLValue(reflect.ValueOf(v), 0, false) }
 
 type ixTLNamed interface{ TypeName() string }
 
 var ixBinFields = reflect.TypeOf(bin.Fields(0))
 
-func ixTLValue(v reflect.Value, depth int) any {
+// inline marks a struct held directly in its parent's field: Telegram's
+// optional objects of that kind (fwd_from, replies, reactions...) are zero
+// when absent, so one with nothing in it is left out.
+func ixTLValue(v reflect.Value, depth int, inline bool) any {
 	if depth > 64 || !v.IsValid() {
 		return nil
 	}
@@ -100,12 +103,14 @@ func ixTLValue(v reflect.Value, depth int) any {
 			return nil
 		}
 		v = v.Elem()
+		inline = false
 	}
 	name := ""
 	if v.Kind() == reflect.Pointer {
 		if v.IsNil() {
 			return nil
 		}
+		inline = false
 		if n, ok := v.Interface().(ixTLNamed); ok {
 			name = n.TypeName()
 		}
@@ -128,9 +133,12 @@ func ixTLValue(v reflect.Value, depth int) any {
 			if !f.IsExported() || f.Type == ixBinFields {
 				continue
 			}
-			if val := ixTLValue(v.Field(i), depth+1); val != nil {
+			if val := ixTLValue(v.Field(i), depth+1, true); val != nil {
 				out[ixSnake(f.Name)] = val
 			}
+		}
+		if inline && len(out) <= 1 {
+			return nil
 		}
 		return out
 	case reflect.Slice, reflect.Array:
@@ -144,7 +152,7 @@ func ixTLValue(v reflect.Value, depth int) any {
 		}
 		out := make([]any, 0, v.Len())
 		for i := 0; i < v.Len(); i++ {
-			out = append(out, ixTLValue(v.Index(i), depth+1))
+			out = append(out, ixTLValue(v.Index(i), depth+1, false))
 		}
 		return out
 	case reflect.String:
@@ -652,7 +660,7 @@ const ixDataReadme = "# Telegram archive: data files\n\n" +
 	"- `files`: the downloaded file(s), same fields as `files.jsonl`.\n" +
 	"- `edits`: earlier versions of the text, as they were seen.\n" +
 	"- `deleted_at`: set when a full rescan no longer found the message on Telegram (it is kept here).\n" +
-	"- `raw`: the complete Telegram message, decoded: every object has `_` (its TL constructor name, such as `message` or `messageMediaPhoto`) and its fields in the TL schema's snake_case; bytes are base64; empty fields are left out. Formatting (`entities`), reactions, buttons and full media details are here.\n" +
+	"- `raw`: the complete Telegram message, decoded: every object has `_` (its TL constructor name, such as `message` or `messageMediaPhoto`) and its fields in the TL schema's snake_case; bytes are base64. Fields that are 0, false, empty or absent are left out: read a missing number as 0 and a missing flag as false (an entity at the start of the text has no `offset`). Formatting (`entities`), reactions, buttons and full media details are here.\n" +
 	"- `tl_base64`: the same message as Telegram's original binary (TL) serialisation, for exact decoding with any MTProto library (gotd/td, Telethon...).\n" +
 	"- A line with no `raw` and `date` 0 stands for a downloaded file whose message was never captured.\n\n" +
 	"## Files on disk\n\n" +

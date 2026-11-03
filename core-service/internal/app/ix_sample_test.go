@@ -296,6 +296,8 @@ func TestIxDataSample(t *testing.T) {
 	club101 := ixSampleLine(t, filepath.Join(data, "messages", "g_1811230001.jsonl"), 101)
 	if rawMsg, _ := club101["raw"].(map[string]any); rawMsg == nil || len(rawMsg["entities"].([]any)) != 2 {
 		t.Fatalf("formatting entities missing from raw: %v", club101)
+	} else if _, ok := rawMsg["fwd_from"]; ok {
+		t.Fatalf("raw shows a forward header on a message that was not forwarded: %v", rawMsg)
 	}
 	forum203 := ixSampleLine(t, filepath.Join(data, "messages", "g_1811230002.jsonl"), 203)
 	if forum203["topic_id"] != float64(14) || forum203["file_status"] != "downloaded" || forum203["forwarded_from"] != "channel:1811230001" {
