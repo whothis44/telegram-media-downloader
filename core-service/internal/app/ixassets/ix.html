@@ -117,12 +117,12 @@ function viewDeadline() {
   const left = d.until ? (d.until - Date.now() / 1000) : 0;
   const rate = (b) => b > 0 ? fmtSize(b * 86400) + '/day' : '—';
   let verdict = '';
-  if (!d.leftFiles) verdict = '<span class="ok">Nothing left in the download queue.</span>';
+  if (!d.leftFiles && !d.toGetFiles) verdict = '<span class="ok">Nothing left to download.</span>';
   else if (!d.etaSec) verdict = '<span class="muted">Speed not known yet (no download finished in the last day).</span>';
-  else verdict = `At the last day's speed the queue needs about <b>${days(d.etaSec)} days</b>.` + (d.until ? (d.finishes === 'yes' ? ' <span class="ok">That is before the deletion date.</span>' : ' <span class="bad">That is after the deletion date.</span>') : '');
+  else verdict = `At the last day's speed that takes about <b>${days(d.etaSec)} days</b>.` + (d.until ? (d.finishes === 'yes' ? ' <span class="ok">That is before the deletion date.</span>' : ' <span class="bad">That is after the deletion date.</span>') : '');
   const deferred = (d.deferred || []).reduce((a, b) => a + b, 0);
   let h = `<div class="card"><h2>Before the deadline</h2>
-<div>${d.until ? `Telegram deletes this account in <b>${days(Math.max(0, left))} days</b>. ` : 'Telegram has not set a deletion date. '}${fmtNum(d.leftFiles)} file(s), ${fmtSize(d.leftBytes)} left to download${d.unscanned ? `, and ${fmtNum(d.unscanned)} group(s) not fully scanned yet (more may come)` : ''}. ${verdict}</div>
+<div>${d.until ? `Telegram deletes this account in <b>${days(Math.max(0, left))} days</b>. ` : 'Telegram has not set a deletion date. '}<b>${fmtNum(d.toGetFiles || d.leftFiles)}</b> distinct file(s), <b>${fmtSize(d.toGetBytes || d.leftBytes)}</b>, still to download${d.copies ? ` (${fmtNum(d.copies)} more are copies of these or of saved files: they come free)` : ''}; ${fmtNum(d.leftFiles)} of them are in the download queue now${d.unscanned ? `, the rest come as the ${fmtNum(d.unscanned)} group(s) still waiting for their rescan are reached` : ''}. ${verdict}</div>
 <div class="muted">Speed: ${rate(d.rate24h)} over the last day, ${rate(d.rate1h)} over the last hour (files covered by a saved copy not counted).${d.active ? ` <b>Smaller files are going first</b>${deferred ? ` (${fmtNum(deferred)} larger file(s) set aside for now)` : ''}.` : d.mode === 'off' ? ' Order: normal (Settings).' : ''}</div>
 <div class="btns"><button class="b" data-act="dl-loss">${state.loss ? 'Refresh' : 'Show'} what would be lost today</button></div>`;
   const L = state.loss;

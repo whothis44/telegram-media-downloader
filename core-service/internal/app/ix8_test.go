@@ -579,3 +579,49 @@ func TestIxFacesNeverJoinAMergedPerson(t *testing.T) {
 		t.Fatal("a hidden person counts for sets")
 	}
 }
+
+func TestIxCopiesAreKnownBeforeDownload(t *testing.T) {
+	a, ctx := ix8App(t, map[string]any{})
+	ixSeedIndex(t, a)
+	// The saved shared.jpg is Telegram photo 555; message 4 (not downloaded)
+	// is the same photo; two more messages forward photo 777, saved nowhere.
+	_, _ = a.db.Writer.Exec(`UPDATE downloads SET telegram_media_kind='photo', telegram_media_id='555', telegram_media_size=1000 WHERE message_id=1`)
+	_, _ = a.db.Writer.Exec(`UPDATE ix_messages SET media_key='photo:555:1000' WHERE message_id=4`)
+	for _, r := range [][2]any{{"-1000000000102", 21}, {"-1000000000103", 31}} {
+		if _, err := a.db.Writer.Exec(`INSERT INTO ix_messages(group_id,message_id,date,text,media_type,media_key,seen_at) VALUES(?,?,1700001000,'',?,'photo:777:2048',1)`, r[0], r[1], "photo"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m, err := a.ixRebuildModel(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := func(g string, msg int) *ixMItem {
+		pi := m.ByMsg[g+":"+fmt.Sprint(msg)]
+		for _, ii := range m.Posts[pi].Items {
+			if m.Items[ii].Msg == msg {
+				return &m.Items[ii]
+			}
+		}
+		t.Fatalf("no item %s:%d", g, msg)
+		return nil
+	}
+	saved, copyOf := item("-1000000000101", 1), item("-1000000000101", 4)
+	if copyOf.Status != "missing" || copyOf.Cluster != saved.Cluster {
+		t.Fatalf("message 4 is not with the saved photo: %+v %+v", copyOf, saved)
+	}
+	a1, a2 := item("-1000000000102", 21), item("-1000000000103", 31)
+	if a1.Cluster != a2.Cluster || a1.Cluster == saved.Cluster {
+		t.Fatal("two forwards of one Telegram photo are not one set")
+	}
+	box := a.ixModelBox()
+	box.mu.Lock()
+	box.model = m
+	box.mu.Unlock()
+	d := a.ixDeadlineEstimate(ctx, false)
+	// Still to get: photo 777 once (2048 bytes). Message 4 is free (saved
+	// elsewhere), and the second 777 is a copy.
+	if d.ToGetFiles != 1 || d.ToGetBytes != 2048 || d.Copies != 2 {
+		t.Fatalf("estimate: %+v", d)
+	}
+}

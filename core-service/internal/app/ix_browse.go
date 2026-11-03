@@ -50,6 +50,7 @@ type ixMItem struct {
 	Status  string // ok, subst (same bytes as another upload), held (waiting: probably a copy), missing
 	Like    string // held: the saved file's key
 	Thumb   bool   // the picture index made a grid thumbnail
+	Ident   string // not downloaded: Telegram's file identity (kind:id:size)
 	Post    int32
 }
 
@@ -269,9 +270,14 @@ func (a *App) ixBuildModel(ctx context.Context) (*ixModel, error) {
 		created int64
 	}
 	files := map[string]*fileRow{}
+	// A Telegram file (kind:id:size) is the same bytes wherever it is
+	// forwarded, so files not downloaded yet are known as copies of saved
+	// ones, or of each other, before any download.
+	identKey := map[string]string{}
 	rows, err := a.db.Reader.QueryContext(ctx, `SELECT d.id, d.group_id, d.message_id, COALESCE(d.file_type,''), d.file_path, COALESCE(d.file_hash,''), COALESCE(d.file_size,0),
 			COALESCE(d.media_width,0), COALESCE(d.media_height,0), COALESCE(d.media_duration_ms,0), COALESCE(d.file_name,''), COALESCE(CAST(d.created_at AS TEXT),''),
-			COALESCE(p.width,0), COALESCE(p.height,0), s.of_path IS NOT NULL AND s.of_path=d.file_path, COALESCE(p.thumb,'')<>''
+			COALESCE(p.width,0), COALESCE(p.height,0), s.of_path IS NOT NULL AND s.of_path=d.file_path, COALESCE(p.thumb,'')<>'',
+			CASE WHEN COALESCE(d.telegram_media_id,'')<>'' THEN COALESCE(d.telegram_media_kind,'')||':'||d.telegram_media_id||':'||COALESCE(d.telegram_media_size,0) ELSE '' END
 		FROM downloads d LEFT JOIN ix_pdq p ON p.key = CASE WHEN length(d.file_hash)=64 THEN 'h:'||lower(d.file_hash) ELSE 'p:'||replace(d.file_path,char(92),'/') END
 		LEFT JOIN ix_subst s ON s.group_id=d.group_id AND s.message_id=d.message_id
 		WHERE d.message_id>0 AND d.file_type IS NOT 'stories' AND d.file_path IS NOT NULL AND d.file_path<>'' AND (d.status IS NULL OR d.status='completed')`)
@@ -284,7 +290,8 @@ func (a *App) ixBuildModel(ctx context.Context) (*ixModel, error) {
 		var dur int64
 		var pw, ph int
 		var subst bool
-		if err := rows.Scan(&f.item.ID, &f.item.Group, &f.item.Msg, &f.item.Type, &f.item.Path, &hash, &f.item.Size, &f.item.W, &f.item.H, &dur, &f.item.Name, &created, &pw, &ph, &subst, &f.item.Thumb); err != nil {
+		var ident string
+		if err := rows.Scan(&f.item.ID, &f.item.Group, &f.item.Msg, &f.item.Type, &f.item.Path, &hash, &f.item.Size, &f.item.W, &f.item.H, &dur, &f.item.Name, &created, &pw, &ph, &subst, &f.item.Thumb, &ident); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -293,6 +300,9 @@ func (a *App) ixBuildModel(ctx context.Context) (*ixModel, error) {
 			continue
 		}
 		f.item.Key = ixFileKey(hash, f.item.Path)
+		if ident != "" {
+			identKey[ident] = f.item.Key
+		}
 		if f.item.W == 0 && pw > 0 {
 			f.item.W, f.item.H = pw, ph
 		}
@@ -333,17 +343,17 @@ func (a *App) ixBuildModel(ctx context.Context) (*ixModel, error) {
 			m.ByID[it.ID] = ii
 		}
 	}
-	rows, err = a.db.Reader.QueryContext(ctx, `SELECT group_id, message_id, date, grouped_id, fwd_from, fwd_date, substr(text,1,?), media_type, media_name, media_size, deleted_at, sender_id, topic_id
+	rows, err = a.db.Reader.QueryContext(ctx, `SELECT group_id, message_id, date, grouped_id, fwd_from, fwd_date, substr(text,1,?), media_type, media_name, media_size, deleted_at, sender_id, topic_id, COALESCE(media_key,'')
 		FROM ix_messages WHERE media_type<>'' AND service='' ORDER BY group_id, message_id`, ixCaptionMax)
 	if err != nil {
 		return nil, err
 	}
 	seenFile := map[string]bool{}
 	for rows.Next() {
-		var g, grouped, fwd, text, mtype, mname, sender string
+		var g, grouped, fwd, text, mtype, mname, sender, mkey string
 		var msg, topic int
 		var date, fwdDate, deleted, msize int64
-		if err := rows.Scan(&g, &msg, &date, &grouped, &fwd, &fwdDate, &text, &mtype, &mname, &msize, &deleted, &sender, &topic); err != nil {
+		if err := rows.Scan(&g, &msg, &date, &grouped, &fwd, &fwdDate, &text, &mtype, &mname, &msize, &deleted, &sender, &topic, &mkey); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -380,7 +390,12 @@ func (a *App) ixBuildModel(ctx context.Context) (*ixModel, error) {
 			addItem(p, f.item)
 			continue
 		}
-		it := ixMItem{Group: g, Msg: msg, Type: ixFilterKeyType(mtype), Name: mname, Size: msize, Status: "missing"}
+		it := ixMItem{Group: g, Msg: msg, Type: ixFilterKeyType(mtype), Name: mname, Size: msize, Status: "missing", Ident: mkey}
+		if it.Size == 0 && mkey != "" {
+			if i := strings.LastIndexByte(mkey, ':'); i > 0 {
+				it.Size, _ = strconv.ParseInt(mkey[i+1:], 10, 64) // Telegram's size, from the file's identity
+			}
+		}
 		if k, ok := held[mk]; ok {
 			it.Status, it.Like = "held", k
 		}
@@ -448,6 +463,10 @@ func (a *App) ixBuildModel(ctx context.Context) (*ixModel, error) {
 			root = u.find(it.Key)
 		case it.Like != "":
 			root = u.find(it.Like)
+		case it.Ident != "" && identKey[it.Ident] != "":
+			root = u.find(identKey[it.Ident]) // the same Telegram file is saved elsewhere
+		case it.Ident != "":
+			root = "t:" + it.Ident // copies of one Telegram file, none saved yet
 		default:
 			root = "m:" + it.Group + ":" + strconv.Itoa(it.Msg)
 		}

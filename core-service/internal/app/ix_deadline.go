@@ -47,8 +47,11 @@ type ixDeadlineInfo struct {
 	Mode       string           `json:"mode"`   // auto, on, off
 	Active     bool             `json:"active"` // smaller files are going first now
 	Until      int64            `json:"until,omitempty"`
-	LeftFiles  int              `json:"leftFiles"`
+	LeftFiles  int              `json:"leftFiles"` // in the download queue now
 	LeftBytes  int64            `json:"leftBytes"`
+	ToGetFiles int              `json:"toGetFiles"` // every distinct file not downloaded yet (copies counted once), queued or not
+	ToGetBytes int64            `json:"toGetBytes"`
+	Copies     int              `json:"copies"`   // not downloaded, but the same Telegram file is saved or queued elsewhere
 	Rate24h    float64          `json:"rate24h"`  // bytes a second over the last day
 	Rate1h     float64          `json:"rate1h"`   // over the last hour
 	EtaSec     int64            `json:"etaSec"`   // at the day's rate; 0: unknown
@@ -78,9 +81,40 @@ func (a *App) ixDeadlineEstimate(ctx context.Context, withLoss bool) ixDeadlineI
 		return float64(bytes) / since.Seconds()
 	}
 	d.Rate24h, d.Rate1h = rate(24*time.Hour), rate(time.Hour)
+	// The queue holds only what rescans have reached so far: what is left
+	// is every file seen in messages and not downloaded, a copy counted
+	// once (the browser's model knows which are copies).
+	need := d.LeftBytes
+	if m := a.ixModelLast(); m != nil {
+		for ci := range m.Clusters {
+			saved, wanted := false, false
+			var size int64
+			missing := 0
+			for _, ii := range m.Clusters[ci].Items {
+				it := &m.Items[ii]
+				if it.Key != "" {
+					saved = true
+				}
+				if it.Status == "missing" {
+					wanted = true
+					missing++
+					size = max(size, it.Size)
+				}
+			}
+			switch {
+			case saved:
+				d.Copies += missing
+			case wanted:
+				d.ToGetFiles++
+				d.ToGetBytes += size
+				d.Copies += missing - 1
+			}
+		}
+		need = max(need, d.ToGetBytes)
+	}
 	d.Finishes = "unknown"
 	if d.Rate24h > 0 {
-		d.EtaSec = int64(float64(d.LeftBytes) / d.Rate24h)
+		d.EtaSec = int64(float64(need) / d.Rate24h)
 		if d.Until > 0 {
 			d.Finishes = map[bool]string{true: "yes", false: "no"}[now.Unix()+d.EtaSec < d.Until]
 		}
@@ -181,7 +215,7 @@ func ixDeadlineActive(d ixDeadlineInfo) bool {
 	case "off":
 		return false
 	}
-	return d.Until > 0 && d.Finishes != "yes" && d.LeftFiles > 0
+	return d.Until > 0 && d.Finishes != "yes" && (d.LeftFiles > 0 || d.ToGetFiles > 0)
 }
 
 func (a *App) ixRunDeadline(ctx context.Context) {
