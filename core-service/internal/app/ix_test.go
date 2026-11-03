@@ -190,7 +190,6 @@ func TestIxQueueRescansWholeGroupAndRecordsEveryMessage(t *testing.T) {
 	}
 	deadline := time.Now().Add(10 * time.Second)
 	var st ixQueueState
-	sawMessagesPass := false
 	for time.Now().Before(deadline) {
 		if err = a.ixQueueStep(ctx, a.ixDeps()); err != nil {
 			t.Fatal(err)
@@ -198,22 +197,30 @@ func TestIxQueueRescansWholeGroupAndRecordsEveryMessage(t *testing.T) {
 		if st, err = a.ixLoadQueue(ctx); err != nil {
 			t.Fatal(err)
 		}
-		if len(st.Items) == 1 && st.Items[0].Phase == ixPhaseFiles && st.Items[0].State == "waiting" {
-			// Between the passes: the messages pass queued no download.
-			sawMessagesPass = true
-			var queued int
-			a.db.Reader.QueryRow(`SELECT count(*) FROM tgdl_work`).Scan(&queued)
-			if queued != 0 {
-				t.Fatalf("the messages pass queued %d download(s)", queued)
-			}
-		}
 		if len(st.Items) == 1 && st.Items[0].State == "done" {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if !sawMessagesPass {
-		t.Fatal("the group did not get a separate messages pass")
+	// Two backfills: the messages pass queued nothing, the files pass the two files.
+	var passes []string
+	var jobIDs []string
+	if rows, err := a.db.Reader.Query(`SELECT job_id FROM ix_walks WHERE group_id=? ORDER BY started_at, rowid`, group); err == nil {
+		for rows.Next() {
+			var id string
+			if rows.Scan(&id) == nil {
+				jobIDs = append(jobIDs, id)
+			}
+		}
+		rows.Close()
+	}
+	for _, id := range jobIDs {
+		if j, ok := a.ixHistoryJob(ctx, id); ok {
+			passes = append(passes, fmt.Sprintf("messagesOnly=%v processed=%d downloaded=%d", j.MessagesOnly, j.Processed, j.Downloaded))
+		}
+	}
+	if strings.Join(passes, "; ") != "messagesOnly=true processed=3 downloaded=0; messagesOnly=false processed=3 downloaded=2" {
+		t.Fatalf("passes: %v", passes)
 	}
 	if len(st.Items) != 1 || st.Items[0].State != "done" || st.Items[0].Phase != ixPhaseFiles || st.Items[0].Messages != 3 || st.Items[0].Missing != 2 || st.Items[0].Processed != 3 {
 		t.Fatalf("queue=%+v", st)
