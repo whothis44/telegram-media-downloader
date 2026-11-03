@@ -44,6 +44,14 @@ func registerIxBrowseRoutes(mux *http.ServeMux, a *App) {
 	mux.Handle("POST /api/ix/freeze/check", h(a.handleIxFreezeCheck))
 	mux.Handle("GET /api/ix/diagnostics", h(a.handleIxDiagnostics))
 	registerIxSetRoutes(mux, a)
+	mux.Handle("GET /api/ix/browse/people", h(a.handleIxPeople))
+	mux.Handle("GET /api/ix/browse/person", h(a.handleIxPerson))
+	mux.Handle("POST /api/ix/browse/person/{id}", h(a.handleIxPersonChange))
+	mux.Handle("GET /api/ix/face", h(a.handleIxFace))
+	mux.Handle("GET /api/ix/browse/extra", h(a.handleIxExtra))
+	mux.Handle("GET /api/ix/browse/things", h(a.handleIxThings))
+	mux.Handle("POST /api/ix/stt/check", h(a.handleIxSTTCheck))
+	mux.Handle("GET /api/ix/deadline", h(a.handleIxDeadline))
 }
 
 func (a *App) handleIxBrowsePage(w http.ResponseWriter, _ *http.Request) {
@@ -294,6 +302,7 @@ type ixFeedQuery struct {
 	Dups       bool
 	Status     string
 	Collection int64
+	Person     int64
 	From, To   int64
 	Cursor     int
 	Limit      int
@@ -304,6 +313,7 @@ func ixParseFeed(r *http.Request) ixFeedQuery {
 	f := ixFeedQuery{View: q.Get("view"), Group: q.Get("group"), Category: q.Get("category"), Type: q.Get("type"), Sort: q.Get("sort"), Q: strings.TrimSpace(q.Get("q")),
 		Dups: q.Get("dups") == "1", Status: q.Get("status")}
 	f.Collection, _ = strconv.ParseInt(q.Get("collection"), 10, 64)
+	f.Person, _ = strconv.ParseInt(q.Get("person"), 10, 64)
 	f.From, _ = strconv.ParseInt(q.Get("from"), 10, 64)
 	f.To, _ = strconv.ParseInt(q.Get("to"), 10, 64)
 	f.Cursor, _ = strconv.Atoi(q.Get("cursor"))
@@ -347,6 +357,8 @@ func (a *App) ixSearchPosts(ctx context.Context, m *ixModel, q string) map[int32
 		like := "%" + strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(q) + "%"
 		collect(`SELECT group_id, message_id FROM ix_messages WHERE text LIKE ? ESCAPE '\' LIMIT 20000`, like)
 	}
+	// Text read from pictures and speech written out.
+	a.ixSearchMediaText(ctx, m, q, out)
 	// File names too.
 	lower := strings.ToLower(q)
 	for i := range m.Items {
@@ -370,6 +382,19 @@ func (m *ixModel) postMatches(pi int32, f ixFeedQuery, hits map[int32]bool) bool
 	}
 	if hits != nil && !hits[pi] {
 		return false
+	}
+	if f.Person > 0 {
+		keys := m.PersonKeys[f.Person]
+		found := false
+		for _, ii := range p.Items {
+			if c := m.Items[ii].Cluster; c >= 0 && int(c) < len(m.Clusters) && keys[m.Items[m.Clusters[c].Canon].Key] {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
 	}
 	if f.Dups && (p.Family < 0 || len(m.Families[p.Family].Posts) < 2) {
 		return false

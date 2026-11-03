@@ -46,6 +46,7 @@ func (a *App) ixAlertConditions(ctx context.Context, s ixSettings, now time.Time
 			Message: "Telegram reports the account is frozen (" + acct.LastError + "). Rescans continue while history can still be read."})
 	}
 	out = append(out, ixFreezeAlerts(a.ixFreeze(ctx), now)...)
+	out = append(out, ixDeadlineAlerts(a.ixDeadlineEstimate(ctx, false), now)...)
 	for _, ev := range a.ixFixityProblems(ctx, now) {
 		out = append(out, ev)
 	}

@@ -395,6 +395,9 @@ func (a *App) ixHeldStep(ctx context.Context) error {
 		if err := a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM tgdl_work WHERE status='pending' AND paused=0 AND retry_at<=?`, time.Now().UnixMilli()).Scan(&waiting); err != nil {
 			return err
 		}
+		// Files set aside so that smaller ones go first (deadline order)
+		// still count as waiting: held copies go after them.
+		waiting += a.ixDeferredWaiting(ctx)
 		release = waiting == 0
 		if !release {
 			var last int64

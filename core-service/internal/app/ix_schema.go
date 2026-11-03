@@ -278,6 +278,68 @@ CREATE TABLE IF NOT EXISTS ix_emb_err (
 );
 `
 
+// ixSchema8: faces and people, text read from pictures, speech written
+// out, other image-recognition failures, and queue items put back for the
+// deadline.
+const ixSchema8 = `
+CREATE TABLE IF NOT EXISTS ix_people (
+	id          INTEGER PRIMARY KEY AUTOINCREMENT,
+	name        TEXT    NOT NULL DEFAULT '',
+	hidden      INTEGER NOT NULL DEFAULT 0,
+	merged_into INTEGER NOT NULL DEFAULT 0,
+	created_at  INTEGER NOT NULL DEFAULT 0,
+	updated_at  INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS ix_faces (
+	id     INTEGER PRIMARY KEY AUTOINCREMENT,
+	key    TEXT    NOT NULL,
+	model  TEXT    NOT NULL,
+	x1 REAL NOT NULL, y1 REAL NOT NULL, x2 REAL NOT NULL, y2 REAL NOT NULL, -- share of the picture's width and height
+	score  REAL    NOT NULL DEFAULT 0,
+	vec    BLOB    NOT NULL,
+	person INTEGER NOT NULL DEFAULT 0, -- 0: not grouped yet; -1: a person said it is nobody known
+	manual INTEGER NOT NULL DEFAULT 0, -- placed by a person
+	at     INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS ix_faces_key ON ix_faces(key);
+CREATE INDEX IF NOT EXISTS ix_faces_person ON ix_faces(person);
+CREATE TABLE IF NOT EXISTS ix_face_done (
+	key   TEXT PRIMARY KEY,
+	model TEXT NOT NULL,
+	faces INTEGER NOT NULL DEFAULT 0,
+	at    INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS ix_ocr (
+	key   TEXT PRIMARY KEY,
+	model TEXT NOT NULL,
+	text  TEXT NOT NULL DEFAULT '',
+	at    INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS ix_stt (
+	key      TEXT PRIMARY KEY,
+	model    TEXT NOT NULL,
+	language TEXT NOT NULL DEFAULT '',
+	text     TEXT NOT NULL DEFAULT '',
+	segments TEXT NOT NULL DEFAULT '', -- JSON: [[start_s, end_s, text], ...]
+	at       INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS ix_ml_err (
+	task  TEXT NOT NULL,
+	key   TEXT NOT NULL,
+	model TEXT NOT NULL,
+	error TEXT NOT NULL DEFAULT '',
+	tries INTEGER NOT NULL DEFAULT 0,
+	at    INTEGER NOT NULL DEFAULT 0,
+	PRIMARY KEY (task, key)
+);
+CREATE TABLE IF NOT EXISTS ix_deferred ( -- queue items put back so smaller ones go first
+	work_id     INTEGER PRIMARY KEY,
+	band        INTEGER NOT NULL,
+	deferred_at INTEGER NOT NULL DEFAULT 0,
+	released_at INTEGER NOT NULL DEFAULT 0
+);
+`
+
 // ixAddColumns adds the columns a table lacks.
 func ixAddColumns(ctx context.Context, db *sql.DB, table string, cols [][2]string) error {
 	for _, col := range cols {
@@ -302,6 +364,9 @@ func ixEnsureSchema(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	if _, err := db.ExecContext(ctx, ixSchema7); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, ixSchema8); err != nil {
 		return err
 	}
 	if err := ixAddColumns(ctx, db, "ix_moves", [][2]string{{"rows", "TEXT NOT NULL DEFAULT ''"}, {"src_stored", "TEXT NOT NULL DEFAULT ''"}}); err != nil {

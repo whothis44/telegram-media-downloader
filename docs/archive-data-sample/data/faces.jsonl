@@ -1,0 +1,3 @@
+{"face":1,"file":{"message_id":130,"cluster":16,"sha256":"1e88095a1d3c9b839139732ec5384a1199f825ffe1e692d3e0671adf8335a08b","path":"Riverside Cycling Club/images/2026-03-14_130.jpg","status":"ok"},"box":[0.42,0.2,0.54,0.45],"score":0.93,"person":1}
+{"face":2,"file":{"message_id":131,"cluster":17,"sha256":"cdebfde30bf0481ac91f14dbdbcabceecb99df18718b53a3b7fbf42db2612eb9","path":"Riverside Cycling Club/images/2026-03-14_131.jpg","status":"ok"},"box":[0.18,0.2,0.3,0.45],"score":0.93,"person":1}
+{"face":3,"file":{"message_id":223,"cluster":24,"sha256":"ea0cfeba53e94428bf626113e932b30272cc177e494870941374a4d35c52c460","path":"Trail Builders Forum/images/2026-03-14_223.jpg","status":"ok"},"box":[0.55,0.2,0.67,0.45],"score":0.93,"person":1}

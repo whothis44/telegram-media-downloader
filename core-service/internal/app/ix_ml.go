@@ -154,7 +154,17 @@ func (c *ixMLClient) embed(ctx context.Context, image []byte, text string) ([]fl
 	if image == nil {
 		kind = "textual"
 	}
-	entries, _ := json.Marshal(map[string]any{"clip": map[string]any{kind: map[string]any{"modelName": c.model, "options": map[string]any{}}}})
+	raw, err := c.predict(ctx, map[string]any{"clip": map[string]any{kind: map[string]any{"modelName": c.model, "options": map[string]any{}}}}, image, text)
+	if err != nil {
+		return nil, err
+	}
+	return ixMLParse(raw)
+}
+
+// predict sends one request to /predict: the tasks as JSON, and a picture
+// or a text.
+func (c *ixMLClient) predict(ctx context.Context, task map[string]any, image []byte, text string) ([]byte, error) {
+	entries, _ := json.Marshal(task)
 	var body bytes.Buffer
 	w := multipart.NewWriter(&body)
 	_ = w.WriteField("entries", string(entries))
@@ -182,7 +192,7 @@ func (c *ixMLClient) embed(ctx context.Context, image []byte, text string) ([]fl
 		return nil, ixMLUnreachable{err}
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 	if err != nil {
 		return nil, ixMLUnreachable{err}
 	}
@@ -203,7 +213,7 @@ func (c *ixMLClient) embed(ctx context.Context, image []byte, text string) ([]fl
 		}
 		return nil, err
 	}
-	return ixMLParse(raw)
+	return raw, nil
 }
 
 // ixMLUnreachable marks errors of the service itself (not of one picture).
@@ -274,31 +284,53 @@ type ixEmbStore struct {
 }
 
 type ixMLBox struct {
-	store    ixEmbStore
-	mu       sync.Mutex
-	st       ixMLStatus
-	after    int32 // cluster index the worker reached in this pass
-	upToDate string
+	store        ixEmbStore
+	faces        ixFaceStore
+	mu           sync.Mutex
+	st           ixMLStatus
+	after        map[string]int32           // task -> cluster index reached in this pass
+	notes        map[string]ixMLTaskNote    // task -> whether its service answered, its last error
+	done         map[string]map[string]bool // task -> files looked at (faces, text, speech)
+	doneModel    map[string]string
+	regroupAfter int64 // the last ungrouped face given another chance
 }
 
 type ixMLStatus struct {
-	Enabled   bool   `json:"enabled"`
-	URL       string `json:"url,omitempty"`
-	Model     string `json:"model,omitempty"`
-	Reachable bool   `json:"reachable"`
-	Running   bool   `json:"running"`
-	Embedded  int    `json:"embedded"`
+	Enabled   bool                      `json:"enabled"`
+	URL       string                    `json:"url,omitempty"`
+	Model     string                    `json:"model,omitempty"`
+	Reachable bool                      `json:"reachable"`
+	Running   bool                      `json:"running"`
+	Embedded  int                       `json:"embedded"`
+	Pending   int                       `json:"pending"`
+	Failed    int                       `json:"failed"`
+	LastError string                    `json:"lastError,omitempty"`
+	CheckedAt int64                     `json:"checkedAt,omitempty"`
+	Version   string                    `json:"immichVersion"`
+	Tasks     map[string]ixMLTaskStatus `json:"tasks"`
+	Speech    ixMLTaskStatus            `json:"speech"`
+}
+
+type ixMLTaskNote struct {
+	reachable bool
+	msg       string
+}
+
+// ixMLTaskStatus: progress of one kind of work (faces, text, speech).
+type ixMLTaskStatus struct {
+	On        bool   `json:"on"`
+	Done      int    `json:"done"`
 	Pending   int    `json:"pending"`
 	Failed    int    `json:"failed"`
+	Reachable bool   `json:"reachable"`
 	LastError string `json:"lastError,omitempty"`
-	CheckedAt int64  `json:"checkedAt,omitempty"`
-	Version   string `json:"immichVersion"`
 }
 
 var ixMLState sync.Map // *App -> *ixMLBox
 
 func (a *App) ixMLBox() *ixMLBox {
-	v, _ := ixMLState.LoadOrStore(a, &ixMLBox{store: ixEmbStore{index: map[string]int32{}}})
+	v, _ := ixMLState.LoadOrStore(a, &ixMLBox{store: ixEmbStore{index: map[string]int32{}}, faces: ixFaceStore{index: map[int64]int32{}},
+		after: map[string]int32{}, notes: map[string]ixMLTaskNote{}, done: map[string]map[string]bool{}, doneModel: map[string]string{}})
 	return v.(*ixMLBox)
 }
 
@@ -517,45 +549,146 @@ func (a *App) ixRunML(ctx context.Context) {
 		if err != nil || m == nil {
 			continue
 		}
-		wait = a.ixMLRound(ctx, c, m, 2000)
+		// Each kind of work takes its turn: what a picture shows first (it
+		// powers search and sets), then faces, then text.
+		wait = time.Minute
+		for _, t := range a.ixMLTasks(ctx, c, s) {
+			w := a.ixMLRoundTask(ctx, t, m, 500)
+			if w > time.Minute { // the service is down or failing: stop here
+				wait = w
+				break
+			}
+			if w < wait {
+				wait = w
+			}
+		}
 		a.ixMLCount(ctx, m)
 	}
 }
 
-// ixMLRound embeds up to n files and says when to try again.
+// ixMLTask is one kind of work done once per distinct file.
+type ixMLTask struct {
+	name     string
+	model    string
+	errTable string // where single files' failures are kept
+	wanted   func(it *ixMItem) bool
+	done     func(key string) bool
+	run      func(ctx context.Context, it *ixMItem) error
+	test     func(ctx context.Context) error // does the service work at all
+	note     func(reachable bool, msg string)
+	finish   func(ctx context.Context) // after a round that did something
+}
+
+// ixMLTasks lists the image-recognition work that is switched on.
+func (a *App) ixMLTasks(ctx context.Context, c *ixMLClient, s ixSettings) []*ixMLTask {
+	out := []*ixMLTask{a.ixClipTask(c)}
+	if s.MLFaces {
+		out = append(out, a.ixFaceTask(ctx, c))
+	}
+	if s.MLText {
+		out = append(out, a.ixOCRTask(ctx, c))
+	}
+	return out
+}
+
+func (a *App) ixClipTask(c *ixMLClient) *ixMLTask {
+	box := a.ixMLBox()
+	return &ixMLTask{
+		name: "clip", model: c.model, errTable: "ix_emb_err",
+		wanted: func(it *ixMItem) bool { return it.Type == "photo" || it.Type == "video" },
+		done:   box.store.has,
+		run:    func(ctx context.Context, it *ixMItem) error { return a.ixMLEmbedItem(ctx, c, it) },
+		test: func(ctx context.Context) error {
+			_, err := c.embed(ctx, ixMLTestPicture(), "")
+			return err
+		},
+		note: a.ixMLNote,
+	}
+}
+
+// ixMLDoneSet is the set of files a task has looked at, read once per
+// model and kept up to date as files are done.
+func (a *App) ixMLDoneSet(ctx context.Context, task, model, query string) map[string]bool {
+	box := a.ixMLBox()
+	box.mu.Lock()
+	defer box.mu.Unlock()
+	if box.doneModel[task] == model && box.done[task] != nil {
+		return box.done[task]
+	}
+	set := map[string]bool{}
+	if rows, err := a.db.Reader.QueryContext(ctx, query, model); err == nil {
+		for rows.Next() {
+			var k string
+			if rows.Scan(&k) == nil {
+				set[k] = true
+			}
+		}
+		rows.Close()
+	}
+	box.done[task], box.doneModel[task] = set, model
+	return set
+}
+
+func (a *App) ixMLMarkDone(task, key string) {
+	box := a.ixMLBox()
+	box.mu.Lock()
+	if box.done[task] != nil {
+		box.done[task][key] = true
+	}
+	box.mu.Unlock()
+}
+
+func (a *App) ixMLIsDone(task string) func(string) bool {
+	return func(key string) bool {
+		box := a.ixMLBox()
+		box.mu.Lock()
+		defer box.mu.Unlock()
+		return box.done[task][key]
+	}
+}
+
+// ixMLRound embeds up to n files (tests and the connection check use it).
 func (a *App) ixMLRound(ctx context.Context, c *ixMLClient, m *ixModel, n int) time.Duration {
-	a.ixMLNote(true, "")
-	r := &ixMLRun{failed: a.ixMLFailedKeys(ctx, c.model), tried: map[string]bool{}, noFFmpeg: seekbar.FFmpegPath() == ""}
+	return a.ixMLRoundTask(ctx, a.ixClipTask(c), m, n)
+}
+
+// ixMLRoundTask does up to n files of one task and says when to try again.
+func (a *App) ixMLRoundTask(ctx context.Context, t *ixMLTask, m *ixModel, n int) time.Duration {
+	t.note(true, "")
+	r := &ixMLRun{failed: a.ixMLFailedKeys(ctx, t), tried: map[string]bool{}, noFFmpeg: seekbar.FFmpegPath() == ""}
 	defer func() {
 		// Failures of single files are recorded once the service is known
-		// to work: a file worked in this round, or a test picture does.
+		// to work: a file worked in this round, or a test request does.
 		if len(r.pending) > 0 && !r.ok {
-			if _, err := c.embed(ctx, ixMLTestPicture(), ""); err != nil {
+			if err := t.test(ctx); err != nil {
 				r.pending = nil
 				return
 			}
 		}
-		a.ixMLFlush(ctx, c.model, r)
+		a.ixMLFlush(ctx, t, r)
+		if r.ok && t.finish != nil {
+			t.finish(ctx)
+		}
 	}()
 	for i := 0; i < n && ctx.Err() == nil; i++ {
-		worked, err := a.ixMLStep(ctx, c, m, r)
+		worked, err := a.ixMLStep(ctx, t, m, r)
 		var down ixMLUnreachable
 		switch {
 		case errors.Is(err, errIxMLOffline):
 			return 5 * time.Minute // the NAS is offline
 		case errors.As(err, &down):
 			r.pending = nil // not the files' fault
-			a.ixMLNote(false, err.Error())
+			t.note(false, err.Error())
 			return 5 * time.Minute
 		case errors.Is(err, errIxMLStreak):
 			// Many files in a row failed and none worked: the service or
 			// its model is at fault, not the files.
 			msg := fmt.Sprintf("%d files in a row could not be looked at (%s); trying again in 30 minutes", len(r.pending), r.last)
 			r.pending = nil
-			a.ixMLNote(true, msg)
+			t.note(true, msg)
 			return 30 * time.Minute
 		case err != nil:
-			a.ixLog("image recognition: %v", err)
+			a.ixLog("image recognition (%s): %v", t.name, err)
 			return time.Minute
 		case !worked:
 			return time.Minute
@@ -598,42 +731,52 @@ type ixMLRun struct {
 	ok       bool // a file worked in this round
 }
 
-func (a *App) ixMLFlush(ctx context.Context, model string, r *ixMLRun) {
+func (a *App) ixMLFlush(ctx context.Context, t *ixMLTask, r *ixMLRun) {
 	for _, f := range r.pending {
-		_ = a.ixMLFail(ctx, model, f[0], f[1])
+		_ = a.ixMLFail(ctx, t, f[0], f[1])
 	}
 	r.pending = nil
+}
+
+// ixMLTaskNoter records how a task's service answered.
+func (a *App) ixMLTaskNoter(task string) func(bool, string) {
+	return func(reachable bool, msg string) {
+		box := a.ixMLBox()
+		box.mu.Lock()
+		box.notes[task] = ixMLTaskNote{reachable, msg}
+		box.mu.Unlock()
+	}
 }
 
 func (a *App) ixMLNote(reachable bool, msg string) {
 	box := a.ixMLBox()
 	box.mu.Lock()
 	defer box.mu.Unlock()
+	box.notes["clip"] = ixMLTaskNote{reachable, msg}
 	box.st.Reachable = reachable
 	box.st.LastError = msg
 	box.st.CheckedAt = time.Now().UnixMilli()
 }
 
-// ixMLWanted: a duplicate set gets one embedding, of its best copy, when it
-// is a downloaded photo or video.
+// ixMLWanted: a duplicate set gets looked at once, by its best copy, when it
+// is downloaded.
 func ixMLWanted(m *ixModel, c int) (int32, bool) {
 	cl := &m.Clusters[c]
 	if cl.Canon < 0 || int(cl.Canon) >= len(m.Items) {
 		return 0, false
 	}
 	it := &m.Items[cl.Canon]
-	if it.Key == "" || it.Path == "" || (it.Type != "photo" && it.Type != "video") {
+	if it.Key == "" || it.Path == "" {
 		return 0, false
 	}
 	return cl.Canon, true
 }
 
-// ixMLStep embeds the next duplicate set without one; false when none is
-// left.
-func (a *App) ixMLStep(ctx context.Context, c *ixMLClient, m *ixModel, r *ixMLRun) (bool, error) {
+// ixMLStep does the next file of a task; false when none is left.
+func (a *App) ixMLStep(ctx context.Context, t *ixMLTask, m *ixModel, r *ixMLRun) (bool, error) {
 	box := a.ixMLBox()
 	box.mu.Lock()
-	start := box.after
+	start := box.after[t.name]
 	box.mu.Unlock()
 	if int(start) > len(m.Clusters) {
 		start = 0 // the model was rebuilt smaller
@@ -644,15 +787,15 @@ func (a *App) ixMLStep(ctx context.Context, c *ixMLClient, m *ixModel, r *ixMLRu
 			continue
 		}
 		it := &m.Items[ii]
-		if box.store.has(it.Key) || r.failed[it.Key] || r.tried[it.Key] || (it.Type == "video" && r.noFFmpeg) {
+		if !t.wanted(it) || t.done(it.Key) || r.failed[it.Key] || r.tried[it.Key] || (it.Type != "photo" && r.noFFmpeg) {
 			continue
 		}
 		r.tried[it.Key] = true // once per round
 		box.mu.Lock()
-		box.after = int32(ci + 1)
+		box.after[t.name] = int32(ci + 1)
 		box.st.Running = true
 		box.mu.Unlock()
-		err := a.ixMLEmbedItem(ctx, c, it)
+		err := t.run(ctx, it)
 		box.mu.Lock()
 		box.st.Running = false
 		box.mu.Unlock()
@@ -664,21 +807,21 @@ func (a *App) ixMLStep(ctx context.Context, c *ixMLClient, m *ixModel, r *ixMLRu
 				return true, errIxMLStreak
 			}
 			if r.ok {
-				a.ixMLFlush(ctx, c.model, r)
+				a.ixMLFlush(ctx, t, r)
 			}
 			return true, nil
 		}
 		if err == nil {
 			r.ok = true
-			a.ixMLFlush(ctx, c.model, r)
+			a.ixMLFlush(ctx, t, r)
 		}
 		return true, err
 	}
 	box.mu.Lock()
-	box.after = 0
+	box.after[t.name] = 0
 	box.mu.Unlock()
 	if start > 0 {
-		return a.ixMLStep(ctx, c, m, r) // once more from the start
+		return a.ixMLStep(ctx, t, m, r) // once more from the start
 	}
 	return false, nil
 }
@@ -688,9 +831,13 @@ type ixMLFileErr struct{ msg string }
 
 func (e ixMLFileErr) Error() string { return e.msg }
 
-func (a *App) ixMLFailedKeys(ctx context.Context, model string) map[string]bool {
+func (a *App) ixMLFailedKeys(ctx context.Context, t *ixMLTask) map[string]bool {
 	out := map[string]bool{}
-	rows, err := a.db.Reader.QueryContext(ctx, `SELECT key FROM ix_emb_err WHERE model=? AND tries>=?`, model, ixMLMaxTries)
+	q, args := `SELECT key FROM ix_emb_err WHERE model=? AND tries>=?`, []any{t.model, ixMLMaxTries}
+	if t.errTable != "ix_emb_err" {
+		q, args = `SELECT key FROM ix_ml_err WHERE task=? AND model=? AND tries>=?`, []any{t.name, t.model, ixMLMaxTries}
+	}
+	rows, err := a.db.Reader.QueryContext(ctx, q, args...)
 	if err != nil {
 		return out
 	}
@@ -704,26 +851,37 @@ func (a *App) ixMLFailedKeys(ctx context.Context, model string) map[string]bool 
 	return out
 }
 
+// ixMLFileErrOf turns an error of the service about one file into a file
+// failure, and keeps the service's own failures as they are.
+func ixMLFileErrOf(ctx context.Context, err error) error {
+	var down ixMLUnreachable
+	if err == nil || errors.As(err, &down) || ctx.Err() != nil {
+		return err
+	}
+	return ixMLFileErr{err.Error()}
+}
+
+// ixMLReadErr is a file that could not be read for a task.
+func (a *App) ixMLReadErr(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if _, rootErr := os.Stat(a.downloadsDir); rootErr != nil {
+		return errIxMLOffline
+	}
+	return ixMLFileErr{err.Error()}
+}
+
 func (a *App) ixMLEmbedItem(ctx context.Context, c *ixMLClient, it *ixMItem) error {
 	pics, err := a.ixMLPictures(ctx, it)
 	if err != nil {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if _, rootErr := os.Stat(a.downloadsDir); rootErr != nil {
-			return errIxMLOffline
-		}
-		return ixMLFileErr{err.Error()}
+		return a.ixMLReadErr(ctx, err)
 	}
 	var sum []float32
 	for _, pic := range pics {
 		v, err := c.embed(ctx, pic, "")
 		if err != nil {
-			var down ixMLUnreachable
-			if errors.As(err, &down) || ctx.Err() != nil {
-				return err
-			}
-			return ixMLFileErr{err.Error()}
+			return ixMLFileErrOf(ctx, err)
 		}
 		if sum == nil {
 			sum = make([]float32, len(v))
@@ -738,7 +896,13 @@ func (a *App) ixMLEmbedItem(ctx context.Context, c *ixMLClient, it *ixMItem) err
 	if !ixNormalise(sum) {
 		return ixMLFileErr{"an empty embedding"}
 	}
-	return a.ixMLSave(ctx, c.model, it.Key, sum)
+	if err := a.ixMLSave(ctx, c.model, it.Key, sum); err != nil {
+		return err
+	}
+	if it.Type == "photo" {
+		a.ixMLLookAlikes(ctx, it.Key)
+	}
+	return nil
 }
 
 func (a *App) ixMLSave(ctx context.Context, model, key string, v []float32) error {
@@ -761,13 +925,58 @@ func (a *App) ixMLSave(ctx context.Context, model, key string, v []float32) erro
 	return nil
 }
 
-func (a *App) ixMLFail(ctx context.Context, model, key, why string) error {
+func (a *App) ixMLFail(ctx context.Context, t *ixMLTask, key, why string) error {
 	if len(why) > 300 {
 		why = why[:300]
 	}
-	_, err := a.db.Writer.ExecContext(ctx, `INSERT INTO ix_emb_err(key,model,error,tries,at) VALUES(?,?,?,1,?)
-		ON CONFLICT(key) DO UPDATE SET model=excluded.model, error=excluded.error, tries=CASE WHEN ix_emb_err.model=excluded.model THEN ix_emb_err.tries+1 ELSE 1 END, at=excluded.at`, key, model, why, ixNowMs())
+	if t.errTable == "ix_emb_err" {
+		_, err := a.db.Writer.ExecContext(ctx, `INSERT INTO ix_emb_err(key,model,error,tries,at) VALUES(?,?,?,1,?)
+			ON CONFLICT(key) DO UPDATE SET model=excluded.model, error=excluded.error, tries=CASE WHEN ix_emb_err.model=excluded.model THEN ix_emb_err.tries+1 ELSE 1 END, at=excluded.at`, key, t.model, why, ixNowMs())
+		return err
+	}
+	_, err := a.db.Writer.ExecContext(ctx, `INSERT INTO ix_ml_err(task,key,model,error,tries,at) VALUES(?,?,?,?,1,?)
+		ON CONFLICT(task,key) DO UPDATE SET model=excluded.model, error=excluded.error, tries=CASE WHEN ix_ml_err.model=excluded.model THEN ix_ml_err.tries+1 ELSE 1 END, at=excluded.at`, t.name, key, t.model, why, ixNowMs())
 	return err
+}
+
+// ixMLLookAlikeSim: pictures this alike by recognition, not already known
+// as copies, go to the look-alike review (nothing is merged by itself).
+const ixMLLookAlikeSim = 0.975
+
+// ixMLLookAlikes queues the closest other pictures of a newly looked-at
+// picture for review.
+func (a *App) ixMLLookAlikes(ctx context.Context, key string) {
+	if !a.ixLoadSettings(ctx).MLDupes {
+		return
+	}
+	m := a.ixModelBox().model // the last model built; nil before the first
+	if m == nil {
+		return
+	}
+	ii, ok := m.ByKey[key]
+	if !ok {
+		return
+	}
+	cluster := m.Items[ii].Cluster
+	box := a.ixMLBox()
+	v := box.store.vector(key)
+	if v == nil {
+		return
+	}
+	hits := box.store.nearest(v, 3, func(k string) bool {
+		j, ok := m.ByKey[k]
+		return ok && m.Items[j].Type == "photo" && m.Items[j].Cluster != cluster
+	}, key)
+	for _, h := range hits {
+		if h.Sim < ixMLLookAlikeSim {
+			break
+		}
+		ka, kb := key, h.Key
+		if kb < ka {
+			ka, kb = kb, ka
+		}
+		_, _ = a.db.Writer.ExecContext(ctx, `INSERT OR IGNORE INTO ix_msug(key_a,key_b,kind,distance,found_at) VALUES(?,?,'photo',?,?)`, ka, kb, -float64(h.Sim), ixNowMs())
+	}
 }
 
 // ixMLPictures is what is sent for a file: a photo's grid thumbnail (or the
@@ -844,31 +1053,52 @@ func (a *App) ixMLPicturesFromDisk(ctx context.Context, it *ixMItem) ([][]byte, 
 
 // ixMLCount updates the counts shown in the status.
 func (a *App) ixMLCount(ctx context.Context, m *ixModel) {
-	box := a.ixMLBox()
 	s := a.ixLoadSettings(ctx)
-	model := s.MLModel
-	if model == "" {
-		model = ixMLDefaultModel
+	box := a.ixMLBox()
+	c := a.ixMLClientNow(ctx)
+	if c == nil {
+		c = &ixMLClient{model: ixMLModelOf(s)}
 	}
-	failed := a.ixMLFailedKeys(ctx, model)
-	embedded, pending := 0, 0
-	if m != nil {
-		for ci := range m.Clusters {
-			ii, ok := ixMLWanted(m, ci)
-			if !ok {
-				continue
-			}
-			switch k := m.Items[ii].Key; {
-			case box.store.has(k):
-				embedded++
-			case !failed[k]:
-				pending++
+	tasks := map[string]*ixMLTask{"clip": a.ixClipTask(c), "faces": a.ixFaceTask(ctx, c), "text": a.ixOCRTask(ctx, c)}
+	if sc := a.ixSTTClientNow(ctx); sc != nil {
+		tasks["speech"] = a.ixSTTTask(ctx, sc)
+	}
+	on := map[string]bool{"clip": true, "faces": s.MLFaces, "text": s.MLText, "speech": s.STTURL != ""}
+	out := map[string]ixMLTaskStatus{}
+	for name, t := range tasks {
+		failed := a.ixMLFailedKeys(ctx, t)
+		st := ixMLTaskStatus{On: on[name], Failed: len(failed)}
+		if m != nil {
+			for ci := range m.Clusters {
+				ii, ok := ixMLWanted(m, ci)
+				if !ok || !t.wanted(&m.Items[ii]) {
+					continue
+				}
+				switch k := m.Items[ii].Key; {
+				case t.done(k):
+					st.Done++
+				case !failed[k]:
+					st.Pending++
+				}
 			}
 		}
+		out[name] = st
 	}
 	box.mu.Lock()
-	box.st.Embedded, box.st.Pending, box.st.Failed = embedded, pending, len(failed)
+	clip := out["clip"]
+	box.st.Embedded, box.st.Pending, box.st.Failed = clip.Done, clip.Pending, clip.Failed
+	delete(out, "clip")
+	box.st.Speech = out["speech"]
+	delete(out, "speech")
+	box.st.Tasks = out
 	box.mu.Unlock()
+}
+
+func ixMLModelOf(s ixSettings) string {
+	if s.MLModel == "" {
+		return ixMLDefaultModel
+	}
+	return s.MLModel
 }
 
 func (a *App) ixMLStatusNow(ctx context.Context) ixMLStatus {
@@ -876,14 +1106,32 @@ func (a *App) ixMLStatusNow(ctx context.Context) ixMLStatus {
 	box := a.ixMLBox()
 	box.mu.Lock()
 	st := box.st
+	st.Tasks = map[string]ixMLTaskStatus{}
+	for k, v := range box.st.Tasks {
+		n := box.notes[k]
+		v.Reachable, v.LastError = n.reachable, n.msg
+		st.Tasks[k] = v
+	}
+	n := box.notes["speech"]
+	st.Speech.Reachable, st.Speech.LastError = n.reachable, n.msg
+	notes := map[string]ixMLTaskNote{}
+	for k, v := range box.notes {
+		notes[k] = v
+	}
 	box.mu.Unlock()
 	st.Enabled = s.MLURL != ""
 	st.URL = s.MLURL
-	st.Model = s.MLModel
-	if st.Model == "" {
-		st.Model = ixMLDefaultModel
-	}
+	st.Model = ixMLModelOf(s)
 	st.Version = ixMLImmichVersion
+	for k, on := range map[string]bool{"faces": s.MLFaces, "text": s.MLText} {
+		t := st.Tasks[k]
+		t.On = on && st.Enabled
+		if n, ok := notes[k]; ok {
+			t.Reachable, t.LastError = n.reachable, n.msg
+		}
+		st.Tasks[k] = t
+	}
+	st.Speech.On = s.STTURL != ""
 	return st
 }
 

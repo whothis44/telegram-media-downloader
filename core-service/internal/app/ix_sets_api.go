@@ -151,8 +151,8 @@ func (a *App) handleIxSimilar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	text, like := strings.TrimSpace(q.Get("q")), strings.TrimSpace(q.Get("like"))
-	if text == "" && like == "" {
+	text, like, thing := strings.TrimSpace(q.Get("q")), strings.TrimSpace(q.Get("like")), strings.TrimSpace(q.Get("thing"))
+	if text == "" && like == "" && thing == "" {
 		writeJSONError(w, http.StatusBadRequest, "describe what to look for, or choose a file")
 		return
 	}
@@ -167,7 +167,13 @@ func (a *App) handleIxSimilar(w http.ResponseWriter, r *http.Request) {
 	if typ != "photo" && typ != "video" {
 		typ = ""
 	}
-	hits, err := a.ixMLSearch(ctx, m, text, like, limit, ixMLFilter(m, q.Get("group"), q.Get("category"), typ))
+	keep := ixMLFilter(m, q.Get("group"), q.Get("category"), typ)
+	var hits []ixEmbHit
+	if thing != "" {
+		hits, err = a.ixThingHits(ctx, thing, limit, keep)
+	} else {
+		hits, err = a.ixMLSearch(ctx, m, text, like, limit, keep)
+	}
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
@@ -207,6 +213,24 @@ func (a *App) handleIxMLCheck(w http.ResponseWriter, r *http.Request) {
 		a.ixMLNote(true, err.Error())
 		writeJSONError(w, http.StatusBadGateway, err.Error())
 		return
+	}
+	// Faces and text reading, when on, load their own models.
+	st := a.ixLoadSettings(ctx)
+	if st.MLFaces {
+		if _, err := c.faces(ctx, ixMLTestPicture()); err != nil {
+			a.ixMLTaskNoter("faces")(false, err.Error())
+			writeJSONError(w, http.StatusBadGateway, "faces: "+err.Error())
+			return
+		}
+		a.ixMLTaskNoter("faces")(true, "")
+	}
+	if st.MLText {
+		if _, err := c.ocr(ctx, ixOCRModelOf(st), ixMLTestPicture()); err != nil {
+			a.ixMLTaskNoter("text")(false, err.Error())
+			writeJSONError(w, http.StatusBadGateway, "text reading: "+err.Error())
+			return
+		}
+		a.ixMLTaskNoter("text")(true, "")
 	}
 	a.ixMLNote(true, "")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": a.ixMLStatusNow(ctx)})

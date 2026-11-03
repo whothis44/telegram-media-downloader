@@ -94,22 +94,24 @@ type ixMCluster struct {
 }
 
 type ixModel struct {
-	Built     time.Time
-	Took      time.Duration
-	Stamp     string
-	Items     []ixMItem
-	Posts     []ixMPost
-	Families  []ixMFamily
-	Clusters  []ixMCluster
-	ByMsg     map[string]int32 // "group:msg" -> post
-	ByKey     map[string]int32 // file key -> an item with it
-	ByID      map[int64]int32  // download ID -> item
-	GroupName map[string]string
-	GroupCat  map[string]string
-	Groups    []string
-	Suggest   map[string]ixCatSuggest // a category per chat, from what it posts
-	Sets      []ixMSet                // families that share pictures, oldest first
-	FamSet    []int32                 // family -> set (-1: none)
+	Built      time.Time
+	Took       time.Duration
+	Stamp      string
+	Items      []ixMItem
+	Posts      []ixMPost
+	Families   []ixMFamily
+	Clusters   []ixMCluster
+	ByMsg      map[string]int32 // "group:msg" -> post
+	ByKey      map[string]int32 // file key -> an item with it
+	ByID       map[int64]int32  // download ID -> item
+	GroupName  map[string]string
+	GroupCat   map[string]string
+	Groups     []string
+	Suggest    map[string]ixCatSuggest   // a category per chat, from what it posts
+	Sets       []ixMSet                  // families that share pictures, oldest first
+	PersonKeys map[int64]map[string]bool // person -> files they appear in (best copies)
+	PersonName map[int64]string
+	FamSet     []int32 // family -> set (-1: none)
 }
 
 type ixModelBox struct {
@@ -169,6 +171,8 @@ func (a *App) ixModelStamp(ctx context.Context) string {
 		`SELECT COUNT(*)||'/'||COALESCE(MAX(at),0) FROM ix_org_set_posts`,
 		`SELECT COUNT(*)||'/'||COALESCE(MAX(at),0) FROM ix_org_set_items`,
 		`SELECT COUNT(*)/500 FROM ix_emb`, // the sets use embeddings: rebuild every 500 new ones, not for each
+		`SELECT COUNT(*)||'/'||COALESCE(SUM(person),0)||'/'||COALESCE(MAX(id),0) FROM ix_faces WHERE person<>0`,
+		`SELECT COALESCE(MAX(updated_at),0)||'/'||COUNT(*) FROM ix_people`,
 		`SELECT COUNT(*)||'/'||COALESCE(MAX(released_at),0)||'/'||COALESCE(MAX(held_at),0) FROM ix_held`,
 	} {
 		var s string
@@ -484,7 +488,8 @@ func (a *App) ixBuildModel(ctx context.Context) (*ixModel, error) {
 	}
 	ixAssignFamilies(m)
 	m.Suggest = ixContentSuggestions(m)
-	ixAssignSets(m, a.ixLoadSetFixes(ctx), a.ixEmbSim())
+	a.ixLoadPeople(ctx, m)
+	ixAssignSets(m, a.ixLoadSetFixes(ctx), ixSetLikeness(m, a.ixEmbSim()))
 	m.Built = time.Now()
 	m.Took = time.Since(start)
 	return m, nil

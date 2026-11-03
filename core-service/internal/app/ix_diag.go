@@ -151,6 +151,7 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 		{"video index errors", `SELECT error, COUNT(*) FROM ix_vfp WHERE status='error' GROUP BY error ORDER BY 2 DESC LIMIT 10`},
 		{"integrity results", `SELECT result, COUNT(*) FROM ix_fixity GROUP BY result ORDER BY 2 DESC`},
 		{"image recognition errors", `SELECT error, COUNT(*) FROM ix_emb_err GROUP BY error ORDER BY 2 DESC LIMIT 8`},
+		{"faces/text/speech errors", `SELECT task||': '||error, COUNT(*) FROM ix_ml_err GROUP BY 1 ORDER BY 2 DESC LIMIT 8`},
 		{"file plans", `SELECT state||' '||kind, COUNT(*) FROM ix_move_plans GROUP BY 1`},
 	} {
 		if rows, err := a.db.Reader.QueryContext(ctx, q.sql); err == nil {
@@ -170,6 +171,17 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 	}
 	ml := a.ixMLStatusNow(ctx)
 	line("image recognition %s (model %s, Immich %s) · reachable %v · looked at %d · to go %d · unreadable %d · running %v · last error: %s", on(ml.Enabled), ml.Model, ml.Version, ml.Reachable, ml.Embedded, ml.Pending, ml.Failed, ml.Running, r.clean(ml.LastError))
+	for _, name := range []string{"faces", "text"} {
+		t := ml.Tasks[name]
+		line("  %s %s · done %d · to go %d · unreadable %d · last error: %s", name, on(t.On), t.Done, t.Pending, t.Failed, r.clean(t.LastError))
+	}
+	line("speech to text %s · reachable %v · done %d · to go %d · unreadable %d · last error: %s", on(ml.Speech.On), ml.Speech.Reachable, ml.Speech.Done, ml.Speech.Pending, ml.Speech.Failed, r.clean(ml.Speech.LastError))
+	var people, faces, ungrouped int
+	_ = a.db.Reader.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM ix_people WHERE merged_into=0), COUNT(*), COALESCE(SUM(person=0),0) FROM ix_faces`).Scan(&people, &faces, &ungrouped)
+	line("people %d · faces %d (%d not grouped)", people, faces, ungrouped)
+	dl := a.ixDeadlineEstimate(ctx, false)
+	line("deadline order %s (active %v) · left %d files / %d MB · speed %.1f MB/h (day), %.1f MB/h (hour) · finishes %s · set aside by band %v · groups not fully read %d",
+		dl.Mode, dl.Active, dl.LeftFiles, dl.LeftBytes>>20, dl.Rate24h*3600/1e6, dl.Rate1h*3600/1e6, dl.Finishes, dl.Deferred, dl.Unscanned)
 	fx := a.ixFixityStatus(ctx)
 	line("integrity: %d files, %d checked this cycle, %d changed, %d missing, %d size differs, last %s", fx.Files, fx.Checked, fx.Changed, fx.Missing, fx.SizeOff, ixAgo(fx.LastCheck, now))
 	box := a.ixModelBox()

@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/whothis44/telegram-media-downloader/docs/archive-data-sample/schema.json",
-  "title": "Telegram archive data export, format version 4",
-  "description": "One JSON object per line in each .jsonl file. Use the $defs entry named after the file: manifest.json → manifest, groups.jsonl → group, messages/*.jsonl.gz → message, files.jsonl → file, peers.jsonl → peer, topics.jsonl → topic, near_duplicates.jsonl → nearDuplicateSet, posts.jsonl → post, families.jsonl → family, sets.jsonl → mediaSet, media_clusters.jsonl → mediaCluster, covered.jsonl → covered, entities.jsonl → entity. manifest-sha256.txt is plain text: '<sha256>  <path>' per line.",
+  "title": "Telegram archive data export, format version 5",
+  "description": "One JSON object per line in each .jsonl file. Use the $defs entry named after the file: manifest.json → manifest, groups.jsonl → group, messages/*.jsonl.gz → message, files.jsonl → file, peers.jsonl → peer, topics.jsonl → topic, near_duplicates.jsonl → nearDuplicateSet, posts.jsonl → post, families.jsonl → family, sets.jsonl → mediaSet, people.jsonl → person, faces.jsonl → face, media_text.jsonl → mediaText, media_clusters.jsonl → mediaCluster, covered.jsonl → covered, entities.jsonl → entity. manifest-sha256.txt is plain text: '<sha256>  <path>' per line.",
   "$defs": {
     "groupId": {
       "type": "string",
@@ -52,7 +52,7 @@
           "const": "telegram-archive"
         },
         "format_version": {
-          "const": 4
+          "const": 5
         },
         "exported_at": {
           "type": "string",
@@ -927,6 +927,121 @@
                 "type": "boolean"
               }
             }
+          }
+        }
+      }
+    },
+    "person": {
+      "type": "object",
+      "description": "A person found by face grouping (only when faces are switched on).",
+      "required": [
+        "person",
+        "faces",
+        "files"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "person": {
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "hidden": {
+          "type": "boolean"
+        },
+        "faces": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "files": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "face": {
+      "type": "object",
+      "description": "A face found in a picture, or in one of three frames of a video.",
+      "required": [
+        "face",
+        "file",
+        "box",
+        "score"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "face": {
+          "type": "integer"
+        },
+        "file": {
+          "$ref": "#/$defs/postFile"
+        },
+        "box": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "minItems": 4,
+          "maxItems": 4,
+          "description": "x1, y1, x2, y2 as shares of the picture's width and height."
+        },
+        "score": {
+          "type": "number"
+        },
+        "person": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "placed_by_person": {
+          "type": "boolean"
+        }
+      }
+    },
+    "mediaText": {
+      "type": "object",
+      "description": "Words in a file: text read from a picture or video frames, or speech written out.",
+      "required": [
+        "file",
+        "kind",
+        "text"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "file": {
+          "$ref": "#/$defs/postFile"
+        },
+        "kind": {
+          "enum": [
+            "picture",
+            "speech"
+          ]
+        },
+        "language": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "segments": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "prefixItems": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "minItems": 3,
+            "maxItems": 3
           }
         }
       }

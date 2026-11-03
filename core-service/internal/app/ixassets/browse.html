@@ -99,6 +99,8 @@ mark{background:#fff1a8;color:#111}
     <button class="tab" data-tab="chat">Read a chat</button>
     <button class="tab" data-tab="review">Review look-alikes<span class="n" id="n-review"></span></button>
     <button class="tab" data-tab="organise">Collections &amp; files</button>
+    <button class="tab" data-tab="people" id="tab-people" hidden>People</button>
+    <button class="tab" data-tab="things" id="tab-things" hidden>Things</button>
     <button class="tab" data-tab="entities">Links &amp; wallets</button>
   </nav>
   <span class="grow"></span>
@@ -116,7 +118,7 @@ mark{background:#fff1a8;color:#111}
           <button data-v="posts" title="Every post as it appeared in its chat">Every post</button>
           <button data-v="media" title="One tile per picture or video, duplicates folded">Media grid</button>
         </div>
-        <input class="t search" id="q" type="search" placeholder="Search captions, messages and file names">
+        <input class="t search" id="q" type="search" placeholder="Search captions, messages, file names, text in pictures and speech">
         <label class="chk" id="qml-wrap" hidden title="Search what pictures and videos show (image recognition), in any language the model knows"><input type="checkbox" id="qml"> by what they show</label>
         <select class="t" id="type"><option value="">All kinds</option><option value="photo">Pictures</option><option value="video">Videos</option><option value="album">Albums</option><option value="other">Files, audio</option></select>
         <select class="t" id="status"><option value="">Any state</option><option value="held">Held back (likely copies)</option><option value="missing">Not downloaded</option><option value="subst">Same file as another upload</option></select>
@@ -154,6 +156,14 @@ mark{background:#fff1a8;color:#111}
         <div class="row"><b>Originals of:</b> <select class="t" id="plan-orig"></select> to folder <input class="t" id="plan-orig-dir" placeholder="originals/sports"> <label class="chk"><input type="checkbox" id="plan-orig-move"> move instead of copy</label> <button class="b" id="plan-orig-go">Plan</button></div>
         <div id="plans"></div>
       </div>
+    </section>
+    <section id="v-people" hidden>
+      <p class="note">Faces found in the pictures and videos, grouped by likeness. Click a person to see their files, name them, merge two people who are the same, or take out a face that is someone else. Nothing here leaves this computer.</p>
+      <div id="people"></div>
+    </section>
+    <section id="v-things" hidden>
+      <p class="note">What the pictures show, from the list in Archive → Settings. A picture counts when it is far closer to the subject than pictures generally are; click a subject to see them, best first.</p>
+      <div id="things"></div>
     </section>
     <section id="v-entities" hidden>
       <div class="bar"><div class="seg" id="ent-kinds"></div><input class="t search" id="ent-q" type="search" placeholder="Filter"></div>
@@ -218,6 +228,8 @@ function renderSide() {
   const ml = info.ml || {};
   const mlLine = !ml.enabled ? '' : `<br>Image recognition: ${ml.reachable ? (ml.embedded || 0).toLocaleString() + ' looked at' + (ml.pending ? ', ' + ml.pending.toLocaleString() + ' to go' : '') + (ml.failed ? ', ' + ml.failed + ' unreadable' : '') : '<span class="bad">' + esc(ml.lastError || 'not reachable') + '</span>'}`;
   $('#qml-wrap').hidden = !ml.enabled;
+  $('#tab-things').hidden = !ml.enabled;
+  $('#tab-people').hidden = !(ml.tasks && ml.tasks.faces && ml.tasks.faces.on);
   h += `<h3>Index</h3><div class="muted" style="padding:0 8px">${(info.sets || 0).toLocaleString()} sets · ${info.families.toLocaleString()} originals · ${info.repostPosts.toLocaleString()} reposts folded in · ${info.mergedAlbums.toLocaleString()} merged albums · ${info.held} held back · ${info.missing.toLocaleString()} not downloaded<br>Pictures indexed: ${info.media.done.toLocaleString()} / ${info.media.total.toLocaleString()} · videos: ${info.videos.done.toLocaleString()} / ${info.videos.total.toLocaleString()}${mlLine}<br><button class="link" id="rebuild">Rebuild now</button></div>`;
   $('#side').innerHTML = h;
   $$('#side .side-item').forEach((el) => el.addEventListener('click', () => {
@@ -289,9 +301,9 @@ function cardHTML(c, key) {
         <button data-act="tie">${S.tieFrom ? 'Put in the same set as the post chosen' : 'Put in the same set as another post…'}</button></span></span></div></div></div>`;
 }
 function feedURL() {
-  if (S.like || (S.ml && S.q)) {
+  if (S.like || S.thing || (S.ml && S.q)) {
     const p = new URLSearchParams({ limit: '240' });
-    if (S.like) p.set('like', S.like); else p.set('q', S.q);
+    if (S.like) p.set('like', S.like); else if (S.thing) p.set('thing', S.thing); else p.set('q', S.q);
     for (const k of ['group', 'category']) if (S[k]) p.set(k, S[k]);
     if (S.type === 'photo' || S.type === 'video') p.set('type', S.type);
     return '/api/ix/browse/similar?' + p;
@@ -300,6 +312,7 @@ function feedURL() {
   for (const k of ['group', 'category', 'q', 'type', 'status']) if (S[k]) p.set(k, S[k]);
   if (S.dups) p.set('dups', '1');
   if (S.collection) p.set('collection', String(S.collection));
+  if (S.person) p.set('person', String(S.person));
   return '/api/ix/browse/feed?' + p;
 }
 async function loadMore() {
@@ -314,15 +327,18 @@ async function loadMore() {
   feed.insertAdjacentHTML('beforeend', r.data.cards.map((c, i) => cardHTML(c, start + i)).join(''));
   S.cursor = r.data.next; S.done = !r.data.next;
   const what = { families: 'originals', sets: 'sets', posts: 'posts', media: 'pictures and videos' }[S.view];
-  if (S.like || (S.ml && S.q)) {
-    $('#feed-note').innerHTML = (S.like ? 'Most like the chosen ' + esc(S.likeName) : 'Closest to “' + esc(S.q) + '”') + ', best first (' + r.data.total + ') · <button class="link" id="like-clear">back to browsing</button>';
-    $('#like-clear').onclick = () => { S.like = ''; S.ml = false; $('#qml').checked = false; resetFeed(); };
+  if (S.like || S.thing || (S.ml && S.q)) {
+    $('#feed-note').innerHTML = (S.like ? 'Most like the chosen ' + esc(S.likeName) : S.thing ? 'Pictures showing “' + esc(S.thing) + '”' : 'Closest to “' + esc(S.q) + '”') + ', best first (' + r.data.total + ') · <button class="link" id="like-clear">back to browsing</button>';
+    $('#like-clear').onclick = () => { S.like = ''; S.thing = ''; S.ml = false; $('#qml').checked = false; resetFeed(); };
+  } else if (S.person) {
+    $('#feed-note').innerHTML = esc(r.data.total.toLocaleString() + ' ' + what) + ' with <b>' + esc(S.personName || 'this person') + '</b> · <button class="link" id="person-clear">everyone</button>';
+    $('#person-clear').onclick = () => { S.person = 0; resetFeed(); };
   } else $('#feed-note').textContent = r.data.total.toLocaleString() + ' ' + what + (S.view === 'families' ? ' (reposts and copies folded in)' : S.view === 'sets' ? ' (posts that share some of the same pictures)' : '');
   $('#sentinel').textContent = S.done ? (S.cards.length ? 'End' : 'Nothing here') : '';
 }
 function resetFeed() {
   S.cursor = 0; S.done = false; S.cards = [];
-  S.showSim = !!(S.like || (S.ml && S.q));
+  S.showSim = !!(S.like || S.thing || (S.ml && S.q));
   $('#feed').innerHTML = ''; $('#feed').className = 'grid' + (S.view === 'media' || S.showSim ? ' media' : '');
   loadMore();
 }
@@ -428,7 +444,9 @@ async function openItem(items, i) {
       h += `<div class="copy">${rel.item ? `<img src="${esc(rel.item.thumb)}" alt="">` : ''}<div>${esc(what)}<br><span class="muted">${Math.round(rel.coverThis * 100)}% of this, ${Math.round(rel.coverOther * 100)}% of that · offset ${rel.offsetS.toFixed(0)} s</span></div></div>`;
     }
   }
+  h += '<div id="lb-extra"></div>';
   $('#lb-info').innerHTML = h;
+  if (x.key || it.key) loadExtra(x.key || it.key);
   $$('#lb-info [data-keeper]').forEach((b) => b.onclick = async () => { const r = await api('POST', '/api/ix/browse/keeper', { cluster: b.dataset.cluster, key: b.dataset.keeper }); toast(r.ok ? 'Saved. The browser shows that copy after its next update.' : errText(r)); });
 }
 
@@ -490,6 +508,69 @@ async function tiePost(post) {
 }
 function resetCardsMenus() { $$('[data-act="tie"]').forEach((b) => { b.textContent = S.tieFrom ? 'Put in the same set as the post chosen' : 'Put in the same set as another post…'; }); }
 
+// ---------- faces, text, speech of one file ----------
+async function loadExtra(key) {
+  const r = await api('GET', '/api/ix/browse/extra?key=' + encodeURIComponent(key));
+  const el = $('#lb-extra'); if (!r.ok || !el) return;
+  const d = r.data; let h = '';
+  if (d.faces && d.faces.length) h += `<b>Faces</b><div class="row" style="margin:4px 0 8px">${d.faces.map((f) => `<button class="link" data-person="${f.person}" data-pname="${esc(f.name || '')}" ${f.person ? '' : 'disabled'} title="${f.person ? 'Show their files' : 'Not grouped with anyone yet'}" style="text-align:center"><img src="/api/ix/face?id=${f.id}" alt="" style="width:56px;height:56px;border-radius:50%;object-fit:cover;display:block;margin:0 auto"><span style="font-size:12px">${esc(f.name || (f.person ? 'unnamed' : '—'))}</span></button>`).join('')}</div>`;
+  if (d.text) h += `<b>Text in the picture</b><div style="white-space:pre-wrap;word-break:break-word;margin:4px 0 8px;font-size:13px">${esc(d.text)}</div>`;
+  if (d.speech && d.speech.text) h += `<b>Speech${d.speech.language ? ' (' + esc(d.speech.language) + ')' : ''}</b><div style="max-height:220px;overflow:auto;margin:4px 0 8px;font-size:13px">${(d.speech.segments || []).map((sg) => `<div><span class="muted">${esc(fmtDur(sg[0]) || '0:00')}</span> ${esc(sg[2])}</div>`).join('') || esc(d.speech.text)}</div>`;
+  el.innerHTML = h;
+  $$('#lb-extra [data-person]').forEach((b) => b.onclick = () => { const id = Number(b.dataset.person); if (!id) return; dlg.close(); showPerson(id); });
+}
+
+// ---------- people ----------
+async function loadPeople() {
+  const r = await api('GET', '/api/ix/browse/people');
+  if (!r.ok) { $('#people').textContent = errText(r); return; }
+  const list = r.data.people || [];
+  const st = r.data.status || {};
+  let h = st.on === false && !list.length ? '<p class="muted">Faces are off. Turn them on in Archive → Settings → Image recognition.</p>' : '';
+  if (st.pending) h += `<p class="muted">${st.pending.toLocaleString()} file(s) still to look at for faces.</p>`;
+  const shown = list.filter((p) => !p.hidden), hidden = list.filter((p) => p.hidden);
+  const card = (p) => `<button class="tile" data-pid="${p.id}" style="aspect-ratio:auto;padding:8px;cursor:pointer;background:var(--soft)"><img loading="lazy" src="/api/ix/face?id=${p.cover}" alt="" style="width:100%;aspect-ratio:1;border-radius:50%;object-fit:cover"><div style="font-size:13px;margin-top:4px"><b>${esc(p.name || 'Unnamed')}</b><br><span class="muted">${p.files.toLocaleString()} file(s)</span></div></button>`;
+  h += shown.length ? `<div class="grid media" style="grid-template-columns:repeat(auto-fill,minmax(120px,1fr))">${shown.map(card).join('')}</div>` : (list.length ? '' : '<p class="muted">No people yet: a person appears once three or more faces look alike.</p>');
+  if (hidden.length) h += `<details style="margin-top:12px"><summary>${hidden.length} hidden</summary><div class="grid media" style="grid-template-columns:repeat(auto-fill,minmax(120px,1fr))">${hidden.map(card).join('')}</div></details>`;
+  if (r.data.ungrouped) h += `<p class="muted">${r.data.ungrouped.toLocaleString()} face(s) not grouped with anyone yet.</p>`;
+  $('#people').innerHTML = h;
+  P.list = list;
+  $$('#people [data-pid]').forEach((b) => b.onclick = () => showPerson(Number(b.dataset.pid)));
+}
+const P = { list: [] };
+async function showPerson(id) {
+  const r = await api('GET', '/api/ix/browse/person?id=' + id);
+  if (!r.ok) { toast(errText(r)); return; }
+  const p = r.data.person, cards = r.data.cards || [];
+  const items = cards.map((c) => c.items[0]);
+  const k = registerSet(items);
+  const others = (P.list.length ? P.list : (await api('GET', '/api/ix/browse/people')).data.people || []).filter((x) => x.id !== id);
+  let h = `<div class="row"><input class="t" id="pp-name" value="${esc(p.name)}" placeholder="Name"><button class="b primary" id="pp-save">Save name</button>
+    <button class="b" id="pp-hide">${p.hidden ? 'Show' : 'Hide'}</button>
+    <button class="b" id="pp-feed">Browse their posts</button></div>
+    <div class="row" style="margin-top:6px">Same person as: <select class="t" id="pp-into"><option value="">choose…</option>${others.map((o) => `<option value="${o.id}">${esc(o.name || 'Unnamed')} (${o.files})</option>`).join('')}</select><button class="b" id="pp-merge">Merge into them</button></div>
+    <p class="muted">${p.files.toLocaleString()} file(s). Faces: click one that is someone else to take it out.</p>
+    <div class="row">${r.data.faces.map((f) => `<button class="link" data-face="${f.id}" title="Not this person"><img loading="lazy" src="/api/ix/face?id=${f.id}" alt="" style="width:52px;height:52px;border-radius:50%;object-fit:cover"></button>`).join('')}</div>
+    <h3 style="font-size:14px;margin:12px 0 4px">Their files</h3>${mosaicHTML(items, k)}`;
+  showDialog(p.name || 'Unnamed person', `<div id="sd-files">${h}</div>`);
+  const change = async (body, msg) => { const x = await api('POST', '/api/ix/browse/person/' + id, body); toast(x.ok ? msg : errText(x)); if (x.ok) loadPeople(); return x.ok; };
+  $('#pp-save').onclick = () => change({ action: 'rename', name: $('#pp-name').value }, 'Saved.');
+  $('#pp-hide').onclick = async () => { if (await change({ action: p.hidden ? 'show' : 'hide' }, p.hidden ? 'Shown.' : 'Hidden.')) dlg.close(); };
+  $('#pp-merge').onclick = async () => { const into = Number($('#pp-into').value); if (!into) return; if (await change({ action: 'merge', into }, 'Merged.')) showPerson(into); };
+  $('#pp-feed').onclick = () => { S.person = id; S.personName = p.name || 'this person'; dlg.close(); switchTab('browse'); S.view = 'posts'; $$('#view button').forEach((x) => x.classList.toggle('on', x.dataset.v === 'posts')); resetFeed(); };
+  $$('[data-face]').forEach((b) => b.onclick = async () => { if (await change({ action: 'remove-face', face: Number(b.dataset.face) }, 'Taken out.')) b.remove(); });
+}
+
+// ---------- things ----------
+async function loadThings() {
+  $('#things').innerHTML = '<p class="muted">Matching the list against every picture…</p>';
+  const r = await api('GET', '/api/ix/browse/things');
+  if (!r.ok) { $('#things').textContent = errText(r); return; }
+  const list = r.data.things || [];
+  $('#things').innerHTML = list.length ? `<div class="row">${list.map((t) => `<button class="b" data-thing="${esc(t.label)}" ${t.count ? '' : 'disabled'}>${esc(t.label)} <span class="muted">${t.count.toLocaleString()}</span></button>`).join('')}</div>` : '<p class="muted">Nothing to look for: add subjects in Archive → Settings.</p>';
+  $$('#things [data-thing]').forEach((b) => b.onclick = () => { S.thing = b.dataset.thing; S.like = ''; switchTab('browse'); window.scrollTo(0, 0); resetFeed(); });
+}
+
 async function collectDialog(refs) {
   const r = await api('GET', '/api/ix/browse/collections');
   const list = (r.data && r.data.collections) || [];
@@ -503,7 +584,9 @@ async function collectDialog(refs) {
 function switchTab(tab) {
   S.tab = tab;
   $$('#tabs .tab').forEach((t) => t.classList.toggle('on', t.dataset.tab === tab));
-  for (const v of ['browse', 'chat', 'review', 'organise', 'entities']) $('#v-' + v).hidden = v !== tab;
+  for (const v of ['browse', 'chat', 'review', 'organise', 'people', 'things', 'entities']) $('#v-' + v).hidden = v !== tab;
+  if (tab === 'people') loadPeople();
+  if (tab === 'things') loadThings();
   if (tab === 'review') loadReview();
   if (tab === 'organise') loadOrganise();
   if (tab === 'entities') loadEntities();
