@@ -23,6 +23,7 @@ against it. The tool then runs on the real `data` folder unchanged.
 | `data/near_duplicates.jsonl` | Videos that share footage (same video, clips, overlaps) |
 | `data/posts.jsonl` | Every post (an album counts once) with its files, repost family and role |
 | `data/families.jsonl` | Each original with its reposts, and the merged album when later posts added files |
+| `data/sets.jsonl` | Posts by different people that share some of the same pictures, grouped into sets |
 | `data/media_clusters.jsonl` | Files that are the same picture or video, with the copy to show and how each was matched |
 | `data/covered.jsonl` | Files not downloaded because the library already has them (checked re-uploads, held probable copies) |
 | `data/entities.jsonl` | Links, @usernames, wallets and IBANs found in message text |
@@ -37,6 +38,9 @@ downloads folder.
 **Riverside Cycling Club** (channel, `g_1811230001`)
 - 101: signed post with bold text and a link: see `raw.entities`, `post_author`, `views`.
 - 102–104: an album of three photos (same `album_id`), caption on the first.
+- 130–134: the club's five hill-climb photos. Two of them are also in Maya's forum album 220–224, one in
+  Priya's forum album 230–234, which also has one of Maya's. No two of the three share enough to be one
+  album, but `sets.jsonl` puts them in one set: 11 distinct photos, 4 of them `core` (in two posts).
 - 105: a video, downloaded; `comments: 2`. The comments are in the club's discussion group (below).
 - 106: a GPX document that is wanted but not downloaded yet: `file_status: "missing"`.
 - 107: an edited post: `edit_date`, and the earlier text in `edits`.
@@ -88,6 +92,8 @@ downloads folder.
 - **Inventory**: count `file_status` per chat; `missing` lines are what is still to be fetched.
 - **Originals only**: one card per line of `families.jsonl`; show its `files` (the merged album) and list
   its `posts` as "also posted in". `media_clusters.jsonl` gives the best copy of each file.
+- **Sets**: one card per line of `sets.jsonl`, with its `core` and `member` files; `loose` files are
+  in the set's posts but look unlike the rest (only when image recognition is on).
 - **Completeness by number**: message IDs 1 to the newest are either in the messages file or in
   `message_ids_gone`.
 - **Fixity**: run `sha256sum -c data/manifest-sha256.txt` from the downloads folder.

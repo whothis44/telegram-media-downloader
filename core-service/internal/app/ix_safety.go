@@ -35,6 +35,8 @@ type ixSettings struct {
 	SubstExact    bool   `json:"substExact"`    // same-size re-uploads: check bytes on Telegram instead of downloading
 	HoldLikely    bool   `json:"holdLikely"`    // probable copies wait until nothing else is queued
 	HoldForever   bool   `json:"holdForever"`   // ...and are never released automatically
+	MLURL         string `json:"mlUrl"`         // image recognition (Immich machine learning); empty: off
+	MLModel       string `json:"mlModel"`       // its model; empty: ixMLDefaultModel
 	// Alerts (see ix_alerts.go). The SMTP password is never sent back to
 	// the dashboard; AlertSMTPPassSet says whether one is saved.
 	AlertWebhook     string `json:"alertWebhook"`
@@ -279,6 +281,20 @@ func ixParseSettings(body map[string]any, s ixSettings) (ixSettings, error) {
 	}
 	if v, ok := body["alertSmtpPassClear"].(bool); ok && v {
 		s.AlertSMTPPass = ""
+	}
+	if v, ok := body["mlUrl"].(string); ok {
+		u, err := ixMLCheckURL(v)
+		if err != nil {
+			return s, err
+		}
+		s.MLURL = u
+	}
+	if v, ok := body["mlModel"].(string); ok {
+		v = strings.TrimSpace(v)
+		if v != "" && !ixMLModelRe.MatchString(v) {
+			return s, errors.New("the model name may hold letters, digits, dots, dashes and underscores only")
+		}
+		s.MLModel = v
 	}
 	if v, ok := body["alertWebhookKind"].(string); ok {
 		if v != "ntfy" && v != "discord" && v != "json" {

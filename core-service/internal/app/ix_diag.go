@@ -150,6 +150,7 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 		{"picture index errors", `SELECT error, COUNT(*) FROM ix_pdq WHERE status='error' GROUP BY error ORDER BY 2 DESC LIMIT 10`},
 		{"video index errors", `SELECT error, COUNT(*) FROM ix_vfp WHERE status='error' GROUP BY error ORDER BY 2 DESC LIMIT 10`},
 		{"integrity results", `SELECT result, COUNT(*) FROM ix_fixity GROUP BY result ORDER BY 2 DESC`},
+		{"image recognition errors", `SELECT error, COUNT(*) FROM ix_emb_err GROUP BY error ORDER BY 2 DESC LIMIT 8`},
 		{"file plans", `SELECT state||' '||kind, COUNT(*) FROM ix_move_plans GROUP BY 1`},
 	} {
 		if rows, err := a.db.Reader.QueryContext(ctx, q.sql); err == nil {
@@ -167,12 +168,18 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 			}
 		}
 	}
+	ml := a.ixMLStatusNow(ctx)
+	line("image recognition %s (model %s, Immich %s) · reachable %v · looked at %d · to go %d · unreadable %d · running %v · last error: %s", on(ml.Enabled), ml.Model, ml.Version, ml.Reachable, ml.Embedded, ml.Pending, ml.Failed, ml.Running, r.clean(ml.LastError))
 	fx := a.ixFixityStatus(ctx)
 	line("integrity: %d files, %d checked this cycle, %d changed, %d missing, %d size differs, last %s", fx.Files, fx.Checked, fx.Changed, fx.Missing, fx.SizeOff, ixAgo(fx.LastCheck, now))
 	box := a.ixModelBox()
 	box.mu.Lock()
 	if m := box.model; m != nil {
-		line("browser index: %d posts, %d originals, %d files, %d sets, built %s in %s", len(m.Posts), len(m.Families), len(m.Items), len(m.Clusters), ixAgo(m.Built.UnixMilli(), now), m.Took.Round(time.Millisecond))
+		biggest := 0
+		for i := range m.Sets {
+			biggest = max(biggest, len(m.Sets[i].Families))
+		}
+		line("browser index: %d posts, %d originals, %d files, %d duplicate sets, %d media sets (largest %d posts), built %s in %s", len(m.Posts), len(m.Families), len(m.Items), len(m.Clusters), len(m.Sets), biggest, ixAgo(m.Built.UnixMilli(), now), m.Took.Round(time.Millisecond))
 	} else {
 		line("browser index: not built yet")
 	}

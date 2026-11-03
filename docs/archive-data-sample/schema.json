@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/whothis44/telegram-media-downloader/docs/archive-data-sample/schema.json",
-  "title": "Telegram archive data export, format version 3",
-  "description": "One JSON object per line in each .jsonl file. Use the $defs entry named after the file: manifest.json → manifest, groups.jsonl → group, messages/*.jsonl.gz → message, files.jsonl → file, peers.jsonl → peer, topics.jsonl → topic, near_duplicates.jsonl → nearDuplicateSet, posts.jsonl → post, families.jsonl → family, media_clusters.jsonl → mediaCluster, covered.jsonl → covered, entities.jsonl → entity. manifest-sha256.txt is plain text: '<sha256>  <path>' per line.",
+  "title": "Telegram archive data export, format version 4",
+  "description": "One JSON object per line in each .jsonl file. Use the $defs entry named after the file: manifest.json → manifest, groups.jsonl → group, messages/*.jsonl.gz → message, files.jsonl → file, peers.jsonl → peer, topics.jsonl → topic, near_duplicates.jsonl → nearDuplicateSet, posts.jsonl → post, families.jsonl → family, sets.jsonl → mediaSet, media_clusters.jsonl → mediaCluster, covered.jsonl → covered, entities.jsonl → entity. manifest-sha256.txt is plain text: '<sha256>  <path>' per line.",
   "$defs": {
     "groupId": {
       "type": "string",
@@ -52,7 +52,7 @@
           "const": "telegram-archive"
         },
         "format_version": {
-          "const": 3
+          "const": 4
         },
         "exported_at": {
           "type": "string",
@@ -834,6 +834,97 @@
               },
               "introduced_by": {
                 "$ref": "#/$defs/postRef"
+              }
+            }
+          }
+        }
+      }
+    },
+    "mediaSet": {
+      "type": "object",
+      "description": "Posts (families) by different people or chats that share some pictures or videos although none holds them all.",
+      "required": [
+        "set",
+        "anchor_post",
+        "first_date",
+        "last_date",
+        "chats",
+        "families",
+        "posts",
+        "files"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "set": {
+          "type": "integer"
+        },
+        "anchor_post": {
+          "$ref": "#/$defs/postRef",
+          "description": "The set's first post: the same set across exports."
+        },
+        "first_date": {
+          "$ref": "#/$defs/unixSeconds"
+        },
+        "last_date": {
+          "$ref": "#/$defs/unixSeconds"
+        },
+        "chats": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "families": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "minItems": 2
+        },
+        "posts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/postRef"
+          }
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "cluster",
+              "best",
+              "role",
+              "in_families"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "cluster": {
+                "type": "integer"
+              },
+              "best": {
+                "$ref": "#/$defs/postFile"
+              },
+              "role": {
+                "enum": [
+                  "core",
+                  "member",
+                  "loose",
+                  "elsewhere"
+                ],
+                "description": "core: in two or more of its families; member: in one; loose: in one but unlike the core (image recognition); elsewhere: belongs to other_set."
+              },
+              "in_families": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "likeness": {
+                "type": "number",
+                "description": "Cosine to the closest core file (image recognition); absent when not compared."
+              },
+              "other_set": {
+                "type": "integer"
+              },
+              "placed_by_person": {
+                "type": "boolean"
               }
             }
           }

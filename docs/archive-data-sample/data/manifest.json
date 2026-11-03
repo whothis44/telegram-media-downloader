@@ -1,5 +1,5 @@
 {
-  "app_version": "3.4.18-ix.6",
+  "app_version": "3.4.18-ix.7",
   "downloads_root": "/volume1/Telegram",
   "exported_at": "2026-11-03T05:00:00Z",
   "files": {
@@ -15,9 +15,10 @@
     "peers": "peers.jsonl",
     "posts": "posts.jsonl",
     "readme": "README.md",
+    "sets": "sets.jsonl",
     "topics": "topics.jsonl"
   },
   "format": "telegram-archive",
-  "format_version": 3,
+  "format_version": 4,
   "groups": 4
 }

@@ -433,6 +433,83 @@ func TestIxDataSample(t *testing.T) {
 		exec(`INSERT INTO ix_messages(group_id,message_id,date,text,sender_id,tl,first_seen,seen_at) VALUES(?,?,?,?,?,?,?,?)`, forum, row.MessageID, row.Date, row.Text, row.SenderID, row.TL, seen, seen)
 	}
 
+	// ix.7: three people post overlapping selections of the hill-climb
+	// photos. No two posts share enough to be one album, but between them
+	// they make one set: two photos in the club's and Maya's posts, one in
+	// the club's and Priya's, one in Maya's and Priya's.
+	albumPost := func(group string, id, at int, from int64, text string, grouped int64, photoID int64, size int) {
+		t.Helper()
+		m := post(group, id, at, text)
+		if from != 0 {
+			m.FromID = user(from)
+		}
+		m.GroupedID, m.Media = grouped, photo(photoID, size)
+		var buf bin.Buffer
+		if err := m.Encode(&buf); err != nil {
+			t.Fatal(err)
+		}
+		var decoded tg.Message
+		if err := decoded.Decode(&buf); err != nil {
+			t.Fatal(err)
+		}
+		row := ixRowFromMessage(&decoded)
+		exec(`INSERT INTO ix_messages(group_id,message_id,date,text,grouped_id,sender_id,media_type,media_name,media_size,media_key,tl,first_seen,seen_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, group, row.MessageID, row.Date, row.Text, row.GroupedID, row.SenderID, row.MediaType, row.MediaName, row.MediaSize, row.MediaKey, row.TL, seen, seen)
+		media[group+"/"+ixItoa(int64(id))], _ = telegram.MessageAttachment(&decoded)
+	}
+	sameFile := func(group string, id int, fromGroup string, fromID int, at string) {
+		t.Helper()
+		exec(`INSERT INTO downloads(group_id,group_name,message_id,file_name,file_size,file_type,file_path,status,created_at,file_hash,telegram_media_kind,telegram_media_id,telegram_media_size,telegram_mime,media_width,media_height)
+			SELECT ?,'',?,file_name,file_size,file_type,file_path,'completed',?,file_hash,telegram_media_kind,telegram_media_id,telegram_media_size,telegram_mime,media_width,media_height
+			FROM downloads WHERE group_id=? AND message_id=?`, group, id, at, fromGroup, fromID)
+	}
+	for i := 0; i < 5; i++ {
+		text := ""
+		if i == 0 {
+			text = "Hill climb on Mont Royal, the club's pictures."
+		}
+		albumPost(club, 130+i, 30000, 0, text, 3711000000000000130, 5100000000000000130+int64(i), 350000+i*5000)
+		file(club, 130+i, fmt.Sprintf("Riverside Cycling Club/images/2026-03-14_%d.jpg", 130+i), "photo", int64(350000+i*5000), "2026-03-14 20:30:00")
+	}
+	for i, src := range []int{130, 131, 0, 0, 0} { // Maya: two of the club's, three of her own
+		text := ""
+		if i == 0 {
+			text = "Hill climb from the side of the road."
+		}
+		pid, size := int64(5100000000000000220+i), 360000+i*4000
+		if src > 0 {
+			pid, size = 5100000000000000000+int64(src), 350000+(src-130)*5000
+		}
+		albumPost(forum, 220+i, 31000, 1001, text, 3711000000000000220, pid, size)
+		if src > 0 {
+			sameFile(forum, 220+i, club, src, "2026-03-14 20:50:00")
+		} else {
+			file(forum, 220+i, fmt.Sprintf("Trail Builders Forum/images/2026-03-14_%d.jpg", 220+i), "photo", int64(size), "2026-03-14 20:50:00")
+		}
+	}
+	for i, src := range [][2]int{{132, 0}, {0, 222}, {0, 0}, {0, 0}, {0, 0}} { // Priya: one of the club's, one of Maya's, three of her own
+		text := ""
+		if i == 0 {
+			text = "My hill climb shots."
+		}
+		pid, size := int64(5100000000000000230+i), 370000+i*4000
+		switch {
+		case src[0] > 0:
+			pid, size = 5100000000000000000+int64(src[0]), 350000+(src[0]-130)*5000
+		case src[1] > 0:
+			pid, size = 5100000000000000000+int64(src[1]), 360000+(src[1]-220)*4000
+		}
+		albumPost(forum, 230+i, 32000, 1003, text, 3711000000000000230, pid, size)
+		switch {
+		case src[0] > 0:
+			sameFile(forum, 230+i, club, src[0], "2026-03-14 21:10:00")
+		case src[1] > 0:
+			sameFile(forum, 230+i, forum, src[1], "2026-03-14 21:10:00")
+		default:
+			file(forum, 230+i, fmt.Sprintf("Trail Builders Forum/images/2026-03-14_%d.jpg", 230+i), "photo", int64(size), "2026-03-14 21:10:00")
+		}
+	}
+
 	exec(`INSERT INTO ix_walks(job_id,group_id,started_at,finished_at,processed,marked_deleted,state) VALUES('sample-1',?,?,?,10,1,'done'),('sample-2',?,?,?,13,0,'done')`,
 		club, seen, seen+60_000, forum, seen, seen+90_000)
 
@@ -498,6 +575,30 @@ func TestIxDataSample(t *testing.T) {
 		t.Fatalf("post comments: %v", p)
 	}
 
+	if sets, err := os.ReadFile(filepath.Join(data, "sets.jsonl")); err != nil {
+		t.Fatal(err)
+	} else {
+		lines := strings.Split(strings.TrimSpace(string(sets)), "\n")
+		var hill map[string]any
+		for _, l := range lines {
+			var x map[string]any
+			if json.Unmarshal([]byte(l), &x) == nil && x["anchor_post"] == club+":130" {
+				hill = x
+			}
+		}
+		if hill == nil || len(hill["posts"].([]any)) != 3 || len(hill["files"].([]any)) != 11 {
+			t.Fatalf("hill-climb set: %v", lines)
+		}
+		core := 0
+		for _, f := range hill["files"].([]any) {
+			if f.(map[string]any)["role"] == "core" {
+				core++
+			}
+		}
+		if core != 4 {
+			t.Fatalf("hill-climb core files: %d", core)
+		}
+	}
 	files := map[string]bool{}
 	_ = filepath.Walk(data, func(p string, info os.FileInfo, err error) error {
 		if err == nil && !info.IsDir() {

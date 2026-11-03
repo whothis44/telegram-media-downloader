@@ -116,6 +116,49 @@ func (a *App) ixWriteDataModel(ctx context.Context, writeJSONL func(string, func
 	}); err != nil {
 		return err
 	}
+	if err := writeJSONL("sets.jsonl", func(enc *json.Encoder) error {
+		for si := range m.Sets {
+			st := &m.Sets[si]
+			type setFile struct {
+				Cluster  int32          `json:"cluster"`
+				Best     ixDataPostFile `json:"best"`
+				Role     string         `json:"role"` // core, member, loose, elsewhere
+				Families int            `json:"in_families"`
+				Likeness float32        `json:"likeness,omitempty"`
+				OtherSet *int32         `json:"other_set,omitempty"`
+				Person   bool           `json:"placed_by_person,omitempty"`
+			}
+			row := struct {
+				Set      int32     `json:"set"`
+				Anchor   string    `json:"anchor_post"`
+				First    int64     `json:"first_date"`
+				Last     int64     `json:"last_date"`
+				Chats    int       `json:"chats"`
+				Families []int32   `json:"families"`
+				Posts    []string  `json:"posts"`
+				Files    []setFile `json:"files"`
+			}{Set: int32(si), Anchor: st.Anchor, First: st.First, Last: st.Last, Chats: st.Chats, Families: st.Families, Posts: []string{}, Files: []setFile{}}
+			for _, fi := range st.Families {
+				for _, pi := range m.Families[fi].Posts {
+					row.Posts = append(row.Posts, ixPostRef(&m.Posts[pi]))
+				}
+			}
+			for _, it := range st.Items {
+				f := setFile{Cluster: m.Items[it.Item].Cluster, Best: ixDataFileOf(m, it.Item), Role: it.Role, Families: it.In, Likeness: it.Sim, Person: it.Fixed}
+				if it.Other >= 0 {
+					other := it.Other
+					f.OtherSet = &other
+				}
+				row.Files = append(row.Files, f)
+			}
+			if err := enc.Encode(row); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
 	how := map[string]string{}
 	if rows, err := a.db.Reader.QueryContext(ctx, `SELECT key, how FROM ix_mcl WHERE how IN ('auto','verified')`); err == nil {
 		for rows.Next() {
