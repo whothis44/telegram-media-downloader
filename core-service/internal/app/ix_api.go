@@ -25,6 +25,7 @@ func registerIxRoutes(mux *http.ServeMux, a *App) {
 	mux.Handle("POST /api/ix/groups/finished", a.requireAdmin(http.HandlerFunc(a.handleIxFinished)))
 	mux.Handle("GET /api/ix/dups", a.requireAdmin(http.HandlerFunc(a.handleIxDups)))
 	mux.Handle("POST /api/ix/dups/retry", a.requireAdmin(http.HandlerFunc(a.handleIxDupsRetry)))
+	registerIxBrowseRoutes(mux, a)
 }
 
 type ixGroupStatus struct {
@@ -50,6 +51,15 @@ type ixGroupStatus struct {
 	Linked    string `json:"linked,omitempty"` // its discussion group
 	// Marked finished: every rescan shortcut leaves it alone.
 	FinishedAt int64 `json:"finishedAt,omitempty"`
+	// Message IDs: the newest kept, and how many below it are confirmed gone.
+	MaxID    int64  `json:"maxId,omitempty"`
+	Gone     int64  `json:"gone,omitempty"`
+	Username string `json:"username,omitempty"`
+	Invite   string `json:"invite,omitempty"`
+	// A category suggested from what the group posts (from the media
+	// browser's index, once it has been built).
+	ContentSuggest string  `json:"contentSuggest,omitempty"`
+	ContentShare   float64 `json:"contentShare,omitempty"`
 }
 
 func (a *App) handleIxStatus(w http.ResponseWriter, r *http.Request) {
@@ -87,14 +97,14 @@ func (a *App) handleIxStatus(w http.ResponseWriter, r *http.Request) {
 	walks := a.ixLatestWalks(ctx)
 	type info struct {
 		count, countAt, members, finished int64
-		about, linked                     string
+		about, linked, username, invite   string
 	}
 	infos := map[string]info{}
-	if rows, err := a.db.Reader.QueryContext(ctx, `SELECT group_id, tg_count, tg_count_at, members, about, linked_group, finished_at FROM ix_group_info`); err == nil {
+	if rows, err := a.db.Reader.QueryContext(ctx, `SELECT group_id, tg_count, tg_count_at, members, about, linked_group, finished_at, username, invite_link FROM ix_group_info`); err == nil {
 		for rows.Next() {
 			var id string
 			var v info
-			if rows.Scan(&id, &v.count, &v.countAt, &v.members, &v.about, &v.linked, &v.finished) == nil {
+			if rows.Scan(&id, &v.count, &v.countAt, &v.members, &v.about, &v.linked, &v.finished, &v.username, &v.invite) == nil {
 				infos[id] = v
 			}
 		}
@@ -111,10 +121,24 @@ func (a *App) handleIxStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		rows.Close()
 	}
+	cover := a.ixIDCoverage(ctx)
+	var suggest map[string]ixCatSuggest
+	if box := a.ixModelBox(); box != nil {
+		box.mu.Lock()
+		if box.model != nil {
+			suggest = box.model.Suggest
+		}
+		box.mu.Unlock()
+	}
 	withInfo := func(g ixGroupStatus) ixGroupStatus {
+		if sg, ok := suggest[g.ID]; ok {
+			g.ContentSuggest, g.ContentShare = sg.Category, sg.Share
+		}
 		v := infos[g.ID]
 		g.TgCount, g.TgCountAt, g.Members, g.About, g.Linked, g.Comments = v.count, v.countAt, v.members, v.about, v.linked, comments[g.ID]
 		g.FinishedAt = v.finished
+		g.Username, g.Invite = v.username, v.invite
+		g.MaxID, g.Gone = cover[g.ID].MaxID, cover[g.ID].Gone
 		return g
 	}
 	var groups []ixGroupStatus
@@ -156,6 +180,10 @@ func (a *App) handleIxStatus(w http.ResponseWriter, r *http.Request) {
 		"hold":      a.ixHold(ctx),
 		"dups":      a.ixVdupStatus(),
 		"downloads": a.ixDownloads(ctx),
+		"freeze":    a.ixFreeze(ctx),
+		"held":      a.ixHeldStatus(ctx),
+		"fixity":    a.ixFixityStatus(ctx),
+		"pictures":  a.ixMediaStatus(),
 	}
 	if exportErr != nil {
 		out["exportDirError"] = exportErr.Error()

@@ -85,6 +85,9 @@ type ixQueueDeps struct {
 	finish  func(ctx context.Context, item ixQueueItem, job historyJob) error
 	hold    func(ctx context.Context) string // non-empty: do not start new groups (safety pause, quiet hours)
 	now     func() time.Time
+	// triage ranks groups when the account is to be deleted: lower goes
+	// first (private chats before public ones). nil or empty: queue order.
+	triage func(ctx context.Context) map[string]int
 }
 
 func (a *App) ixDeps() ixQueueDeps {
@@ -96,6 +99,7 @@ func (a *App) ixDeps() ixQueueDeps {
 		finish:  a.ixFinishWalk,
 		hold:    a.ixHold,
 		now:     time.Now,
+		triage:  a.ixTriage,
 	}
 }
 
@@ -112,6 +116,10 @@ func (a *App) ixStart() {
 	go func() { defer a.ambientWG.Done(); a.ixRunRetry(a.ctx) }()
 	a.ambientWG.Add(1)
 	go func() { defer a.ambientWG.Done(); a.ixRunAlerts(a.ctx) }()
+	for _, run := range []func(context.Context){a.ixRunFreeze, a.ixRunMedia, a.ixRunFixity, a.ixRunBrowse, a.ixRunHeld} {
+		a.ambientWG.Add(1)
+		go func() { defer a.ambientWG.Done(); run(a.ctx) }()
+	}
 }
 
 func (a *App) ixWake() {
@@ -251,6 +259,16 @@ func (a *App) ixQueueStep(ctx context.Context, deps ixQueueDeps) error {
 		}
 	}
 	next := map[bool]int{false: -1, true: -1}
+	var ranks map[string]int
+	if deps.triage != nil {
+		ranks = deps.triage(ctx)
+	}
+	better := func(i, j int) bool {
+		if st.Items[i].Priority != st.Items[j].Priority {
+			return st.Items[i].Priority
+		}
+		return ranks[st.Items[i].GroupID] < ranks[st.Items[j].GroupID]
+	}
 	remaining := 0
 	for i, item := range st.Items {
 		if item.State != "waiting" {
@@ -261,7 +279,7 @@ func (a *App) ixQueueStep(ctx context.Context, deps ixQueueDeps) error {
 			continue
 		}
 		lane := item.Phase == ixPhaseFiles
-		if j := next[lane]; j < 0 || (item.Priority && !st.Items[j].Priority) {
+		if j := next[lane]; j < 0 || better(i, j) {
 			next[lane] = i
 		}
 	}

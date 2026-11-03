@@ -47,3 +47,40 @@ func (s *MessageSession) Replies(dialog telegram.Dialog, msgID, offsetID int) (t
 	defer cancel()
 	return source.RepliesPage(ctx, dialog, msgID, offsetID, 100)
 }
+
+type freezeSource interface {
+	FreezeState(context.Context) (telegram.FreezeState, error)
+}
+
+type byIDSource interface {
+	MessagesByID(context.Context, telegram.Dialog, []int) (telegram.ByIDPage, error)
+}
+
+// FreezeState reads whether Telegram has frozen the account, and when it
+// will be deleted.
+func (s *MessageSession) FreezeState() (telegram.FreezeState, error) {
+	if err := s.ctx.Err(); err != nil {
+		return telegram.FreezeState{}, err
+	}
+	source, ok := s.source.(freezeSource)
+	if !ok {
+		return telegram.FreezeState{}, errors.New("account cannot read its freeze state")
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
+	defer cancel()
+	return source.FreezeState(ctx)
+}
+
+// MessagesByID reads up to 100 messages of a channel or supergroup by ID.
+func (s *MessageSession) MessagesByID(dialog telegram.Dialog, ids []int) (telegram.ByIDPage, error) {
+	if err := s.ctx.Err(); err != nil {
+		return telegram.ByIDPage{}, err
+	}
+	source, ok := s.source.(byIDSource)
+	if !ok {
+		return telegram.ByIDPage{}, errors.New("account cannot read messages by ID")
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
+	defer cancel()
+	return source.MessagesByID(ctx, dialog, ids)
+}

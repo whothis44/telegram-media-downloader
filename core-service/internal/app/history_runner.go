@@ -190,7 +190,7 @@ func (a *App) runHistory(ctx context.Context, id string) error {
 		}
 		if page.Done {
 			if j.MessagesOnly {
-				return a.ixSaveComments(ctx, session, dialog, j.GroupID) // archive: comments on channel posts
+				return a.ixMessagesPassEnd(ctx, session, dialog, j.GroupID) // archive: comments on channel posts, gaps in message IDs
 			}
 			return nil
 		}

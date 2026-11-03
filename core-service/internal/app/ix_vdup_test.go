@@ -34,7 +34,7 @@ func TestIxPerceptualHashAndMatching(t *testing.T) {
 	if !ok1 || !ok2 || !ok3 {
 		t.Fatal("patterns are not flat")
 	}
-	if d := bits.OnesCount64(h1 ^ h1n); d > ixVdupHamming {
+	if d := bits.OnesCount64(h1 ^ h1n); d > 10 {
 		t.Fatalf("a slightly changed frame differs by %d bits", d)
 	}
 	if d := bits.OnesCount64(h1 ^ h2); d <= ixVdupHamming {
@@ -47,33 +47,98 @@ func TestIxPerceptualHashAndMatching(t *testing.T) {
 	if _, ok := ixPHash(flat); ok {
 		t.Fatal("a flat frame must be ignored")
 	}
-	hashes := make([]uint64, 8)
+	hashes := make([]uint64, 40)
+	mirrors := make([]uint64, 40)
 	for i := range hashes {
-		hashes[i], _ = ixPHash(ixPattern(i+10, 0))
+		px := ixPattern(i+10, 0)
+		hashes[i], _ = ixPHash(px)
+		m := make([]byte, 1024)
+		for y := 0; y < 32; y++ {
+			for x := 0; x < 32; x++ {
+				m[y*32+x] = px[y*32+31-x]
+			}
+		}
+		mirrors[i], _ = ixPHash(m)
 	}
-	seq := func(ts []float32, idx []int) []ixVFrame {
+	// One sample a second, scenes by index.
+	seq := func(start float32, idx ...int) []ixVFrame {
 		out := []ixVFrame{}
 		for i, n := range idx {
-			out = append(out, ixVFrame{T: ts[i], H: hashes[n]})
+			out = append(out, ixVFrame{T: start + float32(i), H: hashes[n], HF: mirrors[n]})
 		}
 		return out
 	}
-	a := seq([]float32{0, 4, 8, 12, 16, 20}, []int{0, 1, 2, 3, 4, 5})
-	reencoded := seq([]float32{0.4, 4.4, 8.4, 12.4, 20.4}, []int{0, 1, 2, 3, 5}) // one scene lost
-	clip := seq([]float32{0, 4, 8}, []int{1, 2, 3})                              // starts 4 s in
-	other := seq([]float32{0, 3, 6}, []int{6, 7, 6})
-	shuffled := seq([]float32{0, 4, 8, 12}, []int{3, 0, 5, 1}) // same shots, different order
-	if k, m := ixVKind(a, reencoded, 24, 24); k != "same" || m.Matched != 5 {
+	span := func(from, to int) []int {
+		var out []int
+		for i := from; i < to; i++ {
+			out = append(out, i)
+		}
+		return out
+	}
+	a := seq(0, span(0, 24)...)
+	reencoded := seq(0.3, span(0, 24)...)
+	reencoded = append(reencoded[:10], reencoded[12:]...) // two samples lost
+	clip := seq(0, span(4, 16)...)                        // 12 s starting 4 s in
+	other := seq(0, span(30, 40)...)
+	shuffled := seq(0, 3, 0, 5, 1, 9, 2, 7, 4, 11, 6, 10, 8) // same shots, different order
+	overlap := seq(0, append(span(12, 24), span(24, 36)...)...)
+	var mirrored []ixVFrame
+	for _, f := range a {
+		mirrored = append(mirrored, ixVFrame{T: f.T, H: f.HF, HF: f.H})
+	}
+	if k, m := ixVCompare(a, reencoded, 24, 24); k != "same" || m.Matched < 20 {
 		t.Fatalf("re-encode: %q %+v", k, m)
 	}
-	if k, m := ixVKind(a, clip, 24, 12); k != "clip" || m.Offset != 4 {
+	if k, m := ixVCompare(a, clip, 24, 12); k != "clip" || m.Offset != -4 {
 		t.Fatalf("clip: %q %+v", k, m)
 	}
-	if k, _ := ixVKind(a, other, 24, 9); k != "" {
+	if k, m := ixVCompare(clip, a, 12, 24); k != "clip" || m.Offset != 4 {
+		t.Fatalf("clip, other way round: %q %+v", k, m)
+	}
+	if k, _ := ixVCompare(a, other, 24, 10); k != "" {
 		t.Fatalf("unrelated: %q", k)
 	}
-	if k, m := ixVKind(a, shuffled, 24, 16); k != "" {
+	if k, m := ixVCompare(a, shuffled, 24, 12); k != "" {
 		t.Fatalf("shots in another order are not the same footage: %q %+v", k, m)
+	}
+	if k, m := ixVCompare(a, mirrored, 24, 24); k != "same" {
+		t.Fatalf("mirror image: %q %+v", k, m)
+	}
+	if k, m := ixVCompare(a, overlap, 24, 24); k != "overlap" || m.CoverA < 0.4 || m.CoverA > 0.6 {
+		t.Fatalf("overlap: %q %+v", k, m)
+	}
+	// The grid: a two-minute video keeps one sample a second.
+	var half []ixVFrame
+	for i := 0; i < 240; i++ {
+		half = append(half, ixVFrame{T: float32(i) / 2})
+	}
+	if g := ixOnGrid(half, 120); len(g) != 120 || g[1].T != 1 {
+		t.Fatalf("grid: %d", len(g))
+	}
+	// Letterbox bars are cut before hashing.
+	frame := make([]byte, ixVSide*ixVSide)
+	boxed := make([]byte, ixVSide*ixVSide)
+	pat := ixPattern(3, 0)
+	for y := 0; y < ixVSide; y++ {
+		for x := 0; x < ixVSide; x++ {
+			frame[y*ixVSide+x] = pat[(y*32/ixVSide)*32+x*32/ixVSide]
+			if y >= 16 && y < 80 {
+				boxed[y*ixVSide+x] = pat[((y-16)*32/64)*32+x*32/ixVSide]
+			}
+		}
+	}
+	hb1, _, ok1 := ixFrameHashes(frame, ixVSide)
+	hb2, _, ok2 := ixFrameHashes(boxed, ixVSide)
+	if !ok1 || !ok2 || bits.OnesCount64(hb1^hb2) > ixVdupHamming {
+		t.Fatalf("letterboxed frame differs by %d bits", bits.OnesCount64(hb1^hb2))
+	}
+	// The candidate index finds the copy and the clip, not the other video.
+	idx := newIxVIndex()
+	idx.add("h:a", a)
+	idx.add("h:o", other)
+	got := idx.candidates("h:new", reencoded, 10)
+	if len(got) != 1 || got[0] != "h:a" {
+		t.Fatalf("candidates: %v", got)
 	}
 	packed := ixUnpackFrames(ixPackFrames(a))
 	if len(packed) != len(a) || packed[3] != a[3] {
@@ -94,14 +159,14 @@ func TestIxNearDuplicatesFoundIndexedAndListed(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer a.Close()
-	hashes := make([]uint64, 10)
+	hashes := make([]uint64, 40)
 	for i := range hashes {
 		hashes[i], _ = ixPHash(ixPattern(i+20, 0))
 	}
-	frames := func(start float32, idx ...int) []ixVFrame {
+	frames := func(start float32, from, to int) []ixVFrame {
 		var out []ixVFrame
-		for i, n := range idx {
-			out = append(out, ixVFrame{T: start + float32(i*4), H: hashes[n]})
+		for i := from; i < to; i++ {
+			out = append(out, ixVFrame{T: start + float32(i-from), H: hashes[i], HF: hashes[i]})
 		}
 		return out
 	}
@@ -109,10 +174,10 @@ func TestIxNearDuplicatesFoundIndexedAndListed(t *testing.T) {
 		dur    float64
 		frames []ixVFrame
 	}{
-		"a.mp4": {24, frames(0, 0, 1, 2, 3, 4, 5)},
-		"b.mp4": {24, frames(0.3, 0, 1, 2, 3, 4, 5)},
-		"c.mp4": {12, frames(0, 2, 3, 4)},
-		"d.mp4": {12, frames(0, 7, 8, 9)},
+		"a.mp4": {24, frames(0, 0, 24)},
+		"b.mp4": {24, frames(0.3, 0, 24)},
+		"c.mp4": {12, frames(0, 8, 20)},
+		"d.mp4": {12, frames(0, 26, 38)},
 	}
 	saved, savedHave := ixFingerprintVideo, ixHaveFFmpeg
 	defer func() { ixFingerprintVideo, ixHaveFFmpeg = saved, savedHave }()
@@ -225,17 +290,20 @@ func TestIxRealVideosNearDuplicates(t *testing.T) {
 	run("-ss", "4", "-i", "a.mp4", "-t", "10", "-vf", "scale=240:136", "-c:v", "libx264", "-crf", "28", "c.mp4")
 	run("-f", "lavfi", "-i", "life=s=320x180:r=25:mold=10:ratio=0.1,trim=duration=8", "-f", "lavfi", "-i", "yuvtestsrc=s=320x180:d=8:r=25",
 		"-filter_complex", "[0][1]concat=n=2:v=1[v]", "-map", "[v]", "-c:v", "libx264", "-pix_fmt", "yuv420p", "d.mp4")
+	// Letterboxed, with different key frame spacing; and a mirror image.
+	run("-i", "a.mp4", "-vf", "scale=320:136,pad=320:180:0:22:black", "-c:v", "libx264", "-crf", "30", "-g", "250", "e.mp4")
+	run("-i", "a.mp4", "-vf", "hflip", "-c:v", "libx264", "-crf", "30", "-g", "12", "f.mp4")
 	fp := map[string][]ixVFrame{}
 	dur := map[string]float64{}
-	for _, n := range []string{"a", "b", "c", "d"} {
+	for _, n := range []string{"a", "b", "c", "d", "e", "f"} {
 		d, f, err := ixFFmpegFingerprint(context.Background(), filepath.Join(dir, n+".mp4"), "")
 		if err != nil {
 			t.Fatal(err)
 		}
 		fp[n], dur[n] = f, d
 	}
-	for _, c := range []struct{ x, y, want string }{{"a", "b", "same"}, {"a", "c", "clip"}, {"a", "d", ""}, {"c", "d", ""}} {
-		if k, m := ixVKind(fp[c.x], fp[c.y], dur[c.x], dur[c.y]); k != c.want {
+	for _, c := range []struct{ x, y, want string }{{"a", "b", "same"}, {"a", "c", "clip"}, {"a", "d", ""}, {"c", "d", ""}, {"a", "e", "same"}, {"a", "f", "same"}, {"e", "d", ""}} {
+		if k, m := ixVCompare(fp[c.x], fp[c.y], dur[c.x], dur[c.y]); k != c.want {
 			t.Errorf("%s/%s: %q want %q (%+v, %d/%d frames)", c.x, c.y, k, c.want, m, len(fp[c.x]), len(fp[c.y]))
 		}
 	}

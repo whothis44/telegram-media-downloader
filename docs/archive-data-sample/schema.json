@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/whothis44/telegram-media-downloader/docs/archive-data-sample/schema.json",
-  "title": "Telegram archive data export, format version 2",
-  "description": "One JSON object per line in each .jsonl file. Use the $defs entry named after the file: manifest.json → manifest, groups.jsonl → group, messages/*.jsonl.gz → message, files.jsonl → file, peers.jsonl → peer, topics.jsonl → topic, near_duplicates.jsonl → nearDuplicateSet.",
+  "title": "Telegram archive data export, format version 3",
+  "description": "One JSON object per line in each .jsonl file. Use the $defs entry named after the file: manifest.json → manifest, groups.jsonl → group, messages/*.jsonl.gz → message, files.jsonl → file, peers.jsonl → peer, topics.jsonl → topic, near_duplicates.jsonl → nearDuplicateSet, posts.jsonl → post, families.jsonl → family, media_clusters.jsonl → mediaCluster, covered.jsonl → covered, entities.jsonl → entity. manifest-sha256.txt is plain text: '<sha256>  <path>' per line.",
   "$defs": {
     "groupId": {
       "type": "string",
@@ -52,7 +52,7 @@
           "const": "telegram-archive"
         },
         "format_version": {
-          "const": 2
+          "const": 3
         },
         "exported_at": {
           "type": "string",
@@ -176,6 +176,26 @@
         },
         "forum": {
           "type": "boolean"
+        },
+        "link": {
+          "type": "string",
+          "description": "Public link (https://t.me/<username>)."
+        },
+        "invite_link": {
+          "type": "string",
+          "description": "An invite link, when Telegram gave one (the account made it or administers the chat)."
+        },
+        "photo": {
+          "type": "string",
+          "description": "The chat's picture, relative to the data folder (photos/...)."
+        },
+        "message_ids_gone": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9]+(-[0-9]+)?$"
+          },
+          "description": "Message numbers Telegram confirmed are gone, as single numbers or ranges."
         }
       }
     },
@@ -619,7 +639,8 @@
               "kind": {
                 "enum": [
                   "same",
-                  "clip"
+                  "clip",
+                  "overlap"
                 ]
               },
               "score": {
@@ -630,6 +651,364 @@
               "offset_s": {
                 "type": "number",
                 "description": "Where the clip starts inside the longer video, in seconds."
+              },
+              "cover_a": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "cover_b": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    "postFile": {
+      "type": "object",
+      "required": [
+        "message_id",
+        "cluster",
+        "status"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "message_id": {
+          "type": "integer"
+        },
+        "cluster": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "path": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "subst",
+            "held",
+            "missing"
+          ],
+          "description": "ok: downloaded; subst: not downloaded, the same bytes are saved (see covered.jsonl); held: a probable copy waiting at the back of the queue; missing: not downloaded"
+        }
+      }
+    },
+    "postRef": {
+      "type": "string",
+      "pattern": "^-?[0-9]+:[0-9]+$",
+      "description": "<group_id>:<first message_id>"
+    },
+    "post": {
+      "type": "object",
+      "required": [
+        "post",
+        "group_id",
+        "message_ids",
+        "date",
+        "family",
+        "role",
+        "files"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "post": {
+          "$ref": "#/$defs/postRef"
+        },
+        "group_id": {
+          "$ref": "#/$defs/groupId"
+        },
+        "message_ids": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          }
+        },
+        "album_id": {
+          "type": "string"
+        },
+        "date": {
+          "$ref": "#/$defs/unixSeconds"
+        },
+        "original_date": {
+          "$ref": "#/$defs/unixSeconds"
+        },
+        "family": {
+          "type": "integer"
+        },
+        "role": {
+          "enum": [
+            "original",
+            "repost",
+            "adds"
+          ]
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/postFile"
+          }
+        }
+      }
+    },
+    "family": {
+      "type": "object",
+      "required": [
+        "family",
+        "lead_post",
+        "first_date",
+        "chats",
+        "posts",
+        "files"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "family": {
+          "type": "integer"
+        },
+        "lead_post": {
+          "$ref": "#/$defs/postRef"
+        },
+        "first_date": {
+          "$ref": "#/$defs/unixSeconds"
+        },
+        "chats": {
+          "type": "integer"
+        },
+        "merged": {
+          "type": "boolean"
+        },
+        "posts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "post",
+              "group_id",
+              "date",
+              "role"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "post": {
+                "$ref": "#/$defs/postRef"
+              },
+              "group_id": {
+                "$ref": "#/$defs/groupId"
+              },
+              "date": {
+                "$ref": "#/$defs/unixSeconds"
+              },
+              "role": {
+                "enum": [
+                  "original",
+                  "repost",
+                  "adds"
+                ]
+              }
+            }
+          }
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "cluster",
+              "best",
+              "introduced_by"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "cluster": {
+                "type": "integer"
+              },
+              "best": {
+                "$ref": "#/$defs/postFile"
+              },
+              "introduced_by": {
+                "$ref": "#/$defs/postRef"
+              }
+            }
+          }
+        }
+      }
+    },
+    "mediaCluster": {
+      "type": "object",
+      "required": [
+        "cluster",
+        "kind",
+        "best",
+        "members"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "cluster": {
+          "type": "integer"
+        },
+        "kind": {
+          "enum": [
+            "photo",
+            "video",
+            "other"
+          ]
+        },
+        "generic": {
+          "type": "boolean"
+        },
+        "best": {
+          "$ref": "#/$defs/postFile"
+        },
+        "members": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "object",
+            "required": [
+              "group_id",
+              "message_id",
+              "status",
+              "matched_by"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "group_id": {
+                "$ref": "#/$defs/groupId"
+              },
+              "message_id": {
+                "type": "integer"
+              },
+              "sha256": {
+                "$ref": "#/$defs/sha256"
+              },
+              "path": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "ok",
+                  "subst",
+                  "held",
+                  "missing"
+                ]
+              },
+              "matched_by": {
+                "enum": [
+                  "same_bytes",
+                  "picture_auto",
+                  "picture_verified",
+                  "video_same",
+                  "person",
+                  "held_likely_copy"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "covered": {
+      "type": "object",
+      "required": [
+        "group_id",
+        "message_id",
+        "how",
+        "at"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "group_id": {
+          "$ref": "#/$defs/groupId"
+        },
+        "message_id": {
+          "type": "integer"
+        },
+        "how": {
+          "enum": [
+            "telegram-hashes",
+            "sampled-parts",
+            "held"
+          ]
+        },
+        "of_path": {
+          "type": "string"
+        },
+        "like": {
+          "type": "string"
+        },
+        "at": {
+          "$ref": "#/$defs/unixMillis"
+        }
+      }
+    },
+    "entity": {
+      "type": "object",
+      "required": [
+        "kind",
+        "value",
+        "count",
+        "chats",
+        "first",
+        "last"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "telegram_link",
+            "mention",
+            "email",
+            "phone",
+            "btc",
+            "eth",
+            "tron",
+            "ltc",
+            "doge",
+            "xmr",
+            "iban"
+          ]
+        },
+        "value": {
+          "type": "string"
+        },
+        "count": {
+          "type": "integer"
+        },
+        "chats": {
+          "type": "integer"
+        },
+        "first": {
+          "$ref": "#/$defs/unixSeconds"
+        },
+        "last": {
+          "$ref": "#/$defs/unixSeconds"
+        },
+        "refs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "group",
+              "msg",
+              "date"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "group": {
+                "$ref": "#/$defs/groupId"
+              },
+              "msg": {
+                "type": "integer"
+              },
+              "date": {
+                "$ref": "#/$defs/unixSeconds"
               }
             }
           }

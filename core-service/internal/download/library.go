@@ -56,6 +56,11 @@ type Record struct {
 // Only active transfers have in-memory entries, bounded by the worker limit.
 // It shares the app's SQLite writer with deletion and cleanup.
 type Library struct {
+	// Substitute (an archive option) may name a saved file that holds this
+	// item's exact bytes, checked on Telegram without a full download. The
+	// item is then catalogued like a forward of that file.
+	Substitute func(context.Context, Item, Client) (string, bool)
+
 	writer, reader *sql.DB
 	root           string
 	dataDir        string
@@ -155,6 +160,13 @@ func (l *Library) Ingest(ctx context.Context, item Item, client Client) (Record,
 	}
 	if client == nil {
 		return Record{}, errors.New("Telegram download client is unavailable")
+	}
+	if l.Substitute != nil {
+		if path, ok := l.Substitute(ctx, item, client); ok {
+			if record, found, err := l.reuse(ctx, item, `d.file_path=?`, path); err != nil || found {
+				return record, err
+			}
+		}
 	}
 	relative, err := l.destination(item)
 	if err != nil {

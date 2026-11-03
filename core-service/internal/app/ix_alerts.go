@@ -45,6 +45,10 @@ func (a *App) ixAlertConditions(ctx context.Context, s ixSettings, now time.Time
 		out = append(out, ixAlert{Key: "account:frozen", Title: "Telegram account frozen",
 			Message: "Telegram reports the account is frozen (" + acct.LastError + "). Rescans continue while history can still be read."})
 	}
+	out = append(out, ixFreezeAlerts(a.ixFreeze(ctx), now)...)
+	for _, ev := range a.ixFixityProblems(ctx, now) {
+		out = append(out, ev)
+	}
 	if st, err := a.ixLoadQueue(ctx); err == nil {
 		var names []string
 		var keys []string

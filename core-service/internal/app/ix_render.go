@@ -284,6 +284,8 @@ func (r *ixRender) nearHTML(f *ixFile, g *ixGroup, m *ixMsg) string {
 	word := "near-duplicate"
 	if kinds["clip"] && !kinds["same"] {
 		word = "same footage, different length"
+	} else if kinds["overlap"] && !kinds["same"] && !kinds["clip"] {
+		word = "shares footage"
 	}
 	more := ""
 	if total > 3 {

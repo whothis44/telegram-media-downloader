@@ -41,10 +41,11 @@ func (a *App) ixRecordChatInfo(ctx context.Context, session *engine.MessageSessi
 		return
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, `INSERT INTO ix_group_info(group_id,title,kind,about,username,members,pinned_id,linked_group,info_at,tl) VALUES(?,?,?,?,?,?,?,?,?,?)
+	if _, err = tx.ExecContext(ctx, `INSERT INTO ix_group_info(group_id,title,kind,about,username,members,pinned_id,linked_group,info_at,tl,invite_link) VALUES(?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(group_id) DO UPDATE SET title=excluded.title, kind=excluded.kind, about=excluded.about, username=excluded.username, members=excluded.members,
-			pinned_id=excluded.pinned_id, linked_group=excluded.linked_group, info_at=excluded.info_at, tl=excluded.tl`,
-		groupID, info.Title, info.Kind, info.About, info.Username, info.Members, info.PinnedID, linked, now, info.TL); err != nil {
+			pinned_id=excluded.pinned_id, linked_group=excluded.linked_group, info_at=excluded.info_at, tl=excluded.tl,
+			invite_link=CASE WHEN excluded.invite_link<>'' THEN excluded.invite_link ELSE invite_link END`,
+		groupID, info.Title, info.Kind, info.About, info.Username, info.Members, info.PinnedID, linked, now, info.TL, info.Invite); err != nil {
 		a.ixLog("chat details for %s: %v", groupID, err)
 		return
 	}
