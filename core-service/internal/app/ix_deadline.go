@@ -95,12 +95,18 @@ func (a *App) ixDeadlineEstimate(ctx context.Context, withLoss bool) ixDeadlineI
 		rows.Close()
 	}
 	d.Active = ixDeadlineActive(d)
+	// A chat counts as read once a full rescan finished (now or before),
+	// unless it is waiting in the queue for another one.
 	q, _ := a.ixLoadQueue(ctx)
 	scanned := map[string]bool{}
+	for id, at := range a.ixLatestWalks(ctx) {
+		scanned[id] = at > 0
+	}
 	for _, it := range q.Items {
 		if it.State == "done" {
 			scanned[it.GroupID] = true
 		} else {
+			scanned[it.GroupID] = false
 			d.Unscanned++
 		}
 	}

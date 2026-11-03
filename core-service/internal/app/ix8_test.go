@@ -413,8 +413,12 @@ func TestIxDeadlinePutsSmallerFilesFirst(t *testing.T) {
 	}
 	a.ixSaveFreeze(ctx, ixFreezeInfo{FreezeState: ixTestFreeze(now.Add(48 * time.Hour).Unix())})
 	d := a.ixDeadlineEstimate(ctx, true)
-	if d.Finishes != "no" || !d.Active || d.LeftFiles != 4 || len(d.Loss) != 1 || !d.Loss[0].Private {
+	if d.Finishes != "no" || !d.Active || d.LeftFiles != 4 || len(d.Loss) != 1 || !d.Loss[0].Private || d.Loss[0].Scanned {
 		t.Fatalf("estimate: %+v", d)
+	}
+	_, _ = a.db.Writer.Exec(`INSERT INTO ix_walks(job_id,group_id,started_at,finished_at,processed,marked_deleted,state) VALUES('w',?,?,?,1,0,'done')`, "-1001", now.UnixMilli(), now.UnixMilli())
+	if d := a.ixDeadlineEstimate(ctx, true); !d.Loss[0].Scanned {
+		t.Fatalf("a chat with a finished rescan shows as not read: %+v", d.Loss)
 	}
 	if err := a.ixDeadlineStep(ctx); err != nil {
 		t.Fatal(err)
