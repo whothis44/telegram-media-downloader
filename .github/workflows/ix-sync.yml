@@ -1,0 +1,79 @@
+name: Sync with the original project
+
+# Daily: merge botnick/telegram-media-downloader into this fork, run the
+# tests, and publish a release that ix-update.ps1 installs on next start.
+# On a merge conflict or a failing test nothing is published and this run
+# fails, so GitHub emails the owner.
+
+on:
+  schedule:
+    - cron: '17 9 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Merge the original project
+        id: merge
+        run: |
+          set -eu
+          git config user.name "ix-sync"
+          git config user.email "ix-sync@users.noreply.github.com"
+          git remote add upstream https://github.com/botnick/telegram-media-downloader.git
+          git fetch --no-tags upstream main
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "Already up to date."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          file=core-service/internal/version/app.go
+          ours=$(sed -n 's/^var AppVersion = "\(.*\)"$/\1/p' "$file")
+          if ! git merge --no-edit upstream/main; then
+            # The version line is expected to conflict; it is set below.
+            git checkout --theirs "$file" && git add "$file"
+            if [ -n "$(git diff --name-only --diff-filter=U)" ]; then
+              echo "::error::The original project changed the same lines as the archive features:"
+              git diff --name-only --diff-filter=U
+              exit 1
+            fi
+            git commit --no-edit
+          fi
+          up=$(git show upstream/main:"$file" | sed -n 's/^var AppVersion = "\(.*\)"$/\1/p')
+          base=${ours%%-ix.*}
+          n=${ours##*-ix.}
+          case "$n" in ''|*[!0-9]*) n=0;; esac
+          if [ "$up" = "$base" ]; then n=$((n+1)); else n=1; fi
+          new="$up-ix.$n"
+          sed -i "s/^var AppVersion = \".*\"$/var AppVersion = \"$new\"/" "$file"
+          git commit -am "Sync with the original project (version $new)"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "version=$new" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v7
+        if: steps.merge.outputs.changed == 'true'
+        with:
+          go-version-file: core-service/go.mod
+          cache-dependency-path: core-service/go.sum
+      - name: Test before publishing
+        if: steps.merge.outputs.changed == 'true'
+        run: |
+          go -C core-service vet ./...
+          go -C core-service test ./...
+      - name: Push and publish the release
+        if: steps.merge.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.merge.outputs.version }}
+        run: |
+          set -eu
+          git push origin HEAD:main
+          RELEASE_VERSION="$VERSION" TGDL_RELEASE_TARGETS="windows/amd64 windows/arm64 linux/amd64" ./scripts/build-server-release.sh
+          gh release create "v$VERSION" core-service/dist/tgdl-server-*.tar.gz core-service/dist/SHA256SUMS \
+            --title "v$VERSION" --target main \
+            --notes "Synced with the original project ($(git log -1 --format=%h upstream/main)). Archive features unchanged."
