@@ -50,7 +50,7 @@ const (
 	paceInterval   = 10 * time.Second
 	paceStart      = 4   // parts in flight on a datacenter not seen before (TDLib's free tier is 2 MiB)
 	paceMin        = 1   // never fewer
-	paceMax        = 80  // never more (ix.8 could have 20 files × 4 parts in flight)
+	paceMax        = 32  // never more: twice Telegram Desktop's 16 MiB; about 100 drew -429 on every socket (MadelineProto)
 	paceGainShare  = 0.5 // a try is kept when it brings at least half the speed it could (step/window)
 	paceCut        = 0.6
 	paceFloodHold  = time.Minute

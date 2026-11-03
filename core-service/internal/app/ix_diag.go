@@ -129,7 +129,7 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 		line("running %v · %d groups · %v · notice: %s", st.Running, len(st.Items), count, r.clean(st.Notice))
 		for _, it := range st.Items {
 			if it.Error != "" || it.State == "running" {
-				line("  %s %s/%s attempts %d resume %d messages %d missing %d: %s", r.group(it.GroupID), it.State, it.Phase, it.Attempts, it.ResumeFrom, it.Messages, it.Missing, r.clean(it.Error))
+				line("  %s %s/%s attempts %d resumes %s messages %d missing %d: %s", r.group(it.GroupID), it.State, it.Phase, it.Attempts, ixYesNo(it.ResumeFrom > 0), it.Messages, it.Missing, r.clean(it.Error))
 			}
 		}
 	}
@@ -272,4 +272,13 @@ func (a *App) handleIxDiagnostics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write([]byte(a.ixDiagnostics(r.Context())))
+}
+
+// ixYesNo: a message number would say where in a chat the rescan is; the
+// report only says whether it resumes.
+func ixYesNo(b bool) string {
+	if b {
+		return "yes"
+	}
+	return "no"
 }
