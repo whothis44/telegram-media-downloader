@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Archive — Telegram Media Downloader</title>
+<style>
+:root{--bg:#fff;--fg:#1f2328;--muted:#5d6670;--line:#d9dde3;--soft:#f3f5f7;--accent:#2481cc;--accent-fg:#fff;--ok:#1a7f37;--warn:#9a6700;--bad:#cf222e}
+@media (prefers-color-scheme:dark){:root{--bg:#17212b;--fg:#e7edf3;--muted:#9aa7b4;--line:#2b3a49;--soft:#1f2c3a;--accent:#5eaaf0;--accent-fg:#0d1620;--ok:#4cc26a;--warn:#e3b341;--bad:#ff7b72}}
+*{box-sizing:border-box}html,body{margin:0;background:var(--bg);color:var(--fg);font:14.5px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:1200px;margin:0 auto;padding:12px 16px 40px}a{color:var(--accent)}
+header.top{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:6px 0 10px;border-bottom:1px solid var(--line);margin-bottom:12px}
+header.top h1{font-size:19px;margin:0}.grow{flex:1}
+.tabs{display:flex;gap:4px;flex-wrap:wrap}.tab{border:1px solid var(--line);background:var(--soft);color:var(--fg);border-radius:8px;padding:6px 12px;cursor:pointer;font-size:14px}
+.tab.on{background:var(--accent);border-color:var(--accent);color:var(--accent-fg);font-weight:600}
+.status{padding:10px 12px;border-radius:10px;background:var(--soft);margin:0 0 12px}.status.bad{border:1px solid var(--bad)}.status.warn{border:1px solid var(--warn)}
+.card{border:1px solid var(--line);border-radius:10px;padding:12px;margin:0 0 12px;display:flex;flex-direction:column;gap:8px}
+.card h2{font-size:16px;margin:0}
+.muted{color:var(--muted);font-size:13px}.warn{color:var(--warn)}.bad{color:var(--bad)}.ok{color:var(--ok)}
+table{border-collapse:collapse;width:100%;font-size:13.5px}th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}th{color:var(--muted);font-weight:600;position:sticky;top:0;background:var(--bg)}td.n{text-align:right;font-variant-numeric:tabular-nums}
+.btns{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+button.b{border:1px solid var(--line);background:var(--soft);color:var(--fg);border-radius:8px;padding:6px 12px;font-size:13.5px;cursor:pointer}
+button.b.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-fg);font-weight:600}button.b:disabled{opacity:.5;cursor:default}
+button.mini{border:0;background:none;color:var(--muted);cursor:pointer;font-size:13px;padding:2px 4px;text-decoration:underline}button.mini:disabled{opacity:.5;cursor:default}
+input.t,select.t{padding:6px 9px;border-radius:8px;border:1px solid var(--line);background:var(--soft);color:var(--fg);font-size:14px}
+.chips{display:flex;flex-wrap:wrap;gap:6px}.chip{white-space:nowrap;border:1px solid var(--line);background:var(--soft);color:var(--fg);border-radius:999px;padding:3px 10px;font-size:12.5px;cursor:pointer}
+.chip span{color:var(--muted);margin-left:2px}.chip.on{background:var(--accent);border-color:var(--accent);color:var(--accent-fg)}.chip.on span{color:var(--accent-fg)}
+.sticky{position:sticky;top:0;z-index:2;background:var(--bg);padding:8px 0;display:flex;flex-direction:column;gap:8px;border-bottom:1px solid var(--line)}
+.rows{border:1px solid var(--line);border-radius:10px}
+.row{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);gap:12px;align-items:center;padding:7px 10px;border-top:1px solid var(--line)}
+.row:first-child{border-top:0}.row.sel{background:var(--soft)}
+.row label{display:flex;gap:8px;align-items:center;cursor:pointer;min-width:0;word-break:break-word}
+.row .cat{display:flex;gap:6px;align-items:center}.row .cat input{flex:1;min-width:0}
+@media (max-width:700px){.row{grid-template-columns:1fr}}
+.pill{font-size:11.5px;font-weight:600;padding:2px 8px;border-radius:999px;border:1px solid var(--line);white-space:nowrap}
+.pill.done{color:var(--ok);border-color:var(--ok)}.pill.failed{color:var(--bad);border-color:var(--bad)}.pill.running{color:var(--accent);border-color:var(--accent)}
+.hit{border-bottom:1px solid var(--line);padding:8px 2px}.hit mark{background:#ffe58a;color:#000;border-radius:2px}
+.list{max-height:420px;overflow:auto;border:1px solid var(--line);border-radius:10px}
+.log{white-space:pre-wrap;font-size:12.5px}
+</style>
+</head>
+<body>
+<main id="app"><p class="muted">Loading…</p></main>
+<script>
+(() => {
+'use strict';
+const $app = document.getElementById('app');
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+const NONE = ' none', UNSAVED = ' unsaved';
+const fmtNum = (n) => Number(n || 0).toLocaleString('en-CA');
+const fmtTime = (ms) => (ms ? new Date(ms).toLocaleString('en-CA', { dateStyle: 'medium', timeStyle: 'short' }) : '');
+const fmtDate = (s) => (s ? new Date(s * 1000).toLocaleDateString('en-CA') : '');
+const suggest = (name) => { const m = String(name || '').trim().match(/^(.*?)[\s._-]*\d+$/); return m && m[1].trim() ? m[1].trim() : ''; };
+const natural = (a, b) => String(a).localeCompare(String(b), undefined, { sensitivity: 'base', numeric: true });
+
+async function api(method, url, body) {
+  const init = { method, credentials: 'same-origin', headers: {} };
+  if (body !== undefined) { init.headers['Content-Type'] = 'application/json'; init.body = JSON.stringify(body); }
+  try {
+    const r = await fetch(url, init);
+    let data = null;
+    try { data = await r.json(); } catch { /* not JSON */ }
+    if (r.status === 401) { location.href = '/login.html'; }
+    return { ok: r.ok, status: r.status, data };
+  } catch (e) { return { ok: false, status: 0, data: { error: String(e) } }; }
+}
+const errText = (r) => (r.data && r.data.error) || ('HTTP ' + r.status);
+
+const state = {
+  tab: (location.hash || '#overview').slice(1),
+  status: null, error: '',
+  // categories
+  draft: new Map(), sel: new Set(), bulk: '', search: '', filter: '', saving: false, msg: '',
+  // rescan
+  pick: new Set(), pickInit: false, pickSearch: '', ensureFilters: true, dialogs: null, dialogsLoading: false, showAll: false,
+  // search
+  q: '', qCategory: '', hits: null, searching: false, qMore: false, qMode: '',
+};
+
+async function load() {
+  const r = await api('GET', '/api/ix/status');
+  if (r.ok) {
+    state.status = r.data; state.error = '';
+    // Every group starts ticked: the usual job is "rescan everything".
+    if (!state.pickInit) { state.pickInit = true; for (const g of groups()) state.pick.add(g.id); }
+  } else state.error = 'Could not load: ' + errText(r);
+  render();
+}
+
+function groups() { return ((state.status && state.status.groups) || []).filter((g) => g.configured).sort((a, b) => natural(a.name, b.name)); }
+function catOf(g) { return state.draft.has(g.id) ? state.draft.get(g.id) : (g.category || ''); }
+function changed() { return groups().filter((g) => state.draft.has(g.id) && state.draft.get(g.id).trim() !== (g.category || '')); }
+
+function banner() {
+  const s = state.status;
+  if (!s) return '';
+  let h = '';
+  const acct = s.account || {};
+  if (acct.deactivated) h += `<div class="status bad"><b>Telegram reports this account is logged out or deactivated</b> (${esc(acct.lastError)}). Rescans are paused.</div>`;
+  else if (acct.frozen) h += `<div class="status warn"><b>Telegram reports this account is frozen</b> (${esc(acct.lastError)}). Reading history still works, so rescans continue${s.settings && s.settings.pauseOnFreeze ? ' — except that you chose to pause them on a freeze (Settings)' : ''}. Messages saved here stay saved even if the account is later deleted.</div>`;
+  else if (acct.floodWait) h += `<div class="status"><b>Telegram asked the app to slow down</b> (${esc(acct.lastError)}). The app waits as asked; nothing to do.</div>`;
+  if (s.hold && (!acct.deactivated)) h += `<div class="status warn">${esc(s.hold)}</div>`;
+  return h;
+}
+
+// ---------------- Overview ----------------
+function viewOverview() {
+  const s = state.status;
+  const gs = (s.groups || []).slice().sort((a, b) => natural(a.name, b.name));
+  const total = gs.reduce((n, g) => n + g.messages, 0);
+  const notYet = gs.filter((g) => !g.lastWalk).length;
+  const ex = s.export || {};
+  let h = `<div class="card"><h2>Your index</h2>
+<div class="btns"><a class="b" style="text-decoration:none;padding:7px 12px;border-radius:8px;border:1px solid var(--accent);background:var(--accent);color:var(--accent-fg);font-weight:600" href="/ix/view/" target="_blank">Open the index</a>
+<button class="b" data-act="export" ${ex.running ? 'disabled' : ''}>${ex.running ? 'Writing…' : 'Write the index to the NAS now'}</button></div>
+<div class="muted">The index opens here in the dashboard, always up to date. A copy is also written to <code>${esc(s.exportDir || '?')}</code> ${s.settings.exportEnabled ? 'every night at ' + esc(s.settings.exportTime) : '(nightly copy turned off in Settings)'}, so you can open <code>index.html</code> there without the app.${s.exportDirError ? ` <span class="bad">${esc(s.exportDirError)}</span>` : ''}</div>
+${ex.running ? `<div class="muted">${esc(ex.progress || 'Working…')}</div>` : ''}
+${ex.finishedAt && !ex.running ? `<div class="muted">Last written ${esc(fmtTime(ex.finishedAt))}${ex.error ? ` — <span class="bad">failed: ${esc(ex.error)}</span>` : ` (${fmtNum(ex.files)} files)`}.</div>` : ''}
+</div>`;
+  h += `<div class="card"><h2>Messages captured</h2><div class="muted">${fmtNum(total)} messages saved across ${gs.length} group(s). ${notYet ? `<b>${notYet} group(s) have not had a full rescan yet</b> — use the Rescan tab to capture their history.` : 'Every group has had a full rescan.'} New posts are saved as the monitor sees them.</div>
+<div class="list"><table><tr><th>Group</th><th>Category</th><th>Messages saved</th><th>Deleted on Telegram</th><th>Files</th><th>Dates</th><th>Last full rescan</th></tr>`;
+  for (const g of gs) {
+    h += `<tr><td><a href="/ix/view/${esc(g.dir)}/index.html" target="_blank">${esc(g.name)}</a></td><td>${esc(g.category || '')}</td><td class="n">${g.messages ? fmtNum(g.messages) : '<span class="warn">none yet</span>'}</td><td class="n">${fmtNum(g.deleted)}</td><td class="n">${fmtNum(g.files)}</td><td class="muted">${esc(fmtDate(g.firstDate))}${g.firstDate ? ' – ' : ''}${esc(fmtDate(g.lastDate))}</td><td>${g.lastWalk ? esc(fmtTime(g.lastWalk)) : '<span class="warn">never</span>'}</td></tr>`;
+  }
+  h += `</table></div></div>`;
+  return h;
+}
+
+// ---------------- Rescan ----------------
+function viewRescan() {
+  const s = state.status;
+  const q = s.queue || { items: [] };
+  const items = q.items || [];
+  const counts = { waiting: 0, running: 0, done: 0, failed: 0 };
+  items.forEach((i) => (counts[i.state] = (counts[i.state] || 0) + 1));
+  let head;
+  if (q.running) head = `<b>Running</b> — ${counts.done} of ${items.length} group(s) done${counts.failed ? `, ${counts.failed} failed` : ''}.`;
+  else if (items.length && counts.waiting + counts.running) head = `<b>Paused</b> — ${counts.done} of ${items.length} group(s) done.`;
+  else if (items.length) head = `<b>Finished</b> — ${counts.done} of ${items.length} group(s) done${counts.failed ? `, ${counts.failed} failed` : ''}.`;
+  else head = '<b>Nothing queued.</b> Tick groups below and add them.';
+  const notQueued = groups().filter((g) => !items.some((i) => i.groupId === g.id && (i.state === 'waiting' || i.state === 'running')));
+  let h = `<div class="card"><h2>Rescan everything</h2><div class="muted">Full history of every group, one group after another, with photos, videos <b>and files/documents</b> switched on. Groups already in the queue are skipped.</div>
+<div class="btns"><button class="b primary" data-act="p-everything" ${notQueued.length ? '' : 'disabled'}>Rescan all ${notQueued.length} group(s)</button></div></div>`;
+  h += `<div class="status">${head} Each group gets a full walk of its history, one group at a time: every message is saved, and any file not downloaded yet is fetched. Runs inside the server — you can close this page.${q.notice ? `<div class="muted" style="margin-top:4px">${esc(q.notice)}</div>` : ''}</div>`;
+  h += `<div class="btns" style="margin-bottom:12px">${q.running ? `<button class="b" data-act="q-pause">Pause</button>` : `<button class="b primary" data-act="q-start" ${counts.waiting ? '' : 'disabled'}>Start</button>`}
+<button class="b" data-act="q-clear-finished" ${counts.done + counts.failed ? '' : 'disabled'}>Remove finished</button><button class="b" data-act="q-clear" ${items.length ? '' : 'disabled'}>Clear queue</button>
+<span class="muted">Retries: ${q.maxAttempts ? 'up to ' + q.maxAttempts : 'unlimited'}</span></div>`;
+  if (items.length) {
+    h += `<div class="list" style="margin-bottom:12px"><table><tr><th>#</th><th>Group</th><th>State</th><th>Messages read</th><th>Files queued</th><th>Tries</th><th></th></tr>`;
+    items.forEach((it, i) => {
+      const when = it.state === 'waiting' && it.nextAt > Date.now() ? ` · retry ${esc(fmtTime(it.nextAt))}` : '';
+      h += `<tr><td class="n">${i + 1}</td><td>${esc(it.name)}${it.error ? `<div class="muted bad">${esc(it.error)}</div>` : ''}</td><td><span class="pill ${esc(it.state)}">${esc(it.state)}</span><span class="muted">${when}</span></td><td class="n">${fmtNum(it.processed)}</td><td class="n">${fmtNum(it.downloaded)}</td><td class="n">${it.attempts || 0}</td>
+<td>${it.state !== 'running' && it.state !== 'waiting' ? `<button class="mini" data-act="q-retry" data-id="${esc(it.groupId)}">Run again</button>` : ''}<button class="mini" data-act="q-remove" data-id="${esc(it.groupId)}">${it.state === 'running' ? 'Stop' : 'Remove'}</button></td></tr>`;
+    });
+    h += `</table></div>`;
+  }
+  // picker
+  const queued = new Set(items.filter((i) => i.state === 'waiting' || i.state === 'running').map((i) => i.groupId));
+  let list = groups().map((g) => ({ id: g.id, name: g.name, sub: (g.category ? g.category + ' · ' : '') + (g.lastWalk ? 'last rescan ' + fmtTime(g.lastWalk) : 'never fully rescanned'), never: !g.lastWalk }));
+  if (state.showAll && state.dialogs) {
+    const have = new Set(list.map((x) => x.id));
+    for (const d of state.dialogs) if (!have.has(d.id)) list.push({ id: d.id, name: d.name, sub: 'not in the downloader yet (' + (d.type || 'chat') + ')', extra: true });
+  }
+  const qq = state.pickSearch.trim().toLowerCase();
+  const shown = list.filter((x) => !qq || x.name.toLowerCase().includes(qq)).sort((a, b) => natural(a.name, b.name));
+  h += `<div class="card"><h2>Choose groups</h2><div class="muted">All groups start ticked. Untick any you want to leave out, or search and tick a few.</div>
+<div class="btns"><input class="t" style="flex:1;min-width:200px" placeholder="Search ${list.length} chats…" data-in="pickSearch" data-focus="pick" value="${esc(state.pickSearch)}">
+<button class="mini" data-act="p-all">Tick all ${shown.length} shown</button><button class="mini" data-act="p-never">Tick never rescanned</button><button class="mini" data-act="p-none">Untick all</button>
+<button class="mini" data-act="p-dialogs" ${state.dialogsLoading ? 'disabled' : ''}>${state.dialogsLoading ? 'Loading chats…' : state.showAll ? 'Hide other chats' : 'Show all my chats'}</button></div>
+<div class="list">${shown.map((x) => `<div class="row" style="grid-template-columns:1fr"><label><input type="checkbox" data-pick="${esc(x.id)}" data-name="${esc(x.name)}" ${state.pick.has(x.id) ? 'checked' : ''} ${queued.has(x.id) ? 'disabled' : ''}><span><b>${esc(x.name)}</b> <span class="muted">${esc(x.sub)}${queued.has(x.id) ? ' · in the queue' : ''}</span></span></label></div>`).join('') || '<div class="muted" style="padding:8px">No chats match.</div>'}</div>
+<label class="muted"><input type="checkbox" data-in-check="ensureFilters" ${state.ensureFilters ? 'checked' : ''}> Switch on photos, videos <b>and files/documents</b> for these groups (recommended)</label>
+<div class="btns"><button class="b primary" data-act="p-add" ${state.pick.size ? '' : 'disabled'}>Rescan ${state.pick.size} ticked group(s)</button></div></div>`;
+  return h;
+}
+
+// ---------------- Categories ----------------
+function shownGroups() {
+  const q = state.search.trim().toLowerCase();
+  return groups().filter((g) => {
+    const c = catOf(g).trim();
+    if (state.filter === NONE && c) return false;
+    if (state.filter === UNSAVED && !(state.draft.has(g.id) && c !== (g.category || ''))) return false;
+    if (state.filter && state.filter !== NONE && state.filter !== UNSAVED && c !== state.filter) return false;
+    return !q || g.name.toLowerCase().includes(q) || c.toLowerCase().includes(q);
+  });
+}
+function viewCategories() {
+  const all = groups();
+  const catCount = new Map();
+  let uncat = 0;
+  for (const g of all) { const c = catOf(g).trim(); if (c) catCount.set(c, (catCount.get(c) || 0) + 1); else uncat++; }
+  const cats = [...catCount.keys()].sort(natural);
+  const ch = changed().length;
+  if (state.filter && state.filter !== NONE && state.filter !== UNSAVED && !catCount.has(state.filter)) state.filter = '';
+  const shown = shownGroups();
+  const clusters = new Map();
+  for (const g of all) { if (catOf(g).trim()) continue; const s = suggest(g.name); if (s) { const k = s.toLowerCase(); const c = clusters.get(k) || { name: s, ids: [] }; c.ids.push(g.id); clusters.set(k, c); } }
+  const options = [...new Set(cats.concat([...clusters.values()].map((c) => c.name)))];
+  const chip = (key, label, n) => `<button class="chip ${state.filter === key ? 'on' : ''}" data-act="c-filter" data-key="${esc(key)}">${esc(label)} <span>${n}</span></button>`;
+  let h = `<div class="card"><h2>Categories</h2><div class="muted">Group related groups together (football-1, sports-3 and soccer-6 can all be "Sports"). In the index, each category gets a page showing every file once, with "also in…" links to everywhere it was posted.</div>
+<div class="sticky">
+<input class="t" type="search" placeholder="Search ${all.length} groups by name or category…" data-in="search" data-focus="csearch" value="${esc(state.search)}">
+<div class="chips">${chip('', 'All', all.length)}${chip(NONE, 'Uncategorised', uncat)}${ch ? chip(UNSAVED, 'Unsaved', ch) : ''}${cats.map((c) => chip(c, c, catCount.get(c))).join('')}</div>
+<div class="btns"><input class="t" style="flex:1;min-width:160px" list="ixcats" placeholder="Category for ticked groups" data-in="bulk" data-focus="bulk" value="${esc(state.bulk)}"><button class="b" data-act="c-bulk" ${state.sel.size ? '' : 'disabled'}>Set for ${state.sel.size} ticked</button><button class="b" data-act="c-bulk-clear" ${state.sel.size ? '' : 'disabled'}>Clear</button></div>
+<div class="btns"><button class="mini" data-act="c-all" ${shown.length ? '' : 'disabled'}>Tick all ${shown.length} shown</button><button class="mini" data-act="c-none" ${state.sel.size ? '' : 'disabled'}>Untick all${state.sel.size ? ` (${state.sel.size})` : ''}</button><span class="grow"></span>
+<button class="b" data-act="c-undo" ${ch && !state.saving ? '' : 'disabled'}>Undo changes</button><button class="b primary" data-act="c-save" ${ch && !state.saving ? '' : 'disabled'}>${state.saving ? 'Saving…' : `Save ${ch} change${ch === 1 ? '' : 's'}`}</button></div>
+${state.msg ? `<div class="muted">${esc(state.msg)}</div>` : ''}</div>
+<datalist id="ixcats">${options.map((c) => `<option value="${esc(c)}"></option>`).join('')}</datalist>`;
+  if (clusters.size && state.filter !== UNSAVED) {
+    const list = [...clusters.values()].sort((a, b) => b.ids.length - a.ids.length || natural(a.name, b.name));
+    h += `<div class="muted">Uncategorised groups with similar names — click to tick them: ${list.slice(0, 60).map((c) => `<button class="chip" data-act="c-cluster" data-key="${esc(c.name.toLowerCase())}">${esc(c.name)}… <span>${c.ids.length}</span></button>`).join(' ')} <button class="mini" data-act="c-suggest">Use all ${list.reduce((n, c) => n + c.ids.length, 0)} suggestions as they are</button></div>`;
+  }
+  h += `<div class="muted">${shown.length === all.length ? `${all.length} groups` : `Showing ${shown.length} of ${all.length} groups`}. Changes are kept until you press Save; a dot marks unsaved ones.</div><div class="rows">`;
+  for (const g of shown) {
+    const cur = catOf(g);
+    const dirty = state.draft.has(g.id) && cur.trim() !== (g.category || '');
+    const s = suggest(g.name);
+    h += `<div class="row${state.sel.has(g.id) ? ' sel' : ''}"><label><input type="checkbox" data-sel="${esc(g.id)}" ${state.sel.has(g.id) ? 'checked' : ''}><span>${esc(g.name)}${dirty ? ' <b class="warn">•</b>' : ''}</span></label><span class="cat"><input class="t" list="ixcats" data-cat="${esc(g.id)}" data-focus="cat-${esc(g.id)}" value="${esc(cur)}" placeholder="Uncategorised">${s && !cur.trim() ? `<button class="chip" data-act="c-use" data-id="${esc(g.id)}">→ ${esc(s)}</button>` : ''}</span></div>`;
+  }
+  h += `</div></div>`;
+  return h;
+}
+
+// ---------------- Search ----------------
+function viewSearch() {
+  const s = state.status;
+  const cats = [...new Set(groups().map((g) => g.category).filter(Boolean))].sort(natural);
+  let h = `<div class="card"><h2>Search messages</h2>
+<div class="btns"><input class="t" style="flex:1;min-width:220px" type="search" placeholder='Words to find (all of them); use "quotes" for a phrase' data-in="q" data-focus="q" value="${esc(state.q)}">
+<select class="t" data-sel-in="qCategory"><option value="">All categories</option>${cats.map((c) => `<option ${state.qCategory === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
+<button class="b primary" data-act="s-go" ${state.q.trim() && !state.searching ? '' : 'disabled'}>Search</button></div>
+<div class="muted">${s.search === 'full-text' ? 'Full-text search: words match from their start (bank finds banking).' : 'Simple search: finds the exact text you type.'} Results open in the index, at the message.</div>`;
+  if (state.searching) h += `<div class="muted">Searching…</div>`;
+  if (state.hits) {
+    if (!state.hits.length) h += `<div class="muted">No messages found.</div>`;
+    for (const x of state.hits) {
+      const snip = esc(x.snippet).replace(/\u0002/g, '<mark>').replace(/\u0003/g, '</mark>');
+      h += `<div class="hit"><div><a href="${esc(x.link)}" target="_blank"><b>${esc(x.group)}</b>${x.topic ? ' › ' + esc(x.topic) : ''} #${x.messageId}</a> <span class="muted">${esc(fmtDate(x.date))}${x.deleted ? ' · <span class="bad">deleted on Telegram</span>' : ''}</span></div><div>${snip}</div></div>`;
+    }
+    if (state.qMore) h += `<div class="btns" style="margin-top:8px"><button class="b" data-act="s-more">More results</button></div>`;
+  }
+  return h + `</div>`;
+}
+
+// ---------------- Settings ----------------
+function viewSettings() {
+  const s = state.status.settings;
+  return `<div class="card"><h2>Index copy on the NAS</h2>
+<label><input type="checkbox" data-set="exportEnabled" ${s.exportEnabled ? 'checked' : ''}> Write a copy of the index every night</label>
+<div class="btns">At <input class="t" data-set-text="exportTime" value="${esc(s.exportTime)}" style="width:80px"> (24-hour, this computer's time)</div>
+<div class="btns">Folder: <input class="t" data-set-text="exportDir" value="${esc(s.exportDir)}" placeholder="${esc(state.status.exportDir || '')}" style="flex:1;min-width:240px"></div>
+<div class="muted">Leave the folder empty to use a folder next to your downloads folder. It can't be inside the downloads folder.</div></div>
+<div class="card"><h2>Account safety</h2>
+<label>Pace of rescans: <select class="t" data-set-select="pace"><option value="normal" ${s.pace === 'normal' ? 'selected' : ''}>Normal</option><option value="gentle" ${s.pace === 'gentle' ? 'selected' : ''}>Gentle (pauses more often, smaller download batches)</option></select></label>
+<div class="btns">Quiet hours (no new group starts): <input class="t" data-set-text="quietStart" value="${esc(s.quietStart)}" placeholder="22:00" style="width:80px"> to <input class="t" data-set-text="quietEnd" value="${esc(s.quietEnd)}" placeholder="07:00" style="width:80px"> <span class="muted">empty = none</span></div>
+<label><input type="checkbox" data-set="pauseOnFreeze" ${s.pauseOnFreeze ? 'checked' : ''}> Pause rescans when Telegram reports the account frozen</label>
+<div class="muted">A frozen account can still read history. Leave this off to keep capturing messages while you can.</div>
+<div class="btns"><button class="b primary" data-act="set-save">Save settings</button></div>
+${state.setMsg ? `<div class="muted">${esc(state.setMsg)}</div>` : ''}</div>`;
+}
+
+const TABS = [['overview', 'Overview'], ['rescan', 'Rescan'], ['categories', 'Categories'], ['search', 'Search'], ['settings', 'Settings']];
+function render() {
+  const prev = document.activeElement;
+  const focusKey = prev && prev.getAttribute ? prev.getAttribute('data-focus') : null;
+  const caret = focusKey && typeof prev.selectionStart === 'number' ? prev.selectionStart : null;
+  const y = window.scrollY;
+  let h = `<header class="top"><h1>Archive</h1><nav class="tabs">${TABS.map(([k, l]) => `<button class="tab ${state.tab === k ? 'on' : ''}" data-act="tab" data-key="${k}">${l}</button>`).join('')}</nav><span class="grow"></span><a href="/">← Dashboard</a></header>`;
+  if (state.error) h += `<div class="status bad">${esc(state.error)} <button class="b" data-act="reload">Try again</button></div>`;
+  if (!state.status) { $app.innerHTML = h + (state.error ? '' : '<p class="muted">Loading…</p>'); return; }
+  h += banner();
+  const view = { overview: viewOverview, rescan: viewRescan, categories: viewCategories, search: viewSearch, settings: viewSettings }[state.tab] || viewOverview;
+  h += view();
+  $app.innerHTML = h;
+  window.scrollTo(0, y);
+  if (focusKey) {
+    const el = $app.querySelector(`[data-focus="${CSS.escape(focusKey)}"]`);
+    if (el) { el.focus(); if (caret !== null) { try { el.setSelectionRange(caret, caret); } catch { /* ignore */ } } }
+  }
+}
+
+async function saveCategories() {
+  const list = changed();
+  if (state.saving || !list.length) return;
+  state.saving = true; state.msg = ''; render();
+  let ok = 0; const failed = [];
+  for (const g of list) {
+    const value = state.draft.get(g.id).trim();
+    const r = await api('PUT', '/api/groups/' + encodeURIComponent(g.id), { category: value });
+    if (r.ok) { g.category = value; state.draft.delete(g.id); ok++; } else failed.push(g.name);
+  }
+  state.saving = false;
+  state.msg = `Saved ${ok} group(s).` + (failed.length ? ` Could not save: ${failed.join(', ')}.` : '');
+  render();
+}
+
+async function runSearch(more) {
+  if (!state.q.trim()) return;
+  state.searching = true; if (!more) state.hits = null; render();
+  const offset = more && state.hits ? state.hits.length : 0;
+  const r = await api('GET', `/api/ix/search?q=${encodeURIComponent(state.q)}&category=${encodeURIComponent(state.qCategory)}&limit=50&offset=${offset}`);
+  state.searching = false;
+  if (r.ok) { state.hits = (more && state.hits ? state.hits : []).concat(r.data.hits || []); state.qMore = !!r.data.more; }
+  else { state.hits = []; state.error = 'Search failed: ' + errText(r); }
+  render();
+}
+
+async function loadDialogs() {
+  state.dialogsLoading = true; render();
+  const r = await api('GET', '/api/dialogs?archived=false');
+  state.dialogsLoading = false;
+  if (r.ok) {
+    const list = Array.isArray(r.data) ? r.data : (r.data && (r.data.dialogs || r.data.items)) || [];
+    state.dialogs = list.filter((d) => d && d.id != null && d.type !== 'user' && d.type !== 'bot').map((d) => ({ id: String(d.id), name: String(d.name || d.title || d.id), type: d.type }));
+    state.showAll = true;
+  } else state.error = 'Could not load your chats: ' + errText(r);
+  render();
+}
+
+$app.addEventListener('click', async (ev) => {
+  const el = ev.target.closest('[data-act]');
+  if (!el || el.disabled) return;
+  const act = el.getAttribute('data-act');
+  const key = el.getAttribute('data-key') || '';
+  const id = el.getAttribute('data-id');
+  const all = groups();
+  switch (act) {
+    case 'tab': state.tab = key; location.hash = key; render(); if (key !== 'search') load(); break;
+    case 'reload': load(); break;
+    case 'export': { const r = await api('POST', '/api/ix/export'); if (!r.ok) state.error = errText(r); load(); break; }
+    case 'q-start': case 'q-pause': case 'q-clear-finished': case 'q-clear': {
+      if (act === 'q-clear' && !confirm('Remove every group from the queue? A group being rescanned now is kept.')) break;
+      const r = await api('POST', '/api/ix/queue/' + act.slice(2)); if (!r.ok) state.error = errText(r); load(); break;
+    }
+    case 'q-retry': case 'q-remove': { const r = await api('POST', '/api/ix/queue/' + act.slice(2), { groupId: id }); if (!r.ok) state.error = errText(r); load(); break; }
+    case 'p-all': for (const x of $app.querySelectorAll('input[data-pick]:not([disabled])')) state.pick.add(x.getAttribute('data-pick')); render(); break;
+    case 'p-never': for (const g of all) if (!g.lastWalk) state.pick.add(g.id); render(); break;
+    case 'p-none': state.pick.clear(); render(); break;
+    case 'p-dialogs': if (state.showAll) { state.showAll = false; render(); } else if (state.dialogs) { state.showAll = true; render(); } else loadDialogs(); break;
+    case 'p-everything': {
+      const list = groups().filter((g) => !(state.status.queue.items || []).some((i) => i.groupId === g.id && (i.state === 'waiting' || i.state === 'running'))).map((g) => ({ id: g.id, name: g.name }));
+      const r = await api('POST', '/api/ix/queue/add', { groups: list, ensureFilters: true, start: true });
+      if (!r.ok) state.error = 'Could not add: ' + errText(r);
+      load(); break;
+    }
+    case 'p-add': {
+      const names = new Map();
+      for (const x of $app.querySelectorAll('input[data-pick]')) names.set(x.getAttribute('data-pick'), x.getAttribute('data-name'));
+      const list = [...state.pick].map((gid) => ({ id: gid, name: names.get(gid) || gid }));
+      const r = await api('POST', '/api/ix/queue/add', { groups: list, ensureFilters: state.ensureFilters, start: true });
+      if (r.ok) state.pick.clear(); else state.error = 'Could not add: ' + errText(r);
+      load(); break;
+    }
+    case 'c-filter': state.filter = key; render(); break;
+    case 'c-all': for (const g of shownGroups()) state.sel.add(g.id); render(); break;
+    case 'c-none': state.sel.clear(); render(); break;
+    case 'c-bulk': for (const gid of state.sel) state.draft.set(gid, state.bulk.trim()); state.msg = ''; render(); break;
+    case 'c-bulk-clear': for (const gid of state.sel) state.draft.set(gid, ''); state.msg = ''; render(); break;
+    case 'c-cluster': for (const g of all) if (!catOf(g).trim() && suggest(g.name).toLowerCase() === key) state.sel.add(g.id); render(); break;
+    case 'c-use': { const g = all.find((x) => x.id === id); if (g) state.draft.set(g.id, suggest(g.name)); render(); break; }
+    case 'c-suggest': for (const g of all) { const s = suggest(g.name); if (!catOf(g).trim() && s) state.draft.set(g.id, s); } render(); break;
+    case 'c-undo': state.draft.clear(); state.msg = 'Unsaved changes undone.'; render(); break;
+    case 'c-save': saveCategories(); break;
+    case 's-go': runSearch(false); break;
+    case 's-more': runSearch(true); break;
+    case 'set-save': {
+      const body = {};
+      for (const x of $app.querySelectorAll('[data-set]')) body[x.getAttribute('data-set')] = x.checked;
+      for (const x of $app.querySelectorAll('[data-set-text]')) body[x.getAttribute('data-set-text')] = x.value.trim();
+      for (const x of $app.querySelectorAll('[data-set-select]')) body[x.getAttribute('data-set-select')] = x.value;
+      const r = await api('POST', '/api/ix/settings', body);
+      state.setMsg = r.ok ? 'Saved.' : 'Not saved: ' + errText(r);
+      load(); break;
+    }
+  }
+});
+
+$app.addEventListener('input', (ev) => {
+  const t = ev.target;
+  if (t.matches('[data-in]')) {
+    const k = t.getAttribute('data-in');
+    state[k] = t.value;
+    if (k === 'search' || k === 'pickSearch') render();
+  } else if (t.matches('[data-cat]')) {
+    state.draft.set(t.getAttribute('data-cat'), t.value);
+    const n = changed().length;
+    const btn = $app.querySelector('[data-act="c-save"]');
+    if (btn && !state.saving) { btn.disabled = !n; btn.textContent = `Save ${n} change${n === 1 ? '' : 's'}`; }
+    const undo = $app.querySelector('[data-act="c-undo"]');
+    if (undo) undo.disabled = !n;
+  }
+});
+$app.addEventListener('change', (ev) => {
+  const t = ev.target;
+  if (t.matches('[data-sel]')) { const gid = t.getAttribute('data-sel'); if (t.checked) state.sel.add(gid); else state.sel.delete(gid); render(); }
+  else if (t.matches('[data-pick]')) { const gid = t.getAttribute('data-pick'); if (t.checked) state.pick.add(gid); else state.pick.delete(gid); render(); }
+  else if (t.matches('[data-in-check]')) state[t.getAttribute('data-in-check')] = t.checked;
+  else if (t.matches('[data-sel-in]')) state[t.getAttribute('data-sel-in')] = t.value;
+});
+$app.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter' && ev.target.matches('[data-in="q"]')) runSearch(false);
+});
+window.addEventListener('hashchange', () => { const k = (location.hash || '#overview').slice(1); if (k !== state.tab) { state.tab = k; render(); } });
+
+load();
+setInterval(() => { if (document.visibilityState === 'visible' && (state.tab === 'rescan' || state.tab === 'overview')) load(); }, 10000);
+})();
+</script>
+</body>
+</html>

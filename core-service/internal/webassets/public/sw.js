@@ -40,6 +40,7 @@ const SHELL_URLS = [
 // shouldn't be cached or replayed.
 const BYPASS_PREFIXES = [
     '/api/',
+    '/ix',
     '/files/',
     '/photos/',
     '/metrics',

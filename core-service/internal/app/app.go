@@ -248,6 +248,11 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	}
 	a.monitor = engine.New(db.Writer, db.Reader, cfg.DataDir, cfg.AccountFactory, a.monitorFilter, a.ingestWork, a.monitorEvent)
 	a.monitor.SetUpdateObserver(a.observeRescueUpdate)
+	if err = ixEnsureSchema(ctx, db.Writer); err != nil {
+		a.Close()
+		return nil, fmt.Errorf("message archive tables: %w", err)
+	}
+	a.monitor.SetMessageRecorder(a.ixRecordUpdate)
 	a.forwarder, a.forwards = a.monitor, make(chan forwardJob, forwardQueueSize)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
@@ -295,6 +300,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	registerConfigWriteRoutes(mux, a)
 	registerMediaRoutes(mux, a)
 	registerArchiveRoutes(mux, a)
+	registerIxRoutes(mux, a)
 	registerBackupRoutes(mux, a)
 	registerShareRoutes(mux, a)
 	registerReadRoutes(mux, read, a.requireSession)
@@ -340,6 +346,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		}()
 	}
 	a.startAmbient()
+	a.ixStart()
 	a.resumeSeekbarBuild()
 	a.faces.resume()
 	return a, nil
