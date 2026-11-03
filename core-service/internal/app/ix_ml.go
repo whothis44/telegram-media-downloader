@@ -718,10 +718,6 @@ func (a *App) ixMLRoundTask(ctx context.Context, t *ixMLTask, m *ixModel, n int)
 	return 2 * time.Second
 }
 
-// ixHaveFFmpeg says whether frames and sound can be read from videos and
-// recordings (replaceable in tests, whose readers do not need it).
-var ixHaveFFmpeg = func() bool { return seekbar.FFmpegPath() != "" }
-
 // ixMLTestPicture is a small grey gradient, to check the picture model.
 func ixMLTestPicture() []byte {
 	img := image.NewGray(image.Rect(0, 0, 64, 64))
