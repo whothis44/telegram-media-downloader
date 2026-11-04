@@ -18,7 +18,9 @@ import (
 // goes. Files of private chats go before those of public ones (see
 // ixPublicLane). Nothing is skipped, only put back: the deferred files are queue
 // items set aside (as held copies are) and let go band by band. Live
-// downloads, self-destructing media and held copies are not touched.
+// downloads, self-destructing media and held copies are not touched. Where
+// this stands among the other things that wait at the back of the queue
+// is set in ix_order.go: right after normal work.
 
 // ixDeadlineBands are the size limits of the bands, smallest first.
 var ixDeadlineBands = []int64{10 << 20, 100 << 20, 500 << 20}
@@ -279,15 +281,18 @@ func (a *App) ixDeadlineStep(ctx context.Context) error {
 	if !d.Active || a.ixDeadlineSuspended(ctx, nowT) {
 		return a.ixDeadlineRelease(ctx, -1)
 	}
-	// Nothing finished for half an hour while files are set aside: the
-	// order may be what holds things up. Let everything go and stand back
-	// for two hours.
-	if a.ixDeferredWaiting(ctx) > 0 {
+	// Downloads have not moved for half an hour (no file finished, no bytes
+	// arrived) while files are set aside: the order may be what holds
+	// things up. Let everything go and stand back for two hours. Big files
+	// that take hours each still move, by bytes.
+	if a.ixDeferredWaiting(ctx) > 0 && !a.ixQueuePaused(ctx) {
 		var lastDone, firstSet int64
-		_ = a.db.Reader.QueryRowContext(ctx, `SELECT COALESCE(MAX(updated_at),0) FROM tgdl_work WHERE status='completed'`).Scan(&lastDone)
+		if last := a.ixLastProgress(ctx); !last.IsZero() {
+			lastDone = last.UnixMilli()
+		}
 		_ = a.db.Reader.QueryRowContext(ctx, `SELECT COALESCE(MIN(deferred_at),0) FROM ix_deferred WHERE released_at=0`).Scan(&firstSet)
 		if stall := 30 * time.Minute.Milliseconds(); now-lastDone > stall && firstSet > 0 && now-firstSet > stall {
-			a.ixLog("deadline order: nothing finished for 30 minutes; letting every set-aside file go for 2 hours")
+			a.ixLog("deadline order: downloads have not moved for 30 minutes; letting every set-aside file go for 2 hours")
 			_, _ = a.db.Writer.ExecContext(ctx, `INSERT INTO kv(key,value,updated_at) VALUES('ix_deadline_suspend',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`,
 				strconv.FormatInt(nowT.Add(2*time.Hour).UnixMilli(), 10), now)
 			return a.ixDeadlineRelease(ctx, -1)

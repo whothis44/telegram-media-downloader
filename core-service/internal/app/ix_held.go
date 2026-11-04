@@ -50,9 +50,11 @@ import (
 //     can confirm the copy (ix_copies_sample.go): confirmed copies wait
 //     until everything else is done unless the setting says otherwise.
 //
-// Held copies do not count towards a backfill's queue limit (ixHeldWaiting):
+// Held copies do not count towards a backfill's queue limit (ixWaitingApart):
 // before ix.10 they filled it, so the backfill stopped bringing new files,
-// the queue emptied of everything else and the copies were let go.
+// the queue emptied of everything else and the copies were let go. When
+// they go, among the other things that wait at the back of the queue, is
+// set in one place: ix_order.go.
 //
 // Every message is archived in full either way (ix_messages keeps
 // Telegram's complete record, with the file's identity), so any of these
@@ -368,21 +370,18 @@ func (a *App) ixHeldStep(ctx context.Context) error {
 	if s.HoldForever {
 		return nil
 	}
-	// Only files the engine could take now count: not ones waiting to
-	// retry later. And when nothing has finished for half an hour while
+	// Held copies go once normal work and the files set aside by the
+	// deadline order are done (ix_order.go). And when downloads have not
+	// moved for half an hour (no file finished, no bytes arrived) while
 	// copies are held, they go too rather than wait behind a stuck queue.
-	var waiting int
-	if err := a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM tgdl_work WHERE status='pending' AND paused=0 AND retry_at<=?`, time.Now().UnixMilli()).Scan(&waiting); err != nil {
+	o, err := a.ixOrderNow(ctx)
+	if err != nil {
 		return err
 	}
-	// Files set aside so that smaller ones go first (deadline order)
-	// still count as waiting: held copies go after them.
-	waiting += a.ixDeferredWaiting(ctx)
-	release := waiting == 0
-	if !release {
-		var last int64
-		_ = a.db.Reader.QueryRowContext(ctx, `SELECT COALESCE(MAX(updated_at),0) FROM tgdl_work WHERE status='completed'`).Scan(&last)
-		release = last > 0 && time.Since(time.UnixMilli(last)) > 30*time.Minute
+	release := o.clearBefore(ixStageHeld)
+	if !release && !a.ixQueuePaused(ctx) {
+		last := a.ixLastProgress(ctx)
+		release = !last.IsZero() && time.Since(last) > 30*time.Minute
 	}
 	if !release {
 		return nil
@@ -391,6 +390,14 @@ func (a *App) ixHeldStep(ctx context.Context) error {
 	// checked by sampling (ix_copies_sample.go): a confirmed copy stays.
 	ixBeforeReleaseHook(a, ctx)
 	return a.ixReleaseSome(ctx, 25, s.ConfirmedGoEarly || a.ixOnlyConfirmedLeft(ctx))
+}
+
+// ixQueuePaused: a person paused the whole download queue; nothing moving
+// then is not a stuck queue.
+func (a *App) ixQueuePaused(ctx context.Context) bool {
+	var p int
+	_ = a.db.Reader.QueryRowContext(ctx, `SELECT paused FROM tgdl_queue_state WHERE id=1`).Scan(&p)
+	return p != 0
 }
 
 // ixBeforeReleaseHook runs before held copies are let go.
@@ -402,6 +409,7 @@ type ixQueuedVideo struct {
 	status   string
 	paused   bool
 	deferred bool   // set aside by the deadline order
+	lowq     bool   // an original waiting to replace its lower quality
 	held     bool   // held now
 	released int64  // ix_held.released_at: -1 looked at, >0 let go
 	how      string // why it is held
@@ -413,11 +421,18 @@ func (q *ixQueuedVideo) holdable() bool {
 	return q.status == "pending" && !q.held && q.released <= 0 && (!q.paused || q.deferred)
 }
 
+// pausedByPerson: paused, and not by anything that waits at the back of the
+// queue. Copies never wait for such a file: it may never come.
+func (q *ixQueuedVideo) pausedByPerson() bool {
+	return q.status == "pending" && q.paused && !q.deferred && !q.lowq && !q.held
+}
+
 // ixQueuedVideos lists the videos waiting in the queue (or downloading)
 // that are large enough to be worth holding, with their facts.
 func (a *App) ixQueuedVideos(ctx context.Context) ([]*ixQueuedVideo, error) {
 	rows, err := a.db.Reader.QueryContext(ctx, `SELECT w.id, w.group_id, w.message_id, w.file_size, w.body, w.status, w.paused,
 			EXISTS (SELECT 1 FROM ix_deferred x WHERE x.work_id=w.id AND x.released_at=0),
+			EXISTS (SELECT 1 FROM ix_lowq q WHERE q.work_id=w.id AND q.state='saved'),
 			h.work_id IS NOT NULL, COALESCE(h.reason,''), COALESCE(h.released_at,0), COALESCE(c.how,''), COALESCE(c.of_work,0)
 		FROM tgdl_work w LEFT JOIN ix_held h ON h.work_id=w.id LEFT JOIN ix_copy_hold c ON c.work_id=w.id
 		WHERE w.status IN ('pending','processing') AND w.media_type='video' AND w.file_size>=? AND w.ttl_seconds=0 ORDER BY w.file_size DESC, w.id LIMIT 20000`, ixHoldMinSize)
@@ -430,7 +445,7 @@ func (a *App) ixQueuedVideos(ctx context.Context) ([]*ixQueuedVideo, error) {
 		var group, reason string
 		var msg, size int64
 		var body []byte
-		if rows.Scan(&q.f.ID, &group, &msg, &size, &body, &q.status, &q.paused, &q.deferred, &q.known, &reason, &q.released, &q.how, &q.of) != nil {
+		if rows.Scan(&q.f.ID, &group, &msg, &size, &body, &q.status, &q.paused, &q.deferred, &q.lowq, &q.known, &reason, &q.released, &q.how, &q.of) != nil {
 			continue
 		}
 		q.held = q.known && reason != "" && q.released == 0
@@ -504,6 +519,9 @@ func (a *App) ixHeldTriage(ctx context.Context) error {
 		}
 		if q.held && q.how != "queued" {
 			continue // held as a copy of a saved file
+		}
+		if q.pausedByPerson() {
+			continue
 		}
 		if q.f.Dur > 0 && (q.f.HasPH || q.f.Vec != nil) && q.f.W > 0 && q.f.H > 0 {
 			group = append(group, q.f)
@@ -620,9 +638,18 @@ func (a *App) ixHeldRecheck(ctx context.Context) error {
 		likePath    string
 		leader      string // the better copy's queue state, or gone
 		gaveUp      bool
+		paused      bool   // the better copy was paused by a person
+		ident       string // the better copy's Telegram identity
 	}
+	// A better copy paused by a person: paused, and not by any of the
+	// things that wait at the back of the queue.
 	rows, err := a.db.Reader.QueryContext(ctx, `SELECT h.work_id, h.group_id, h.message_id, COALESCE(c.how,'saved'), COALESCE(c.of_work,0), h.like_path,
-			COALESCE(l.status,'gone'), COALESCE(l.status='failed' AND (length(l.body)=0 OR COALESCE(r.rounds,0)>=?),0)
+			COALESCE(l.status,'gone'), COALESCE(l.status='failed' AND (length(l.body)=0 OR COALESCE(r.rounds,0)>=?),0),
+			COALESCE(l.status='pending' AND l.paused=1
+				AND NOT EXISTS (SELECT 1 FROM ix_deferred x WHERE x.work_id=l.id AND x.released_at=0)
+				AND NOT EXISTS (SELECT 1 FROM ix_held lh WHERE lh.work_id=l.id AND lh.released_at=0 AND lh.reason<>'')
+				AND NOT EXISTS (SELECT 1 FROM ix_lowq q WHERE q.work_id=l.id AND q.state='saved'),0),
+			COALESCE(l.identity,'')
 		FROM ix_held h JOIN tgdl_work w ON w.id=h.work_id AND w.status='pending'
 		LEFT JOIN ix_copy_hold c ON c.work_id=h.work_id
 		LEFT JOIN tgdl_work l ON l.id=c.of_work
@@ -634,7 +661,7 @@ func (a *App) ixHeldRecheck(ctx context.Context) error {
 	var hs []held
 	for rows.Next() {
 		var h held
-		if rows.Scan(&h.id, &h.group, &h.msg, &h.how, &h.of, &h.likePath, &h.leader, &h.gaveUp) == nil {
+		if rows.Scan(&h.id, &h.group, &h.msg, &h.how, &h.of, &h.likePath, &h.leader, &h.gaveUp, &h.paused, &h.ident) == nil {
 			hs = append(hs, h)
 		}
 	}
@@ -655,11 +682,18 @@ func (a *App) ixHeldRecheck(ctx context.Context) error {
 					return err
 				}
 			}
+		case h.leader == "completed" && a.ixStagedNow(ctx, h.ident):
+			// Downloaded, but still in the local staging folder: not in the
+			// catalogue yet. It waits until the file is in the library.
 		case h.leader == "completed":
 			if err := a.ixRecheckAgainstSaved(ctx, h.id, h.of); err != nil {
 				return err
 			}
 		case h.leader == "gone" || h.leader == "skipped" || h.leader == "failed" && (h.gaveUp || !autoRetry):
+			orphans[h.of] = append(orphans[h.of], h.id)
+		case h.paused:
+			// A person paused the better copy: it may never come, so the
+			// best of the copies waiting for it goes instead.
 			orphans[h.of] = append(orphans[h.of], h.id)
 		}
 	}
@@ -669,6 +703,18 @@ func (a *App) ixHeldRecheck(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// ixStagedNow: a file with this queue identity was downloaded to the local
+// staging folder and is not in the library yet (download/staging.go keeps
+// a journal row until it is; no table: staging never used).
+func (a *App) ixStagedNow(ctx context.Context, ident string) bool {
+	if ident == "" {
+		return false
+	}
+	var n int
+	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM tgdl_stage_moves WHERE identity=?`, ident).Scan(&n)
+	return n > 0
 }
 
 func ixSortedInts[V any](m map[int64]V) []int64 {
@@ -785,25 +831,12 @@ func (a *App) ixLetGo(ctx context.Context, workID int64) error {
 	return err
 }
 
-// ixOnlyConfirmedLeft: nothing is left to do but confirmed copies: no
-// other file waiting (held, set aside or retrying) and every rescan done.
+// ixOnlyConfirmedLeft: confirmed copies may go: every stage before them is
+// done (ix_order.go), originals waiting to replace a lower quality and
+// chats still to be read included.
 func (a *App) ixOnlyConfirmedLeft(ctx context.Context) bool {
-	var other int
-	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM tgdl_work w WHERE w.status IN ('pending','processing')
-		AND w.id NOT IN (SELECT h.work_id FROM ix_held h JOIN ix_copy_hold c ON c.work_id=h.work_id WHERE h.released_at=0 AND h.reason<>'' AND c.confirm='confirmed')`).Scan(&other)
-	if other > 0 {
-		return false
-	}
-	q, err := a.ixLoadQueue(ctx)
-	if err != nil {
-		return false
-	}
-	for _, it := range q.Items {
-		if it.State == "waiting" || it.State == "running" {
-			return false
-		}
-	}
-	return true
+	o, err := a.ixOrderNow(ctx)
+	return err == nil && o.clearBefore(ixStageConfirmed)
 }
 
 // ixReleaseHeld unpauses up to n held items (all when n <= 0), confirmed

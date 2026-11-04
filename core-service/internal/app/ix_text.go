@@ -303,6 +303,7 @@ func (a *App) ixSTTAudio(ctx context.Context, it *ixMItem) ([]byte, error) {
 	defer cancel()
 	cmd := exec.CommandContext(fctx, bin, "-hide_banner", "-nostdin", "-loglevel", "error", "-i", full, "-vn", "-sn", "-dn",
 		"-ac", "1", "-ar", "16000", "-t", strconv.Itoa(ixSTTMaxSeconds), "-c:a", "flac", "-f", "flac", "pipe:1")
+	ixHideWindow(cmd)
 	var out, errOut bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errOut
 	err := cmd.Run()

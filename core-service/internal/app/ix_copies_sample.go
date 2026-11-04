@@ -223,6 +223,7 @@ var ixSampleFrame = func(ctx context.Context, address string, t float64) (ixSamp
 		"-noaccurate_seek", "-copyts", "-ss", strconv.FormatFloat(t, 'f', 2, 64), "-i", address,
 		"-frames:v", "1", "-an", "-sn", "-dn", "-vf", fmt.Sprintf("scale=%d:%d:flags=area,format=gray,showinfo", ixVSide, ixVSide),
 		"-f", "rawvideo", "-pix_fmt", "gray", "pipe:1")
+	ixHideWindow(cmd)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return ixSampledFrame{}, false, err
@@ -454,7 +455,9 @@ type ixSampleJob struct {
 }
 
 // ixSampleJobs: queued videos of 200 MB or more not checked yet (or whose
-// check failed for a reason that may pass), largest first.
+// check failed for a reason that may pass), largest first. Originals of
+// videos saved in a lower quality first are not copies (ix_lowq.go): they
+// are left out.
 func (a *App) ixSampleJobs(ctx context.Context, heldOnly bool, n int) ([]ixSampleJob, error) {
 	cond := ""
 	if heldOnly {
@@ -464,7 +467,8 @@ func (a *App) ixSampleJobs(ctx context.Context, heldOnly bool, n int) ([]ixSampl
 		FROM tgdl_work w LEFT JOIN ix_held h ON h.work_id=w.id AND h.released_at=0 AND h.reason<>''
 		LEFT JOIN ix_copy_sample s ON s.work_id=w.id
 		WHERE w.status='pending' AND w.media_type='video' AND w.file_size>=? AND w.ttl_seconds=0 AND length(w.body)>0
-		AND (s.work_id IS NULL OR (s.result='failed' AND s.tries<3 AND s.at<? AND s.note NOT LIKE 'could not check without downloading%'))`+cond+`
+		AND (s.work_id IS NULL OR (s.result='failed' AND s.tries<3 AND s.at<? AND s.note NOT LIKE 'could not check without downloading%'))
+		AND w.id NOT IN (SELECT work_id FROM ix_lowq WHERE state IN ('saved','released'))`+cond+`
 		ORDER BY w.file_size DESC, w.id LIMIT ?`, ixSampleMinSize, time.Now().Add(-time.Hour).UnixMilli(), n)
 	if err != nil {
 		return nil, err
@@ -483,6 +487,9 @@ func (a *App) ixSampleJobs(ctx context.Context, heldOnly bool, n int) ([]ixSampl
 // ixSampleRound checks a few big queued videos (heldOnly: only held ones,
 // as just before they would be let go).
 func (a *App) ixSampleRound(ctx context.Context, heldOnly bool) error {
+	if a.ixIsGone() {
+		return nil // read-only: nothing may talk to Telegram, and that is no error
+	}
 	s := a.ixLoadSettings(ctx)
 	if !s.HoldLikely || seekbar.FFmpegPath() == "" && !ixSampleFake {
 		return nil

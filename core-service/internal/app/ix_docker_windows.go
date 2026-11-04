@@ -18,7 +18,8 @@ func ixDockerFallbacks() []string {
 	return []string{`C:\Program Files\Docker\Docker\resources\bin\docker.exe`}
 }
 
-// ixHideWindow keeps a console window from flashing up for each command.
+// ixHideWindow keeps a console window from flashing up for each command
+// (docker, ffmpeg): every program the archive runs in the background uses it.
 func ixHideWindow(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000} // CREATE_NO_WINDOW
 }

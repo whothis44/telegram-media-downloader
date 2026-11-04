@@ -101,6 +101,7 @@ var ixGrabFrame = func(ctx context.Context, full string, at float64, width, qual
 	defer cancel()
 	cmd := exec.CommandContext(fctx, bin, "-hide_banner", "-nostdin", "-loglevel", "error", "-ss", fmt.Sprintf("%.2f", at), "-i", full,
 		"-frames:v", "1", "-an", "-sn", "-dn", "-vf", fmt.Sprintf("scale='min(%d,iw)':-2", width), "-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", fmt.Sprint(quality), "pipe:1")
+	ixHideWindow(cmd)
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	if err := cmd.Run(); err != nil {
