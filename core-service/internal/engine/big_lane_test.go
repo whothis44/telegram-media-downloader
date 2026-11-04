@@ -199,7 +199,21 @@ func TestClaimFindingNothingIsCheap(t *testing.T) {
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
+	// What walking the queue costs on this machine: a claim that finds
+	// nothing must cost a small part of it. (A fixed time limit failed on
+	// slow CI runners under -race, where everything is many times slower.)
+	walk := func() time.Duration {
+		start := time.Now()
+		for i := 0; i < 20; i++ {
+			var n int
+			if err := s.reader.QueryRow(`SELECT COUNT(*) FROM tgdl_work NOT INDEXED WHERE status='pending' AND paused=0 AND body IS NOT NULL`).Scan(&n); err != nil || n == 0 {
+				t.Fatalf("walk: %d, %v", n, err)
+			}
+		}
+		return time.Since(start) / 20
+	}
 	for _, accounts := range [][]string{{"one"}, {"one", "two"}} {
+		base := walk()
 		start := time.Now()
 		for i := 0; i < 20; i++ {
 			w, err := s.Claim(context.Background(), accounts, time.Now(), true)
@@ -207,11 +221,10 @@ func TestClaimFindingNothingIsCheap(t *testing.T) {
 				t.Fatalf("claimed %+v, %v", w, err)
 			}
 		}
-		// Walking the 50,000 rows took some 16 ms a claim; generous for -race.
 		per := time.Since(start) / 20
-		t.Logf("%d account(s): %v a claim finding nothing", len(accounts), per)
-		if per > 5*time.Millisecond {
-			t.Fatalf("%d account(s): a claim finding nothing took %v", len(accounts), per)
+		t.Logf("%d account(s): %v a claim finding nothing; walking the queue %v", len(accounts), per, base)
+		if per > base/3 {
+			t.Fatalf("%d account(s): a claim finding nothing took %v, walking the queue %v", len(accounts), per, base)
 		}
 	}
 	// A small file arriving is still found, before any waiting big file.
