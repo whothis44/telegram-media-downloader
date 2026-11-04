@@ -176,6 +176,7 @@ func (a *App) handleIxStatus(w http.ResponseWriter, r *http.Request) {
 		"groups":    groups,
 		"queue":     queue,
 		"queueLeft": a.ixQueueLeft(ctx),
+		"dlState":   a.ixDlState(ctx), // ix_dlstate.go
 		"settings":  settings.public(),
 		"account":   a.ixAccount(),
 		"export":    a.ixExportStatus(),

@@ -149,6 +149,7 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 	}
 	line("\n[downloads]")
 	d := a.ixDownloads(ctx)
+	line("%s", a.ixDlState(ctx).diagLine(r.group)) // ix_dlstate.go
 	line("engine running %v · queue paused %v · downloading %d · waiting %d · failed %d (given up %d) · last hour %d · last finished %s", d.EngineRunning, d.QueuePaused, d.Downloading, d.Waiting, d.Failed, d.GivenUp, d.LastHour, ixAgo(d.LastAt, now))
 	mb := func(b float64) float64 { return b / 1e6 }
 	if d.Pace.Off {
