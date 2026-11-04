@@ -31,7 +31,9 @@ import (
 // "group:<pass>:<last face id>" under way. Stopping part-way is safe: it
 // goes on from there next time.
 
-const ixFaceRulesVersion = "ix10-1" // change to group all stored faces again
+// ix10-2: the gates follow the archive (ix_faces_gates.go), and weak faces
+// clearly alike count towards a new person's files.
+const ixFaceRulesVersion = "ix10-2" // change to group all stored faces again
 
 // ixFaceKeptSQL picks the people a person made decisions about.
 const ixFaceKeptSQL = `merged_into=0 AND (name<>'' OR hidden=1 OR cover>0 OR id IN (SELECT merged_into FROM ix_people WHERE merged_into>0))`
@@ -195,6 +197,9 @@ func (a *App) ixFaceBackfill(ctx context.Context) error {
 		var left int
 		_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM ix_faces WHERE blur=-1`).Scan(&left)
 		if left == 0 {
+			s.mu.Lock()
+			s.regateLocked() // sizes and sharpness may have changed
+			s.mu.Unlock()
 			return nil
 		}
 		a.ixFaceRegroupNote(fmt.Sprintf("Measuring the faces found before: %d left.", left))
