@@ -66,7 +66,11 @@ const (
 	ixSamplePoints  = 8
 	ixSampleMinHit  = 3   // sampled frames that must match
 	ixSampleShare   = 0.6 // ...and this share of those that say anything
-	ixSampleSlack   = 2.5 // seconds the offsets of matching frames may differ
+	// A big video no other check held with at least this many sampled
+	// frames matching one saved video (but too few for a copy) is partly
+	// footage the archive has: it goes to the back of the queue.
+	ixSamplePartialHit = 3
+	ixSampleSlack      = 2.5 // seconds the offsets of matching frames may differ
 )
 
 // Limits of one check (variables for tests).
@@ -428,7 +432,8 @@ type ixSampleResult struct {
 	Result  string // confirmed, nomatch, failed
 	Why     string // failed: ixSampleWhy*
 	Note    string
-	Of      string  // confirmed: the saved file's key
+	Of      string  // confirmed: the saved file's key; nomatch: the closest one
+	Best    int     // nomatch: the most sampled frames that matched one saved video
 	Offset  float64 // seconds to add to the queued video's time
 	Parts   int
 	Samples int
@@ -535,11 +540,11 @@ func (a *App) ixSampleCheck(ctx context.Context, r ixCopyReader, msg *tg.Message
 		return res
 	}
 	need := max(ixSampleMinHit, int(math.Ceil(ixSampleShare*float64(len(samples)))))
-	best := 0
+	best, bestOf := 0, ""
 	for _, c := range cands {
 		hit, off := ixSampleMatch(samples, c.frames)
 		if hit > best {
-			best = hit
+			best, bestOf = hit, c.key
 		}
 		if hit >= need {
 			res.Result, res.Of, res.Offset = "confirmed", c.key, off
@@ -548,6 +553,7 @@ func (a *App) ixSampleCheck(ctx context.Context, r ixCopyReader, msg *tg.Message
 		}
 	}
 	res.Result, res.Note = "nomatch", fmt.Sprintf("at most %d of %d sampled frames match a saved video", best, len(samples))
+	res.Best, res.Of = best, bestOf
 	return res
 }
 
@@ -714,6 +720,21 @@ func (a *App) ixSampleRecord(ctx context.Context, j ixSampleJob, f ixCopyFacts, 
 			return err
 		}
 		return nil
+	}
+	if res.Result == "nomatch" && res.Best >= ixSamplePartialHit && res.Of != "" {
+		// Part of it is footage the archive has (another cut, a compilation
+		// with it in): not a copy, so it is still downloaded, but after
+		// everything else, like the probable copies.
+		path := a.ixStoredPathOfKey(ctx, res.Of)
+		if path == "" {
+			return nil
+		}
+		ok, err := a.ixHoldWork(ctx, f, "sampled-partial", path, res.Of, 0, 0, "partly the same footage as a saved video (sampled frames)")
+		if err != nil || !ok {
+			return err
+		}
+		_, err = a.db.Writer.ExecContext(ctx, `UPDATE ix_copy_hold SET confirm='unconfirmed', confirm_note=?, checked_at=? WHERE work_id=?`, res.Note, ixNowMs(), j.work)
+		return err
 	}
 	if res.Result != "confirmed" {
 		return nil
