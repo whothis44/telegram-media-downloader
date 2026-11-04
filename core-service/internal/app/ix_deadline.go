@@ -77,7 +77,7 @@ type ixDeadlineInfo struct {
 	Rate       float64          `json:"rate"`     // the one the estimate uses (ixDeadlineRate)
 	RateUsed   string           `json:"rateUsed"` // which: "day" or "3h"
 	Premium1h  int              `json:"premium1h"`
-	EtaSec     int64            `json:"etaSec"` // at Rate; 0: unknown
+	EtaSec     int64            `json:"etaSec"`   // at Rate; 0: unknown
 	Finishes   string           `json:"finishes"` // yes, no, unknown
 	Deferred   []int            `json:"deferred"` // items set aside, by band
 	Unscanned  int              `json:"unscanned"`
