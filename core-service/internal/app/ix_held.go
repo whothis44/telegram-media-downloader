@@ -144,8 +144,11 @@ func (a *App) ixSubstitute(ctx context.Context, item download.Item, client downl
 	if blocked > 0 {
 		return "", false
 	}
-	rows, err := a.db.Reader.QueryContext(ctx, `SELECT DISTINCT file_path FROM downloads WHERE status='completed' AND file_path IS NOT NULL AND file_path<>''
-		AND (file_size=? OR telegram_media_size=?) AND NOT (group_id=? AND message_id=?) LIMIT 5`, size, size, item.GroupID, item.MessageID)
+	// Two lookups rather than one OR: each uses its index (ix_downloads_size,
+	// ix_downloads_tg_size) instead of reading the whole catalogue.
+	rows, err := a.db.Reader.QueryContext(ctx, `SELECT file_path FROM downloads WHERE file_size=? AND status='completed' AND file_path IS NOT NULL AND file_path<>'' AND NOT (group_id=? AND message_id=?)
+		UNION SELECT file_path FROM downloads WHERE telegram_media_size=? AND status='completed' AND file_path IS NOT NULL AND file_path<>'' AND NOT (group_id=? AND message_id=?)
+		LIMIT 5`, size, item.GroupID, item.MessageID, size, item.GroupID, item.MessageID)
 	if err != nil {
 		return "", false
 	}
@@ -353,6 +356,9 @@ func (a *App) ixRunHeld(ctx context.Context) {
 // and lets them go once nothing else is waiting (or when holding is
 // turned off).
 func (a *App) ixHeldStep(ctx context.Context) error {
+	if a.ixIsGone() {
+		return nil // read-only: nothing downloads any more, so there is no order to keep
+	}
 	s := a.ixLoadSettings(ctx)
 	// Held copies first (one whose better copy was saved meanwhile is
 	// checked against that file), then the new files.
@@ -878,17 +884,6 @@ func (a *App) ixReleaseSome(ctx context.Context, n int, confirmed bool) error {
 		}
 	}
 	return nil
-}
-
-// ixHeldWaiting is how many held copies wait in the queue for backfills.
-// They do not count towards a backfill's queue limit: otherwise the copies
-// fill the queue, no unique file can come in behind them, and the queue
-// empties of everything else, which lets the copies go.
-func (a *App) ixHeldWaiting(ctx context.Context) int {
-	var n int
-	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM ix_held h JOIN tgdl_work w ON w.id=h.work_id
-		WHERE h.released_at=0 AND h.reason<>'' AND w.status='pending' AND w.paused=1 AND w.origin<>'live'`).Scan(&n)
-	return n
 }
 
 // ixFetchSubstituted makes the substituted files download for real: their

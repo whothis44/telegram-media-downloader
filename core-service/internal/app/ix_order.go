@@ -139,6 +139,7 @@ var ixBytesReceived = func(a *App) int64 {
 
 type ixProgressBox struct {
 	mu    sync.Mutex
+	seen  bool
 	bytes int64
 	at    time.Time // when the bytes were last seen to grow
 }
@@ -151,14 +152,16 @@ func (a *App) ixProgressBox() *ixProgressBox {
 }
 
 // ixLastProgress is when downloads last moved: a file finished, or bytes
-// arrived since the last look (the checks look every two minutes). Zero
-// when neither is known.
+// arrived since the last look (the checks look every two minutes). The
+// first look counts as movement: after a restart (the app may have been
+// off for hours) the downloads get half an hour to start before anything
+// is judged stuck.
 func (a *App) ixLastProgress(ctx context.Context) time.Time {
 	box := a.ixProgressBox()
 	n := ixBytesReceived(a)
 	box.mu.Lock()
-	if n != box.bytes {
-		box.bytes, box.at = n, time.Now()
+	if !box.seen || n != box.bytes {
+		box.seen, box.bytes, box.at = true, n, time.Now()
 	}
 	at := box.at
 	box.mu.Unlock()

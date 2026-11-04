@@ -254,6 +254,9 @@ func (a *App) ixRunDeadline(ctx context.Context) {
 // ixDeadlineStep sets aside the backfill items larger than the smallest
 // band that still has work, and lets go those of that band.
 func (a *App) ixDeadlineStep(ctx context.Context) error {
+	if a.ixIsGone() {
+		return nil // read-only: nothing downloads any more, so there is no order to keep
+	}
 	d := a.ixDeadlineEstimate(ctx, false)
 	nowT := time.Now()
 	now := nowT.UnixMilli()

@@ -301,6 +301,9 @@ func (a *App) ixRunLowq(ctx context.Context) {
 // deadline order, no held copy still to be released. Confirmed copies go
 // after them.
 func (a *App) ixLowqStep(ctx context.Context) error {
+	if a.ixIsGone() {
+		return nil // read-only: nothing downloads any more, so there is no order to keep
+	}
 	now := time.Now().UnixMilli()
 	rows, err := a.db.Reader.QueryContext(ctx, `SELECT group_id, message_id FROM ix_lowq WHERE state IN ('saved','released')`)
 	if err != nil {
