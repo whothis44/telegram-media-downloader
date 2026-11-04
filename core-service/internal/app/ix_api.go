@@ -186,6 +186,7 @@ func (a *App) handleIxStatus(w http.ResponseWriter, r *http.Request) {
 		"downloads": a.ixDownloads(ctx),
 		"freeze":    a.ixFreeze(ctx),
 		"held":      a.ixHeldStatus(ctx),
+		"dedup":     a.ixDedupStatus(ctx),
 		"copies":    a.ixCopiesNow(),
 		"fixity":    a.ixFixityStatus(ctx),
 		"ml":        a.ixMLStatusNow(ctx),

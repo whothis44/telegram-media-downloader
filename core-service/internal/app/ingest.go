@@ -57,8 +57,9 @@ func (a *App) ingestTelegram(ctx context.Context, message *tg.Message, groupID, 
 	if err != nil {
 		return record, err
 	}
+	a.ixNoteDedup(ctx, item, record) // ix_dedup.go
 	if record.Skipped {
-		payload := map[string]any{"key": item.GroupID + "_" + strconv.FormatInt(item.MessageID, 10), "groupId": item.GroupID, "groupName": item.GroupName, "messageId": item.MessageID, "fileName": item.Name, "filePath": record.Path, "fileSize": item.Identity.Size, "mediaType": item.Type, "deduped": true, "skipped": true, "addedAt": nil, "accountId": accountID, "accountName": nil}
+		payload := map[string]any{"key": item.GroupID + "_" + strconv.FormatInt(item.MessageID, 10), "groupId": item.GroupID, "groupName": item.GroupName, "messageId": item.MessageID, "fileName": item.Name, "filePath": record.Path, "fileSize": item.Identity.Size, "mediaType": item.Type, "deduped": true, "dedupedHow": record.Dedup, "skipped": true, "addedAt": nil, "accountId": accountID, "accountName": nil}
 		a.hub.Broadcast(ws.Event{Type: "download_complete", Payload: payload})
 		return record, nil
 	}
@@ -73,7 +74,7 @@ func (a *App) ingestTelegram(ctx context.Context, message *tg.Message, groupID, 
 	if forward {
 		a.queueForward(forwardJob{groupID: item.GroupID, groupName: groupName, messageID: message.ID, topicID: telegram.MessageTopicID(message), text: message.Message, recordID: record.ID, path: record.Path, facts: attachment.Facts})
 	}
-	payload := map[string]any{"key": item.GroupID + "_" + strconv.FormatInt(item.MessageID, 10), "groupId": item.GroupID, "groupName": item.GroupName, "messageId": item.MessageID, "fileName": item.Name, "filePath": record.Path, "fileSize": item.Identity.Size, "mediaType": item.Type, "deduped": record.Reused, "addedAt": nil, "accountId": accountID, "accountName": nil}
+	payload := map[string]any{"key": item.GroupID + "_" + strconv.FormatInt(item.MessageID, 10), "groupId": item.GroupID, "groupName": item.GroupName, "messageId": item.MessageID, "fileName": item.Name, "filePath": record.Path, "fileSize": item.Identity.Size, "mediaType": item.Type, "deduped": record.Reused, "dedupedHow": record.Dedup, "addedAt": nil, "accountId": accountID, "accountName": nil}
 	a.hub.Broadcast(ws.Event{Type: "download_complete", Payload: payload})
 	if attachment.Type == "video" {
 		// History backfill yields to live downloads in the sprite queue.

@@ -172,6 +172,9 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 	}
 	h := a.ixHeldStatus(ctx)
 	line("copies: %d exact re-uploads not downloaded (%d MB) · %d held · %d released", h.Subst, h.SavedMB, h.Held, h.Released)
+	for _, l := range a.ixDedupDiag(ctx) { // ix_dedup.go
+		line("%s", l)
+	}
 	for _, l := range a.ixCopiesDiag(ctx) {
 		line("%s", l)
 	}

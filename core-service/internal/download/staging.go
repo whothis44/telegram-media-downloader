@@ -664,8 +664,9 @@ func (l *Library) moveStaged(ctx context.Context, mv stagedMove) error {
 			}
 			continue
 		}
+		// Followers waited for the same Telegram file (followStaged).
 		if rec, found, e := l.existing(ctx, fw, `d.file_path=?`, mv.path); e == nil && found {
-			records = append(records, stagedRecord{fw, rec})
+			records = append(records, stagedRecord{fw, tagged(rec, DedupTelegramFile)})
 			continue
 		}
 		rec, found, e := l.reuse(ctx, fw, `d.file_path=?`, mv.path)
@@ -673,7 +674,7 @@ func (l *Library) moveStaged(ctx context.Context, mv stagedMove) error {
 			return e
 		}
 		if found {
-			records = append(records, stagedRecord{fw, rec})
+			records = append(records, stagedRecord{fw, tagged(rec, DedupTelegramFile)})
 		}
 	}
 	if len(records) == 0 {
