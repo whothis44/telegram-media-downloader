@@ -35,10 +35,12 @@ import (
 // somewhere safe as well. The database copy is a consistent snapshot taken
 // while the app runs (VACUUM INTO, as the app's other backups do).
 //
-// Every copy is checked before it counts: sizes and SHA-256 hashes against
-// the source, and SQLite's integrity check on the database copy itself. The
-// last 7 nightly copies are kept; the copy made the day before Telegram's
-// deletion date ("... final") is never rotated away.
+// Every copy is checked before it counts: SQLite's integrity check on the
+// database snapshot while it is still on the local disk, then sizes and
+// SHA-256 hashes of every copied file against the source. SQLite never
+// opens anything on the share. The last 7 nightly copies are kept; the copy
+// made the day before Telegram's deletion date ("... final") is never
+// rotated away.
 
 const (
 	ixBackupKey   = "ix_backup_last"
@@ -219,8 +221,10 @@ func (a *App) ixBackupTo(ctx context.Context, reason string, now time.Time) (ixB
 	}()
 	var files []ixBackupFile
 
-	// The database: a consistent snapshot in the data folder first (SQLite
-	// is happiest on a local disk), then copied over and checked there.
+	// The database: a consistent snapshot in the data folder, checked there
+	// by SQLite's integrity check, then copied over and the copy checked byte
+	// for byte (SHA-256) against it. SQLite never opens a file on the share:
+	// a network path (\\nas\share) is not something to trust its driver with.
 	local := filepath.Join(a.dataDir, "backups", "archive-nightly")
 	_ = os.RemoveAll(local)
 	defer os.RemoveAll(local)
@@ -233,16 +237,20 @@ func (a *App) ixBackupTo(ctx context.Context, reason string, now time.Time) (ixB
 			return res, fmt.Errorf("database snapshot: %w", err)
 		}
 	}
+	if err = ixIntegrityCheckHook(snapCtx, snap.Path); err != nil {
+		return res, fmt.Errorf("database snapshot: %w", err)
+	}
+	// Still the bytes that were checked (the check opens it read-only).
+	if sum, n, err := ixHashFile(snap.Path); err != nil || sum != snap.SHA256 || n != snap.Bytes {
+		return res, errors.Join(errors.New("database snapshot: it changed after it was checked"), err)
+	}
 	dbCopy := filepath.Join(work, "db.sqlite")
-	f, err := ixBackupCopy(snap.Path, dbCopy)
+	f, err := ixBackupCopy(snap.Path, dbCopy) // reads the copy back and compares hashes
 	if err != nil {
 		return res, fmt.Errorf("database copy: %w", err)
 	}
 	if f.SHA256 != snap.SHA256 || f.Bytes != snap.Bytes {
-		return res, errors.New("database copy: it does not match the snapshot")
-	}
-	if err = ixIntegrityCheck(snapCtx, dbCopy); err != nil {
-		return res, fmt.Errorf("database copy: %w", err)
+		return res, errors.New("database copy: it does not match the checked snapshot")
 	}
 	f.Path = "db.sqlite"
 	files = append(files, f)
@@ -424,8 +432,8 @@ func ixBackupCopyOnce(src, dst string) (ixBackupFile, error) {
 	return ixBackupFile{Bytes: n, SHA256: sum}, nil
 }
 
-// ixSQLiteURI is a read-only SQLite address for a file, local or on a share
-// (file:///X:/a, file:////nas/share/a, file:///home/a).
+// ixSQLiteURI is a read-only SQLite address for a local file
+// (file:///X:/a, file:///home/a).
 func ixSQLiteURI(path, query string) string {
 	p := filepath.ToSlash(path)
 	if !strings.HasPrefix(p, "/") {
@@ -434,9 +442,16 @@ func ixSQLiteURI(path, query string) string {
 	return "file://" + (&url.URL{Path: p}).EscapedPath() + "?" + query
 }
 
-// ixIntegrityCheck runs SQLite's full integrity check on a database copy,
-// opened read-only and without locks (it may be on a network share).
+// ixIntegrityCheckHook is ixIntegrityCheck; tests see which file it is given.
+var ixIntegrityCheckHook = ixIntegrityCheck
+
+// ixIntegrityCheck runs SQLite's full integrity check on a local database
+// snapshot, opened read-only and without locks. A network path is refused:
+// copies on the NAS are checked by their hashes instead.
 func ixIntegrityCheck(ctx context.Context, path string) error {
+	if ixNetworkPath(path) {
+		return errors.New("the integrity check runs on the local snapshot, never over a network share")
+	}
 	db, err := sql.Open("sqlite", ixSQLiteURI(path, "mode=ro&immutable=1"))
 	if err != nil {
 		return err
@@ -463,6 +478,13 @@ func ixIntegrityCheck(ctx context.Context, path string) error {
 		return fmt.Errorf("integrity check failed: %s", strings.Join(results[:min(len(results), 3)], "; "))
 	}
 	return nil
+}
+
+// ixNetworkPath reports a UNC path: \\server\share\... (or with forward
+// slashes) and \\?\UNC\server\share\...; not \\?\C:\... or \\.\...
+func ixNetworkPath(p string) bool {
+	p = strings.ReplaceAll(p, `\`, "/")
+	return strings.HasPrefix(strings.ToUpper(p), "//?/UNC/") || (strings.HasPrefix(p, "//") && !strings.HasPrefix(p, "//?/") && !strings.HasPrefix(p, "//./"))
 }
 
 // ixRotateBackups keeps the newest nightly copies and removes the older

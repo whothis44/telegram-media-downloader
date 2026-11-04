@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"net/http"
 	"os"
@@ -230,5 +231,58 @@ func TestIxBackupRunsNightlyAfterTheIndexCopy(t *testing.T) {
 	}
 	if st := a.ixBackupState(); st.Tries != 3 || st.OK || st.DayDone {
 		t.Fatalf("retries: %+v", st)
+	}
+}
+
+// SQLite's integrity check runs on the local snapshot in the data folder,
+// never on the copy on the NAS (which is checked by its hash); a snapshot
+// that fails the check makes no copy; a network path is refused outright.
+func TestIxBackupChecksTheLocalSnapshotNotTheShare(t *testing.T) {
+	a, ctx, dir := ixBackupFixture(t)
+	old := ixIntegrityCheckHook
+	t.Cleanup(func() { ixIntegrityCheckHook = old })
+	var checked []string
+	ixIntegrityCheckHook = func(ctx context.Context, path string) error {
+		checked = append(checked, path)
+		return ixIntegrityCheck(ctx, path)
+	}
+	if err := a.ixBackup(ctx, "manual", time.Date(2026, 11, 3, 4, 0, 0, 0, time.Local)); err != nil {
+		t.Fatal(err)
+	}
+	if len(checked) != 1 || !ixInside(a.dataDir, checked[0]) || ixInside(dir, checked[0]) {
+		t.Fatalf("checked %v (data folder %s, backups %s)", checked, a.dataDir, dir)
+	}
+	var manifest struct {
+		Files []ixBackupFile `json:"files"`
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "2026-11-03_040000", "manifest.json"))
+	if err != nil || json.Unmarshal(raw, &manifest) != nil {
+		t.Fatal(err)
+	}
+	if sum, n, err := ixHashFile(filepath.Join(dir, "2026-11-03_040000", "db.sqlite")); err != nil || manifest.Files[0].Path != "db.sqlite" || sum != manifest.Files[0].SHA256 || n != manifest.Files[0].Bytes {
+		t.Fatalf("the copy does not match its checked hash: %v", err)
+	}
+	// A snapshot that fails the check: no copy, the failure reported.
+	ixIntegrityCheckHook = func(context.Context, string) error { return errors.New("integrity check failed: invented damage") }
+	if err := a.ixBackup(ctx, "manual", time.Date(2026, 11, 3, 5, 0, 0, 0, time.Local)); err == nil || !strings.Contains(err.Error(), "invented damage") {
+		t.Fatalf("a damaged snapshot: %v", err)
+	}
+	for _, name := range ixBackupNames(t, dir) {
+		if strings.HasPrefix(name, "2026-11-03_0500") {
+			t.Fatalf("a copy was left: %s", name)
+		}
+	}
+	for _, p := range []string{`\\nas\share\index backups\db.sqlite`, `//nas/share/db.sqlite`, `\\?\UNC\nas\share\db.sqlite`} {
+		if !ixNetworkPath(p) {
+			t.Fatalf("%s is a network path", p)
+		}
+		if err := ixIntegrityCheck(ctx, p); err == nil || !strings.Contains(err.Error(), "network share") {
+			t.Fatalf("%s: %v", p, err)
+		}
+	}
+	for _, p := range []string{`C:\data\db.sqlite`, `\\?\C:\data\db.sqlite`, `/home/x/db.sqlite`, `X:\index\db.sqlite`} {
+		if ixNetworkPath(p) {
+			t.Fatalf("%s is not a network path", p)
+		}
 	}
 }
