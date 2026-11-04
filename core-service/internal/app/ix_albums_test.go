@@ -700,3 +700,55 @@ func TestIxPopularAlbumsAreNotTakenForLogos(t *testing.T) {
 		t.Fatal("the scene no longer shows the old rule's mistake")
 	}
 }
+
+// ---------- the loose bar follows the model ----------
+
+func TestIxLooseBarIsMeasuredForTheModelInUse(t *testing.T) {
+	r := rand.New(rand.NewSource(8))
+	vec := map[string][]float32{}
+	var cores [][]string
+	for si := 0; si < 40; si++ {
+		shoot := ixRandUnit(r, 64)
+		var keys []string
+		for i := 0; i < 8; i++ {
+			k := fmt.Sprintf("s%d-%d", si, i)
+			vec[k] = ixMix(64, 1.0, shoot, 0.8, ixRandUnit(r, 64))
+			keys = append(keys, k)
+		}
+		cores = append(cores, keys)
+	}
+	modelA := func(a, b string) (float32, bool) { return ixCos(vec[a], vec[b]), true }
+	// Another model gives the same pictures higher numbers.
+	modelB := func(a, b string) (float32, bool) { return 0.4 + 0.6*ixCos(vec[a], vec[b]), true }
+	ta, tb := ixLooseThreshold(modelA, cores), ixLooseThreshold(modelB, cores)
+	if ta <= ixLooseLow || ta >= ixLooseHigh || tb <= ta+0.05 {
+		t.Fatalf("bars: %.3f and %.3f", ta, tb)
+	}
+	// A file of the shoot is above both bars, an unrelated one below both.
+	member, stranger := ixMix(64, 1.0, ixMix(64, 1.0, vec["s0-0"], 1.0, vec["s0-1"]), 0.5, ixRandUnit(r, 64)), ixRandUnit(r, 64)
+	best := func(v []float32, sim func(float32) float32) float32 {
+		b := float32(-1)
+		for _, k := range cores[0] {
+			b = max(b, sim(ixCos(v, vec[k])))
+		}
+		return b
+	}
+	id, squeeze := func(x float32) float32 { return x }, func(x float32) float32 { return 0.4 + 0.6*x }
+	if best(member, id) < ta || best(member, squeeze) < tb || best(stranger, id) >= ta || best(stranger, squeeze) >= tb {
+		t.Fatalf("member %.3f/%.3f stranger %.3f/%.3f, bars %.3f/%.3f", best(member, id), best(member, squeeze), best(stranger, id), best(stranger, squeeze), ta, tb)
+	}
+	// Too little to measure: the fixed bar.
+	if v := ixLooseThreshold(modelA, cores[:5]); v != ixSetLooseSim {
+		t.Fatalf("few sets: %.3f", v)
+	}
+	if v := ixLooseThreshold(nil, cores); v != ixSetLooseSim {
+		t.Fatalf("no model: %.3f", v)
+	}
+	// The sets use it.
+	m := ixSetScene()
+	m.EmbSim = modelA
+	ixAssignSets(m, ixSetFixes{}, nil)
+	if m.LooseSim != ixSetLooseSim {
+		t.Fatalf("one set measured: %.3f", m.LooseSim)
+	}
+}

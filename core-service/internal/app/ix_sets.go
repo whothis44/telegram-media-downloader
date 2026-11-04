@@ -42,7 +42,7 @@ func ixNowMs() int64 { return time.Now().UnixMilli() }
 const (
 	ixSetMaxShare = 50   // a file in more families than this links nothing
 	ixSetTieW     = 10.0 // weight of a tie a person made
-	ixSetLooseSim = 0.62 // cosine below which a one-off file is unlike the set's core
+	ixSetLooseSim = 0.62 // cosine below which a one-off file is unlike the set's core (when the model's own bar cannot be measured)
 )
 
 type ixSetItem struct {
@@ -283,7 +283,6 @@ func ixSplitLarge(adj [][]ixGEdge, fams []int32, depth int) [][]int32 {
 // false when either has none).
 func ixAssignSets(m *ixModel, fixes ixSetFixes, sim func(a, b string) (float32, bool)) {
 	nf := len(m.Families)
-	m.LooseSim = ixSetLooseSim
 	famClusters := make([][]int32, nf)
 	holders := map[int32][]int32{} // cluster -> families
 	for fi := range m.Families {
@@ -420,6 +419,8 @@ func ixAssignSets(m *ixModel, fixes ixSetFixes, sim func(a, b string) (float32, 
 		}
 		return out
 	}
+	cores := make([][]string, len(m.Sets))           // each set's core files
+	fixes1 := make([]map[string]string, len(m.Sets)) // each set's placements by a person
 	for si := range m.Sets {
 		s := &m.Sets[si]
 		chats, posts := map[string]bool{}, 0
@@ -479,6 +480,13 @@ func ixAssignSets(m *ixModel, fixes ixSetFixes, sim func(a, b string) (float32, 
 			}
 			s.Items = append(s.Items, it)
 		}
+		cores[si], fixes1[si] = core, fixed
+	}
+	// The bar for "loose" follows the model in use: how close core files are
+	// to one another (ix_loose.go).
+	m.LooseSim = ixLooseThreshold(m.EmbSim, cores)
+	for si := range m.Sets {
+		s, core, fixed := &m.Sets[si], cores[si], fixes1[si]
 		// One-offs unlike every core file are loose, when pictures can be
 		// compared.
 		if sim != nil && len(core) > 0 {
@@ -499,7 +507,7 @@ func ixAssignSets(m *ixModel, fixes ixSetFixes, sim func(a, b string) (float32, 
 				}
 				if compared {
 					it.Sim = best
-					if best < ixSetLooseSim {
+					if best < m.LooseSim {
 						it.Role = "loose"
 					}
 				}
