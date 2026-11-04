@@ -533,6 +533,14 @@ func (a *App) commitPurge(ctx context.Context, p *purgeRecord) error {
 	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO tgdl_file_cleanup(path) SELECT file_path FROM downloads WHERE file_path IS NOT NULL AND file_path<>'' AND (`+where+`)`, args...); err != nil {
 		return err
 	}
+	// Messages of the group that shared another file without an entry
+	// (ix_links.go): their links go, and the files they kept are checked
+	// again (still kept while anything else uses them).
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO tgdl_file_cleanup(path) SELECT of_path FROM ix_msg_link WHERE of_path<>'' AND (`+where+`)`, args...); err == nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM ix_msg_link WHERE `+where, args...); err != nil {
+			return err
+		}
+	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM downloads WHERE `+where, args...)
 	if err != nil {
 		return err

@@ -6,7 +6,11 @@ import (
 	"crypto/sha256"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/botnick/telegram-media-downloader/core-service/internal/download"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/telegram"
@@ -21,36 +25,39 @@ import (
 // exactly its size. A file is never skipped on a guess: Telegram's part
 // hashes, or parts downloaded from Telegram, must match the saved file.
 //
-// What is checked, by kind:
-//   - Media (video, audio, GIF, image files, by type or MIME), from 256 KiB:
-//     Telegram's part hashes, a small request. Below 2 MiB every part's hash
-//     must match and nothing else is tried (sampling would cost about as
-//     much as the file). From 2 MiB, hashes at the start, middle and end,
-//     or, when Telegram keeps none, three 1 MiB parts (more over 256 MiB).
-//   - Other documents, from 256 KiB: Telegram's hash of every part. A
-//     document can be edited in place without changing its length, so
-//     samples are not enough; with no hashes it is downloaded.
-//   - Compressed photos: Telegram re-encodes photos on upload, so the same
-//     picture posted again is mostly a forward (the same Telegram file, not
-//     downloaded at all) or different bytes. A byte-identical re-upload is
-//     likely only when a saved photo has the same size, the same pixel size
-//     and the very same stripped preview. Only then: from 256 KiB Telegram's
-//     hash of every part, and from 1 MiB, when it has none, four 64 KiB
-//     ranges (at most a quarter of the photo).
+// A wrong "same bytes" loses the file for good (it is never downloaded,
+// and a message that had an entry is repointed and its own file deleted),
+// so only compressed video, which changes throughout when it differs at
+// all, is ever judged on part of its bytes. What is checked, by kind:
+//   - Video (MIME video/*), from 256 KiB: Telegram's part hashes, a small
+//     request. Below 2 MiB the hash of every part must match. From 2 MiB,
+//     the hashes Telegram returns for the start, middle and end (every one
+//     of them, not just the part at each place), or, when Telegram keeps
+//     none, three 1 MiB parts (more over 256 MiB).
+//   - Everything else (pictures, audio, documents, compressed photos), from
+//     256 KiB: Telegram's hash of every part. Uncompressed audio and
+//     pictures (WAV, BMP, TIFF scans) can be equal in long silent or white
+//     stretches and differ elsewhere, and a document can be edited in place
+//     without changing its length. Without hashes the file is downloaded.
+//   - Compressed photos are checked only against a saved photo with the
+//     same size, pixel size and stripped preview (Telegram re-encodes
+//     photos, so a byte-identical one is rare otherwise).
 //
-// From 256 KiB a file also waits while another of exactly its size is
-// downloading (download.Library.SubstituteFrom), so that a copy queued next
-// to its original is checked against it instead of downloaded alongside.
+// A file whose identity is set to be downloaded for real (ix_subst_block,
+// "Fetch the real files") is never checked or matched by identity.
+//
+// From 256 KiB a video or photo also waits, at most 5 minutes, while
+// another of exactly its size, kind and MIME type is downloading
+// (ixSubstituteWait), so that a copy queued next to its original is
+// checked against it instead of downloaded alongside.
 //
 // What each check found is counted per day (ix_dedup.go).
 
 const (
-	ixSubstMinSize         = 256 << 10 // smaller files are simply downloaded
-	ixSubstSampleSize      = 2 << 20   // media from here may be sampled in 1 MiB parts
-	ixSubstPhotoSampleSize = 1 << 20   // photos from here may be sampled in small ranges
-	ixSubstPhotoRange      = 64 << 10
-	ixSubstHashChunk       = 131072 // upload.getFileHashes offsets are multiples of this
-	ixSubstMaxHashCalls    = 64     // per file: beyond that it is downloaded
+	ixSubstMinSize      = 256 << 10 // smaller files are simply downloaded
+	ixSubstSampleSize   = 2 << 20   // video from here may be judged on parts
+	ixSubstHashChunk    = 131072    // upload.getFileHashes offsets are multiples of this
+	ixSubstMaxHashCalls = 64        // per file: beyond that it is downloaded
 )
 
 type ixRemoteFile interface {
@@ -58,16 +65,18 @@ type ixRemoteFile interface {
 	ReadPart(ctx context.Context, offset int64) ([]byte, error)
 }
 
-// ixRangeReader reads less than a 1 MiB part (telegram.ValidRange).
-type ixRangeReader interface {
-	ReadRange(ctx context.Context, offset int64, limit int) ([]byte, error)
-}
-
 // ixSubstPlan is how one file may be checked.
 type ixSubstPlan struct {
 	photo      bool
 	fullHashes bool // every part's hash must match
-	sample     int  // 0: hashes only; else the size of the samples read
+	sample     int  // 0: hashes only; else the size of the samples read (video only)
+}
+
+// ixIsVideo: compressed video, by MIME type (Telegram gives every document
+// one; a GIF picture, image/gif, is not video).
+func ixIsVideo(item download.Item) bool {
+	mime := strings.ToLower(strings.TrimSpace(item.Facts.Mime))
+	return strings.HasPrefix(mime, "video/") || (mime == "" && item.Identity.Kind == "document" && item.Type == "video")
 }
 
 func ixSubstPlanFor(item download.Item) (ixSubstPlan, bool) {
@@ -76,20 +85,9 @@ func ixSubstPlanFor(item download.Item) (ixSubstPlan, bool) {
 		return ixSubstPlan{}, false
 	}
 	if item.Identity.Kind == "photo" {
-		p := ixSubstPlan{photo: true, fullHashes: true}
-		if size >= ixSubstPhotoSampleSize {
-			p.sample = ixSubstPhotoRange
-		}
-		return p, true
+		return ixSubstPlan{photo: true, fullHashes: true}, true
 	}
-	mime := strings.ToLower(item.Facts.Mime)
-	switch {
-	case item.Type == "video" || item.Type == "audio" || item.Type == "voice" || item.Type == "photo" || item.Type == "gif":
-	case strings.HasPrefix(mime, "video/") || strings.HasPrefix(mime, "audio/") || strings.HasPrefix(mime, "image/"):
-	default:
-		return ixSubstPlan{fullHashes: true}, true
-	}
-	if size < ixSubstSampleSize {
+	if !ixIsVideo(item) || size < ixSubstSampleSize {
 		return ixSubstPlan{fullHashes: true}, true
 	}
 	return ixSubstPlan{sample: telegram.PartSize}, true
@@ -172,11 +170,14 @@ func (x *ixRemote) byHashes(ctx context.Context, local *os.File, full bool) (dec
 		}
 		return true, true
 	}
+	// Ask at the start, middle and end, then compare every hash Telegram
+	// returned, not only the part at each of those places.
 	for _, off := range []int64{0, x.size / 2, x.size - 1} {
-		h, ok := x.hashAt(ctx, off)
-		if !ok {
+		if _, ok := x.hashAt(ctx, off); !ok {
 			return false, false
 		}
+	}
+	for _, h := range x.hashes {
 		match, err := check(h)
 		if err != nil {
 			return false, false
@@ -191,16 +192,11 @@ func (x *ixRemote) byHashes(ctx context.Context, local *os.File, full bool) (dec
 func (x *ixRemote) sampleOffsets(limit int) []int64 {
 	l := int64(limit)
 	last := (x.size - 1) / l * l
-	var offs []int64
-	if limit == telegram.PartSize {
-		offs = []int64{0, (x.size / 2) / l * l, last}
-		if x.size > 256<<20 {
-			for i := int64(1); i <= 5; i++ {
-				offs = append(offs, (x.size*i/6)/l*l)
-			}
+	offs := []int64{0, (x.size / 2) / l * l, last}
+	if x.size > 256<<20 {
+		for i := int64(1); i <= 5; i++ {
+			offs = append(offs, (x.size*i/6)/l*l)
 		}
-	} else {
-		offs = []int64{0, (x.size / 3) / l * l, (x.size * 2 / 3) / l * l, last}
 	}
 	seen := map[int64]bool{}
 	out := offs[:0]
@@ -217,15 +213,10 @@ func (x *ixRemote) read(ctx context.Context, off int64, limit int) ([]byte, bool
 	if data, ok := x.samples[off]; ok {
 		return data, true
 	}
-	var data []byte
-	var err error
-	if limit == telegram.PartSize {
-		data, err = x.r.ReadPart(ctx, off)
-	} else if rr, ok := x.r.(ixRangeReader); ok {
-		data, err = rr.ReadRange(ctx, off, limit)
-	} else {
+	if limit != telegram.PartSize {
 		return nil, false
 	}
+	data, err := x.r.ReadPart(ctx, off)
 	if err != nil {
 		x.failed = true
 		return nil, false
@@ -268,9 +259,6 @@ func (x *ixRemote) same(ctx context.Context, local *os.File, plan ixSubstPlan) (
 		return "", false
 	}
 	how = "sampled-parts"
-	if plan.sample != telegram.PartSize {
-		how = "sampled-ranges"
-	}
 	if decided, ok := x.bySamples(ctx, local, plan.sample); decided {
 		return how, ok
 	}
@@ -290,6 +278,11 @@ func ixSameBytes(ctx context.Context, remote ixRemoteFile, local *os.File, size 
 // ixSubstitute is the library's hook: the relative path of a saved file
 // with exactly this item's bytes, how that was confirmed, or false.
 func (a *App) ixSubstitute(ctx context.Context, item download.Item, client download.Client) (string, string, bool) {
+	// Set to be downloaded for real ("Fetch the real files"): no check, and
+	// no match by identity either.
+	if a.ixSubstBlocked(ctx, item) {
+		return "", "", false
+	}
 	// The same Telegram file as a message that shares a saved file without
 	// an entry of its own (download.skipDuplicates): the library does not
 	// know this identity, the link does (ix_links.go).
@@ -304,14 +297,80 @@ func (a *App) ixSubstitute(ctx context.Context, item download.Item, client downl
 	if !ok {
 		return "", "", false
 	}
+	// Asked already for this message a moment ago (the low-quality-first
+	// check asks just before the library does): the same answer, without
+	// asking Telegram or counting it again.
+	memoKey := item.GroupID + "\x00" + strconv.FormatInt(item.MessageID, 10) + "\x00" + item.Identity.Key()
+	if r, ok := a.ixSubstMemo().get(memoKey); ok {
+		return r.path, r.how, r.ok
+	}
+	path, how, same, checked := a.ixSubstCheck(ctx, item, remote, plan)
+	if checked {
+		a.ixSubstMemo().put(memoKey, ixSubstAnswer{path: path, how: how, ok: same})
+	}
+	return path, how, same
+}
+
+// ixSubstBlocked: the item's identity is set to be downloaded for real.
+func (a *App) ixSubstBlocked(ctx context.Context, item download.Item) bool {
 	var blocked int
 	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM ix_subst_block WHERE identity=?`, item.Identity.Key()).Scan(&blocked)
-	if blocked > 0 {
-		return "", "", false
+	return blocked > 0
+}
+
+type ixSubstAnswer struct {
+	path, how string
+	ok        bool
+	at        time.Time
+}
+
+// ixSubstMemos keeps each App's recent answers for ten minutes.
+type ixSubstMemos struct {
+	mu sync.Mutex
+	m  map[string]ixSubstAnswer
+}
+
+var ixSubstMemoBoxes sync.Map // *App -> *ixSubstMemos
+
+func (a *App) ixSubstMemo() *ixSubstMemos {
+	v, _ := ixSubstMemoBoxes.LoadOrStore(a, &ixSubstMemos{m: map[string]ixSubstAnswer{}})
+	return v.(*ixSubstMemos)
+}
+
+const ixSubstMemoFor = 10 * time.Minute
+
+func (s *ixSubstMemos) get(key string) (ixSubstAnswer, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.m[key]
+	if !ok || time.Since(r.at) > ixSubstMemoFor {
+		return ixSubstAnswer{}, false
 	}
+	return r, true
+}
+
+func (s *ixSubstMemos) put(key string, r ixSubstAnswer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.m) >= 512 {
+		for k, old := range s.m {
+			if time.Since(old.at) > ixSubstMemoFor {
+				delete(s.m, k)
+			}
+		}
+	}
+	if len(s.m) < 4096 {
+		r.at = time.Now()
+		s.m[key] = r
+	}
+}
+
+// ixSubstCheck compares the item with the saved files of its size on
+// Telegram; checked is false when there was nothing to compare with.
+func (a *App) ixSubstCheck(ctx context.Context, item download.Item, remote ixRemoteFile, plan ixSubstPlan) (string, string, bool, bool) {
 	paths := a.ixSubstCandidates(ctx, item, plan)
 	if len(paths) == 0 {
-		return "", "", false
+		return "", "", false, false
 	}
 	size := item.Identity.Size
 	x := newIxRemote(remote, size)
@@ -348,22 +407,39 @@ func (a *App) ixSubstitute(ctx context.Context, item download.Item, client downl
 		f.Close()
 		if same {
 			a.ixLog("not downloading %s #%d: same bytes as %s (%s)", item.GroupID, item.MessageID, rel, how)
-			return stored, how, true
+			return stored, how, true, true
 		}
 		if how == "" {
 			break // Telegram cannot tell: the other candidates would not fare better
 		}
 	}
-	return "", "", false
+	return "", "", false, checked
 }
 
-// ixSubstituteFrom: the smallest file checked, 0 when the check is off
-// (the library then lets same-size files download at the same time).
-func (a *App) ixSubstituteFrom(ctx context.Context) int64 {
-	if !a.ixLoadSettings(ctx).SubstExact {
-		return 0
+// ixPartName: a numbered part of a split file (name.part01.rar, name.r00,
+// name.z01, name.7z.001, name.001). Parts are all the same size and are
+// not copies of each other.
+var ixPartName = regexp.MustCompile(`(?i)(\.part\d+\.[a-z0-9]+|\.[rz]\d{2}|\.\d{3})$`)
+
+// ixSubstituteWait is the library's same-size wait hook: the key under
+// which this item waits for a download of exactly its size, kind and MIME
+// type, or false. Only for what the check can confirm and a copy is likely
+// for: videos and photos from 256 KiB, not numbered parts of split files,
+// and only with the check on and no staging folder (a staged file is not
+// in the library yet, so the check could not see it anyway).
+func (a *App) ixSubstituteWait(ctx context.Context, item download.Item) (string, bool) {
+	if item.Identity.Size < ixSubstMinSize || ixPartName.MatchString(strings.TrimSpace(item.Name)) {
+		return "", false
 	}
-	return ixSubstMinSize
+	mime := strings.ToLower(strings.TrimSpace(item.Facts.Mime))
+	if item.Identity.Kind != "photo" && !ixIsVideo(item) {
+		return "", false
+	}
+	s := a.ixLoadSettings(ctx)
+	if !s.SubstExact || s.StageDir != "" {
+		return "", false
+	}
+	return item.Identity.Kind + "\x00" + mime + "\x00" + strconv.FormatInt(item.Identity.Size, 10), true
 }
 
 // ixSubstCandidates: saved files of exactly the item's size (for a photo,

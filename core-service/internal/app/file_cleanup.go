@@ -192,7 +192,9 @@ func (a *App) drainFileCleanup(ctx context.Context) error {
 		}
 		return filepath.Join(rootPath, name)
 	}
-	for _, path := range append(owned, a.ixLowqKeptPaths(ctx, tx)...) {
+	owned = append(owned, a.ixLowqKeptPaths(ctx, tx)...)
+	owned = append(owned, ixLinkedKeptPaths(ctx, tx)...) // messages sharing the file without an entry (ix_links.go)
+	for _, path := range owned {
 		if name, err := mediaName(path); err == nil {
 			keep[key(name)] = true
 		}

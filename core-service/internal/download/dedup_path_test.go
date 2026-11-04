@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"path/filepath"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -27,7 +28,9 @@ func TestLibrarySameSizeWaitsSoTheCheckFindsTheSavedFile(t *testing.T) {
 		_, err := w.Write(data)
 		return err
 	})
-	library.SubstituteFrom = func(context.Context) int64 { return 16 }
+	library.SubstituteWait = func(_ context.Context, it Item) (string, bool) {
+		return "video/mp4:" + strconv.FormatInt(it.Identity.Size, 10), true
+	}
 	library.Substitute = func(ctx context.Context, it Item, _ Client) (string, string, bool) {
 		var path string
 		if db.Reader.QueryRowContext(ctx, `SELECT file_path FROM downloads WHERE file_size=? AND status='completed' LIMIT 1`, it.Identity.Size).Scan(&path) != nil {
@@ -64,8 +67,43 @@ func TestLibrarySameSizeWaitsSoTheCheckFindsTheSavedFile(t *testing.T) {
 		t.Fatalf("calls=%d dedup=%v", calls.Load(), dedup)
 	}
 
-	// With the check off, same-size files go at the same time as before.
-	library.SubstituteFrom = func(context.Context) int64 { return 0 }
+	// The wait is capped: a file of the same key downloads anyway after it.
+	library.SubstituteWaitMax = 150 * time.Millisecond
+	started3, release3 := make(chan struct{}, 2), make(chan struct{})
+	var calls3 atomic.Int64
+	client3 := clientFunc(func(_ context.Context, id telegram.MediaIdentity, w io.Writer) error {
+		calls3.Add(1)
+		started3 <- struct{}{}
+		<-release3
+		_, err := w.Write([]byte("slow, different bytes of one size " + id.ID))
+		return err
+	})
+	capped := make(chan error, 2)
+	for i, id := range []string{"801", "802"} {
+		go func() {
+			_, err := library.Ingest(context.Background(), Item{GroupID: "-1005", MessageID: int64(i + 1), Name: "b.mp4", Type: "video", Identity: telegram.MediaIdentity{Kind: "document", ID: id, Size: 37}}, client3)
+			capped <- err
+		}()
+	}
+	for range 2 {
+		select {
+		case <-started3:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the wait was not capped: the second file never started")
+		}
+	}
+	close(release3)
+	for range 2 {
+		if err := <-capped; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls3.Load() != 2 {
+		t.Fatalf("capped wait: %d downloads", calls3.Load())
+	}
+
+	// With no key (the check off, other kinds), same-size files go at the same time as before.
+	library.SubstituteWait = func(context.Context, Item) (string, bool) { return "", false }
 	release2, both := make(chan struct{}), make(chan struct{}, 2)
 	client2 := clientFunc(func(_ context.Context, id telegram.MediaIdentity, w io.Writer) error {
 		both <- struct{}{}
@@ -157,6 +195,37 @@ func TestLibraryNamesHowEachDuplicateWasFound(t *testing.T) {
 		fresh, err := library.Ingest(context.Background(), Item{GroupID: "-1001", MessageID: 4, Name: "other.mp4", Type: "video", Identity: telegram.MediaIdentity{Kind: "document", ID: "504", Size: 4}, SkipDuplicates: skip}, fakeClient{data: []byte("new!")})
 		if err != nil || fresh.Reused || fresh.Dedup != "" {
 			t.Fatalf("skip=%v fresh: %+v %v", skip, fresh, err)
+		}
+	}
+}
+
+// An identity set to be downloaded for real is not matched by identity:
+// its bytes come over the wire (and, being the same, end on the saved file).
+func TestLibraryBlockedIdentityIsDownloaded(t *testing.T) {
+	for _, skip := range []bool{false, true} {
+		library, _ := openTestLibrary(t, t.TempDir())
+		var calls atomic.Int64
+		client := clientFunc(func(_ context.Context, _ telegram.MediaIdentity, w io.Writer) error {
+			calls.Add(1)
+			_, err := w.Write([]byte("invented bytes"))
+			return err
+		})
+		item := func(msg int64) Item {
+			return Item{GroupID: "-1006", MessageID: msg, Name: "c.mp4", Type: "video", Identity: telegram.MediaIdentity{Kind: "document", ID: "901", Size: 14}, SkipDuplicates: skip}
+		}
+		first, err := library.Ingest(context.Background(), item(1), client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var blocked atomic.Bool
+		library.Blocked = func(context.Context, Item) bool { return blocked.Load() }
+		if fwd, err := library.Ingest(context.Background(), item(2), client); err != nil || fwd.Dedup != DedupTelegramFile || calls.Load() != 1 {
+			t.Fatalf("skip=%v forward: %+v %v calls=%d", skip, fwd, err, calls.Load())
+		}
+		blocked.Store(true)
+		real, err := library.Ingest(context.Background(), item(3), client)
+		if err != nil || calls.Load() != 2 || real.Dedup != DedupAfterDownload || real.Path != first.Path {
+			t.Fatalf("skip=%v blocked: %+v %v calls=%d", skip, real, err, calls.Load())
 		}
 	}
 }

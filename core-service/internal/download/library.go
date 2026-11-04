@@ -94,11 +94,17 @@ type Library struct {
 	// check that confirmed it (Record.DedupHow); DedupTelegramFile when it
 	// is the same Telegram file, known by a message without an entry.
 	Substitute func(context.Context, Item, Client) (path, how string, ok bool)
-	// SubstituteFrom (with Substitute): from this size, while a file is
-	// downloading, another message's file of exactly its size waits for it
-	// instead of downloading at the same time, so that Substitute can find
-	// it saved (same-size files at once are almost always copies). 0: never.
-	SubstituteFrom func(context.Context) int64
+	// SubstituteWait (with Substitute) names the key under which an item
+	// waits, at most SubstituteWaitMax, while another item with the same
+	// key is downloading, so that Substitute can find that one saved (the
+	// app keys by kind, MIME type and exact size, for what it can confirm).
+	// After the wait the item downloads as usual.
+	SubstituteWait    func(context.Context, Item) (string, bool)
+	SubstituteWaitMax time.Duration // 0: 5 minutes
+	// Blocked (optional): the item's identity is to be downloaded for real
+	// (the archive's "Fetch the real files"): it is not matched by its
+	// Telegram identity to a saved file, nor follows a staged one.
+	Blocked func(context.Context, Item) bool
 	// Staging (optional) names a local folder downloads are written to
 	// first, then copied to the library (staging.go). OnStaged is told when
 	// such a file is in the library; StageHold is held while it is added.
@@ -186,16 +192,18 @@ func (l *Library) tryEnter(key string) (func(), bool) {
 	return func() { l.mu.Lock(); delete(l.flights, key); close(done); l.mu.Unlock() }, true
 }
 
-func (l *Library) substituteFrom(ctx context.Context) int64 {
-	if l.Substitute == nil || l.SubstituteFrom == nil {
-		return 0
+func (l *Library) substituteWait(ctx context.Context, item Item) (string, bool) {
+	if l.Substitute == nil || l.SubstituteWait == nil {
+		return "", false
 	}
-	return l.SubstituteFrom(ctx)
+	return l.SubstituteWait(ctx, item)
 }
 
-// enterPaused is enter, with the client's attempt time limit stopped while
-// it waits (clients that have one: PauseBudget).
-func (l *Library) enterPaused(ctx context.Context, key string, client Client) (func(), error) {
+// enterWaiting is enter for at most max, with the client's attempt time
+// limit stopped while it waits (clients that have one: PauseBudget). After
+// max it gives up: release is nil and err is nil, and the caller goes on
+// without the key.
+func (l *Library) enterWaiting(ctx context.Context, key string, max time.Duration, client Client) (func(), error) {
 	if release, ok := l.tryEnter(key); ok {
 		return release, nil
 	}
@@ -203,7 +211,17 @@ func (l *Library) enterPaused(ctx context.Context, key string, client Client) (f
 		resume := p.PauseBudget()
 		defer resume()
 	}
-	return l.enter(ctx, key)
+	waitCtx, cancel := context.WithTimeout(ctx, max)
+	defer cancel()
+	release, err := l.enter(waitCtx, key)
+	if err != nil && ctx.Err() == nil {
+		return nil, nil // waited long enough
+	}
+	return release, err
+}
+
+func (l *Library) blocked(ctx context.Context, item Item) bool {
+	return l.Blocked != nil && l.Blocked(ctx, item)
 }
 
 func messageKey(item Item) string {
@@ -237,24 +255,32 @@ func (l *Library) Ingest(ctx context.Context, item Item, client Client) (Record,
 		return Record{}, err
 	}
 	defer release()
-	if record, found, err := l.existing(ctx, item, `d.telegram_media_kind=? AND d.telegram_media_id=?`, item.Identity.Kind, item.Identity.ID); err != nil || found {
-		return tagged(record, DedupTelegramFile), err
-	}
-	if record, found, err := l.reuse(ctx, item, `d.telegram_media_kind=? AND d.telegram_media_id=? AND (d.telegram_media_size=? OR (d.telegram_media_size IS NULL AND d.file_size=?))`, item.Identity.Kind, item.Identity.ID, item.Identity.Size, item.Identity.Size); err != nil || found {
-		return tagged(record, DedupTelegramFile), err
-	}
-	if record, found, err := l.followStaged(ctx, item); err != nil || found {
-		return tagged(record, DedupTelegramFile), err
+	if !l.blocked(ctx, item) {
+		if record, found, err := l.existing(ctx, item, `d.telegram_media_kind=? AND d.telegram_media_id=?`, item.Identity.Kind, item.Identity.ID); err != nil || found {
+			return tagged(record, DedupTelegramFile), err
+		}
+		if record, found, err := l.reuse(ctx, item, `d.telegram_media_kind=? AND d.telegram_media_id=? AND (d.telegram_media_size=? OR (d.telegram_media_size IS NULL AND d.file_size=?))`, item.Identity.Kind, item.Identity.ID, item.Identity.Size, item.Identity.Size); err != nil || found {
+			return tagged(record, DedupTelegramFile), err
+		}
+		if record, found, err := l.followStaged(ctx, item); err != nil || found {
+			return tagged(record, DedupTelegramFile), err
+		}
 	}
 	if client == nil {
 		return Record{}, errors.New("Telegram download client is unavailable")
 	}
-	if from := l.substituteFrom(ctx); from > 0 && item.Identity.Size >= from {
-		sizeRelease, err := l.enterPaused(ctx, "size:"+strconv.FormatInt(item.Identity.Size, 10), client)
+	if key, ok := l.substituteWait(ctx, item); ok {
+		max := l.SubstituteWaitMax
+		if max <= 0 {
+			max = 5 * time.Minute
+		}
+		sizeRelease, err := l.enterWaiting(ctx, "same-size:"+key, max, client)
 		if err != nil {
 			return Record{}, err
 		}
-		defer sizeRelease()
+		if sizeRelease != nil {
+			defer sizeRelease()
+		}
 	}
 	if l.Substitute != nil {
 		if path, how, ok := l.Substitute(ctx, item, client); ok {

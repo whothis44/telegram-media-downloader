@@ -773,6 +773,13 @@ func (a *App) ixFetchSubstituted(ctx context.Context) (int, []string, error) {
 		if err == nil { // its link to the saved file, when it had no entry of its own (ix_links.go)
 			_, err = tx.ExecContext(ctx, `DELETE FROM ix_msg_link WHERE group_id=? AND message_id=?`, x.group, x.msg)
 		}
+		if err == nil {
+			// Forwards of the re-upload were matched to the saved file by its
+			// Telegram identity, on the strength of the substitution: they are
+			// fetched for real too (ix_subst_block keeps the library from
+			// matching them by identity again until the bytes have come).
+			err = ixFetchForwardsToo(ctx, tx, x.identity, x.path)
+		}
 		if err != nil {
 			tx.Rollback()
 			return 0, nil, err

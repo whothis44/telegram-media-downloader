@@ -46,6 +46,15 @@ func (a *App) ixCountDedup(ctx context.Context, how string, files, bytes int64) 
 // (ix_subst) once the library has catalogued it on the saved file.
 func (a *App) ixNoteDedup(ctx context.Context, item download.Item, record download.Record) {
 	a.ixNoteLink(ctx, item, record)
+	if !record.Reused || record.Dedup == download.DedupAfterDownload {
+		// Its bytes came from Telegram: an identity set to be downloaded
+		// for real ("Fetch the real files") has been, and may be matched by
+		// identity again.
+		var blocked int
+		if a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM ix_subst_block WHERE identity=?`, item.Identity.Key()).Scan(&blocked) == nil && blocked > 0 {
+			_, _ = a.db.Writer.ExecContext(context.WithoutCancel(ctx), `DELETE FROM ix_subst_block WHERE identity=?`, item.Identity.Key())
+		}
+	}
 	if !record.Reused || record.Dedup == "" {
 		return
 	}

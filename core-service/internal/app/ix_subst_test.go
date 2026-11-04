@@ -161,17 +161,21 @@ func TestIxSubstituteChecksBySizeAndKind(t *testing.T) {
 	}
 
 	// A large photo matching a saved one in size, pixel size and preview:
-	// without hashes, four 64 KiB ranges (not the whole photo) decide.
+	// Telegram's hash of every part decides; without hashes nothing is
+	// sampled and it is downloaded.
 	r = &ixRangeRemote{data: photo, noHashes: true}
-	if path, how, ok := run(item(17, "photo", "image/jpeg", len(photo), 2560, 1920, thumb), r); !ok || how != "sampled-ranges" || path != "Invented Chat/images/photo_3.jpg" || r.parts.Load() != 0 || r.readBytes.Load() > 256<<10 {
-		t.Fatalf("photo: %q %q %v parts=%d read=%d", path, how, ok, r.parts.Load(), r.readBytes.Load())
+	if _, _, ok := run(item(17, "photo", "image/jpeg", len(photo), 2560, 1920, thumb), r); ok || r.parts.Load()+r.reads.Load() != 0 {
+		t.Fatalf("photo without hashes: %v parts=%d ranges=%d", ok, r.parts.Load(), r.reads.Load())
 	}
-	// Different bytes in a sampled range: downloaded.
 	other := append([]byte(nil), photo...)
-	other[len(other)-5] ^= 0xff
-	r = &ixRangeRemote{data: other, noHashes: true}
+	other[len(other)/2+5] ^= 0xff
+	r = &ixRangeRemote{data: other}
 	if _, _, ok := run(item(18, "photo", "image/jpeg", len(photo), 2560, 1920, thumb), r); ok {
 		t.Fatal("different photo bytes matched")
+	}
+	r = &ixRangeRemote{data: photo}
+	if path, how, ok := run(item(24, "photo", "image/jpeg", len(photo), 2560, 1920, thumb), r); !ok || how != "telegram-hashes" || path != "Invented Chat/images/photo_3.jpg" {
+		t.Fatalf("photo: %q %q %v", path, how, ok)
 	}
 	// Same size but another preview or pixel size: not asked at all.
 	for _, it := range []download.Item{
@@ -195,10 +199,10 @@ func TestIxSubstituteChecksBySizeAndKind(t *testing.T) {
 	}
 
 	// What the checks did is counted: every item with a same-size saved
-	// file was checked (9); samples were downloaded for photos 17 and 18 only.
+	// file was checked (10); nothing was sampled (no video from 2 MiB).
 	checks, sampled := ixDedupCounter(t, a, ixDedupCheck)
 	noHash, _ := ixDedupCounter(t, a, ixDedupCheckNoHash)
-	if checks != 9 || noHash != 5 || sampled <= 0 || sampled > 2*(256<<10) {
+	if checks != 10 || noHash != 4 || sampled != 0 {
 		t.Fatalf("counters: checks=%d noHash=%d sampled=%d", checks, noHash, sampled)
 	}
 	// Nothing is recorded as substituted until the library has catalogued it.

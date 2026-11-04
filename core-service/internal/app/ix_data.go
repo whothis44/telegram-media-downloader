@@ -571,7 +571,7 @@ func (a *App) ixShared(ctx context.Context) (map[string][]ixPlace, error) {
 	rows, err := a.db.Reader.QueryContext(ctx, `WITH k AS (
 			SELECT CASE WHEN length(file_hash)=64 THEN 'h:'||lower(file_hash) ELSE 'p:'||replace(file_path,char(92),'/') END AS key, group_id, message_id
 			FROM downloads WHERE message_id>0 AND file_type IS NOT 'stories' AND file_path IS NOT NULL AND file_path<>'' AND (status IS NULL OR status='completed')
-			UNION ALL SELECT CASE WHEN length(d.file_hash)=64 THEN 'h:'||lower(d.file_hash) ELSE 'p:'||replace(d.file_path,char(92),'/') END, l.group_id, l.message_id
+			UNION ALL SELECT CASE WHEN length(`+ixLinkedHash+`)=64 THEN 'h:'||lower(`+ixLinkedHash+`) ELSE 'p:'||replace(`+ixLinkedPath+`,char(92),'/') END, l.group_id, l.message_id
 			`+ixLinkedFrom+`) -- messages sharing a saved file (ix_links.go)
 		SELECT key, group_id, message_id FROM k WHERE key IN (SELECT key FROM k GROUP BY key HAVING COUNT(*)>1) ORDER BY key, group_id, message_id`)
 	if err != nil {

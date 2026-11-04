@@ -332,11 +332,20 @@ func (a *App) ixBuildModel(ctx context.Context) (*ixModel, error) {
 	if linked, err := a.ixLinkedFiles(ctx, ""); err == nil {
 		for _, l := range linked {
 			mk := l.Group + ":" + strconv.Itoa(l.Msg)
-			saved := savedByID[l.SavedID]
-			if files[mk] != nil || saved == nil {
+			if files[mk] != nil {
 				continue
 			}
-			f := *saved
+			var f fileRow
+			if saved := savedByID[l.SavedID]; saved != nil {
+				f = *saved
+			} else if l.SavedID == 0 {
+				// The saved file's entry is gone (the original was deleted);
+				// the file is kept for this message.
+				f.item = ixMItem{Type: l.FileType, Path: l.Path, Key: ixFileKey(l.Hash, l.Path), Size: l.Size}
+				f.created = int64(ixParseCreated(l.Created))
+			} else {
+				continue
+			}
 			f.item.Group, f.item.Msg, f.item.Linked = l.Group, l.Msg, true
 			if l.Name != "" {
 				f.item.Name = l.Name
