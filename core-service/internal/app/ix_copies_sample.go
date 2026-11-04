@@ -464,7 +464,7 @@ func (a *App) ixSampleJobs(ctx context.Context, heldOnly bool, n int) ([]ixSampl
 		FROM tgdl_work w LEFT JOIN ix_held h ON h.work_id=w.id AND h.released_at=0 AND h.reason<>''
 		LEFT JOIN ix_copy_sample s ON s.work_id=w.id
 		WHERE w.status='pending' AND w.media_type='video' AND w.file_size>=? AND w.ttl_seconds=0 AND length(w.body)>0
-		AND (s.work_id IS NULL OR (s.result='failed' AND s.tries<3 AND s.at<?))`+cond+`
+		AND (s.work_id IS NULL OR (s.result='failed' AND s.tries<3 AND s.at<? AND s.note NOT LIKE 'could not check without downloading%'))`+cond+`
 		ORDER BY w.file_size DESC, w.id LIMIT ?`, ixSampleMinSize, time.Now().Add(-time.Hour).UnixMilli(), n)
 	if err != nil {
 		return nil, err
