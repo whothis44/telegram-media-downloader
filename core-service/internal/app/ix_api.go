@@ -27,6 +27,7 @@ func registerIxRoutes(mux *http.ServeMux, a *App) {
 	mux.Handle("GET /api/ix/dups", a.requireAdmin(http.HandlerFunc(a.handleIxDups)))
 	mux.Handle("POST /api/ix/dups/retry", a.requireAdmin(http.HandlerFunc(a.handleIxDupsRetry)))
 	registerIxBrowseRoutes(mux, a)
+	registerIxBackupRoutes(mux, a)
 }
 
 type ixGroupStatus struct {
@@ -187,6 +188,7 @@ func (a *App) handleIxStatus(w http.ResponseWriter, r *http.Request) {
 		"ml":        a.ixMLStatusNow(ctx),
 		"deadline":  a.ixDeadlineEstimate(ctx, false),
 		"pictures":  a.ixMediaStatus(),
+		"backup":    a.ixBackupOverview(ctx),
 	}
 	if exportErr != nil {
 		out["exportDirError"] = exportErr.Error()

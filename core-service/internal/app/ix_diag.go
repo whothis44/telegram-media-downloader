@@ -221,6 +221,7 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 	box.mu.Unlock()
 	ex := a.ixExportStatus()
 	line("export: last %s · error: %s", ixAgo(ex.FinishedAt, now), r.clean(ex.Error))
+	line("%s", a.ixBackupDiag(ctx, now, r.clean))
 	line("\n[messages]")
 	var msgs, groups, gone int
 	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*), COUNT(DISTINCT group_id) FROM ix_messages`).Scan(&msgs, &groups)
