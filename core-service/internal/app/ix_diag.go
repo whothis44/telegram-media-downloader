@@ -119,7 +119,7 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 	on := func(v bool) string { return map[bool]string{true: "on", false: "off"}[v] }
 	set := func(v string) string { return map[bool]string{true: "set", false: "not set"}[v != ""] }
 	line("\n[settings]")
-	line("export %s at %s · pace %s · quiet %q–%q · pause on freeze %s · auto retry %s · download pacing %s", on(s.ExportEnabled), s.ExportTime, s.Pace, s.QuietStart, s.QuietEnd, on(s.PauseOnFreeze), on(s.AutoRetry), on(s.DownloadPacing))
+	line("export %s at %s · pace %s · quiet %q–%q · pause on freeze %s · auto retry %s · download pacing %s · big files at once %d", on(s.ExportEnabled), s.ExportTime, s.Pace, s.QuietStart, s.QuietEnd, on(s.PauseOnFreeze), on(s.AutoRetry), on(s.DownloadPacing), s.BigAtOnce)
 	line("duplicates %s (decoder %s, quiet %q–%q) · fixity %s · exact re-uploads %s · hold copies %s (forever %s)", on(s.DupEnabled), s.DupHWAccel, s.DupQuietStart, s.DupQuietEnd, on(s.FixityEnabled), on(s.SubstExact), on(s.HoldLikely), on(s.HoldForever))
 	line("alerts: web address %s (%s) · email %s · names in alerts %s", set(s.AlertWebhook), s.AlertWebhookKind, set(s.AlertEmailTo), on(s.AlertNames))
 	line("recognition services: auto start %s", on(s.MLAutoStart))
@@ -158,6 +158,9 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 	for _, dc := range d.Pace.DCs {
 		line("  DC%d: window %d, in flight %d, waiting %d, %.2f MB/s (5 min %.2f), %.1f s a part, waits last hour %d (speed limit %d) · %s", dc.DC, dc.Window, dc.InFlight, dc.Waiting, mb(dc.Speed), mb(dc.Speed5m), dc.PartSecs, dc.Floods1h, dc.Premium1h, dc.State)
 	}
+	bf := d.Big
+	line("big files (%d MB or more): %d downloading (at most %d at once, 0 = no limit) · %d waiting · %d set aside · %d held · backfills queueing files %d · queue %d of %d · backfill paused by the queue limit %v",
+		bf.MinBytes>>20, bf.Downloading, bf.Limit, bf.Waiting, bf.SetAside, bf.Held, bf.Backfills, bf.QueueCount, bf.QueueCap, bf.CapPaused)
 	var days []string
 	for _, day := range d.Days {
 		days = append(days, fmt.Sprintf("%s %d files %d MB", day.Day[5:], day.Files, day.Bytes>>20))

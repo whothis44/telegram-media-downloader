@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/botnick/telegram-media-downloader/core-service/internal/telegram"
+	"github.com/botnick/telegram-media-downloader/core-service/internal/engine"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/ws"
 )
 
@@ -62,6 +62,9 @@ type ixSettings struct {
 	LowqKeep   bool   `json:"lowqKeep"`   // keep that lower quality after the original arrives
 	StageDir   string `json:"stageDir"`   // local folder downloads go to before the library; empty: off
 	StageCapGB int    `json:"stageCapGb"` // space staged files may take
+	// BigAtOnce is how many files of 1 GB or more download at once
+	// (engine.BigFileLane; 0: no limit).
+	BigAtOnce int `json:"bigAtOnce"`
 	// Alerts (see ix_alerts.go). The SMTP password is never sent back to
 	// the dashboard; AlertSMTPPassSet says whether one is saved.
 	AlertWebhook     string `json:"alertWebhook"`
@@ -91,7 +94,7 @@ func (s ixSettings) public() ixSettings {
 }
 
 func ixDefaultSettings() ixSettings {
-	return ixSettings{ExportEnabled: true, ExportTime: "03:30", Pace: "normal", DupEnabled: true, DupHWAccel: "cuda", AutoRetry: true, FixityEnabled: true, SubstExact: true, HoldLikely: true, MLText: true, MLDupes: true, MLContainer: ixMLDefaultContainer, STTContainer: ixSTTDefaultContainer, DeadlineOrder: "auto", DownloadPacing: true, LowqFirst: true, StageCapGB: 20, AlertWebhookKind: "ntfy", AlertSMTPPort: "587", PreviewsAll: "auto"}
+	return ixSettings{ExportEnabled: true, ExportTime: "03:30", Pace: "normal", DupEnabled: true, DupHWAccel: "cuda", AutoRetry: true, FixityEnabled: true, SubstExact: true, HoldLikely: true, MLText: true, MLDupes: true, MLContainer: ixMLDefaultContainer, STTContainer: ixSTTDefaultContainer, DeadlineOrder: "auto", DownloadPacing: true, LowqFirst: true, StageCapGB: 20, BigAtOnce: engine.DefaultBigFileLane, AlertWebhookKind: "ntfy", AlertSMTPPort: "587", PreviewsAll: "auto"}
 }
 
 func (a *App) ixLoadSettings(ctx context.Context) ixSettings {
@@ -250,7 +253,7 @@ func (a *App) ixRunSafety(ctx context.Context) {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 	for ctx.Err() == nil {
-		telegram.SetPacing(a.ixLoadSettings(ctx).DownloadPacing)
+		ixApplyEngineSettings(a.ixLoadSettings(ctx))
 		now := time.Now().UnixMilli()
 		st := ixClassify(a.ixGoneFilter(ctx, a.ixRecentErrors(ctx, now-6*60*60*1000), now), now)
 		old := a.ixAccount()

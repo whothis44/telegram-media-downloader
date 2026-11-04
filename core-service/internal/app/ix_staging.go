@@ -167,7 +167,7 @@ func ixParseTransferSettings(body map[string]any, s *ixSettings) error {
 	if s.StageCapGB < 1 || s.StageCapGB > 100000 {
 		return errors.New("the staging space must be between 1 and 100000 GB")
 	}
-	return nil
+	return ixParseBigSettings(body, s)
 }
 
 // ixCheckStageDir checks a new staging folder: a full path to a folder that

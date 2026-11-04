@@ -86,7 +86,7 @@ func (a *App) runHistory(ctx context.Context, id string) error {
 		return err
 	}
 	history := objectAt(cfg, "advanced", "history")
-	cap := max(1, min(10000, int(number(history["backpressureCap"], 500))))
+	cap := historyBackpressureCap(cfg)
 	stall := time.Duration(max(1, min(86400000, number(history["backpressureMaxWaitMs"], 15*60*1000)))) * time.Millisecond
 	shortEvery := max(0, int(number(history["shortBreakEveryN"], 100)))
 	longEvery := max(0, int(number(history["longBreakEveryN"], 1000)))
@@ -511,6 +511,12 @@ func (a *App) startHistoryDrain(restart bool) {
 		a.historyDrain = false
 		a.historyMu.Unlock()
 	}
+}
+
+// historyBackpressureCap is how many queued items a backfill that queues
+// files waits below.
+func historyBackpressureCap(cfg map[string]any) int {
+	return max(1, min(10000, int(number(objectAt(cfg, "advanced", "history")["backpressureCap"], 500))))
 }
 
 // historyPageRetries are the waits before asking again for a history page
