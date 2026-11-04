@@ -72,4 +72,28 @@ func TestIxPartlyMatchingBigVideoGoesLast(t *testing.T) {
 	if how, _ := ixTestHow(a, few); how != "" || ixTestPaused(t, a, few) {
 		t.Fatalf("two matching frames moved it: %q", how)
 	}
+	// Copies kept for ever never download; a partly matching video is not a
+	// copy: one held already goes back to the queue, and new ones are not held.
+	st := a.ixLoadSettings(ctx)
+	st.HoldLikely, st.HoldForever = true, true
+	if err := a.ixSaveSettings(ctx, st); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.ixHeldStep(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if ixTestPaused(t, a, half) {
+		t.Fatal("a partly matching video is kept for ever")
+	}
+	half2 := queue(803, "HALF-HALF-HALF-1")
+	if err := a.ixSampleRound(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	_ = a.db.Reader.QueryRow(`SELECT result FROM ix_copy_sample WHERE work_id=?`, half2).Scan(&result)
+	if result != "nomatch" {
+		t.Fatalf("not checked: %q", result)
+	}
+	if ixTestPaused(t, a, half2) {
+		t.Fatal("held while copies are kept for ever")
+	}
 }

@@ -220,7 +220,9 @@ func (a *App) ixHeldStep(ctx context.Context) error {
 		return a.ixReleaseSome(ctx, 25, true)
 	}
 	if s.HoldForever {
-		return nil
+		// Partly matching videos are not copies: never kept for ever. Any
+		// held before the setting was turned on go back to the queue.
+		return a.ixReleasePartial(ctx)
 	}
 	// Held copies go once normal work and the files set aside by the
 	// deadline order are done (ix_order.go). And when downloads have not
@@ -713,6 +715,30 @@ func (a *App) ixReleaseSome(ctx context.Context, n int, confirmed bool) error {
 	}
 	rows, err := a.db.Reader.QueryContext(ctx, `SELECT h.work_id FROM ix_held h LEFT JOIN ix_copy_hold c ON c.work_id=h.work_id
 		WHERE h.released_at=0 AND h.reason<>''`+cond+` ORDER BY COALESCE(c.confirm,'')='confirmed', h.held_at`+limit)
+	if err != nil {
+		return err
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if rows.Scan(&id) == nil {
+			ids = append(ids, id)
+		}
+	}
+	rows.Close()
+	for _, id := range ids {
+		if err := a.ixLetGo(ctx, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ixReleasePartial lets go the big videos held because only part of their
+// footage matched a saved video (ix_copies_sample.go: sampled-partial).
+func (a *App) ixReleasePartial(ctx context.Context) error {
+	rows, err := a.db.Reader.QueryContext(ctx, `SELECT h.work_id FROM ix_held h JOIN ix_copy_hold c ON c.work_id=h.work_id
+		WHERE h.released_at=0 AND h.reason<>'' AND c.how='sampled-partial' LIMIT 100`)
 	if err != nil {
 		return err
 	}

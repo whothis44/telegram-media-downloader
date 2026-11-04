@@ -721,7 +721,9 @@ func (a *App) ixSampleRecord(ctx context.Context, j ixSampleJob, f ixCopyFacts, 
 		}
 		return nil
 	}
-	if res.Result == "nomatch" && res.Best >= ixSamplePartialHit && res.Of != "" {
+	if res.Result == "nomatch" && res.Best >= ixSamplePartialHit && res.Of != "" && !a.ixLoadSettings(ctx).HoldForever {
+		// (Held copies kept for ever never download; a partly matching video
+		// is not a copy, so then it is not held at all.)
 		// Part of it is footage the archive has (another cut, a compilation
 		// with it in): not a copy, so it is still downloaded, but after
 		// everything else, like the probable copies.
