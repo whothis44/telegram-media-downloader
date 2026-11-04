@@ -53,7 +53,7 @@ button.b:disabled{opacity:.5;cursor:default}button.link{border:0;background:none
 .tile img{width:100%;height:100%;object-fit:cover;display:block}
 .tile .lab{position:absolute;left:5px;bottom:5px;font-size:11px;font-weight:600;padding:1px 6px;border-radius:6px;background:rgba(0,0,0,.6);color:#fff}
 .tile .lab.r{left:auto;right:5px}.tile .lab.t{bottom:auto;top:5px}
-.tile .lab.new{background:var(--new)}.tile .lab.held{background:#9a6700}.tile .lab.miss{background:#a4262c}
+.tile .lab.placed{background:#2f6f8f}.tile .lab.new{background:var(--new)}.tile .lab.held{background:#9a6700}.tile .lab.miss{background:#a4262c}
 .tile.held img,.tile.missing img{filter:blur(1.5px) grayscale(.3);opacity:.75}
 .tile .doc{display:flex;align-items:center;justify-content:center;height:100%;padding:8px;text-align:center;font-size:12px;color:var(--muted);word-break:break-all}
 .more{padding:6px 10px;font-size:12.5px;color:var(--muted)}
@@ -256,6 +256,7 @@ function tileHTML(it, i, cardKey) {
   if (it.new) labs.push(`<span class="lab t new" title="Brought by a later post">new</span>`);
   if (it.status === 'held') labs.push(`<span class="lab t held">waiting · likely copy</span>`);
   if (it.status === 'missing') labs.push(`<span class="lab t miss">not downloaded</span>`);
+  if (it.inferred) labs.push(`<span class="lab t placed" title="Its message was not saved, but it sits inside this album">probably in this album</span>`);
   if (it.sim && S.showSim) labs.push(`<span class="lab sim" title="Likeness (image recognition)">${Math.round(it.sim * 100)}%</span>`);
   const inner = (it.type === 'photo' || it.type === 'video' || it.status !== 'ok')
     ? `<img loading="lazy" alt="" src="${esc(it.thumb)}" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'doc',textContent:${esc(JSON.stringify(String(it.name || it.type)))}}))">`
@@ -446,6 +447,7 @@ async function openItem(items, i) {
     ${x.key ? `<dt>File</dt><dd class="muted">${esc(x.key.startsWith('h:') ? 'SHA-256 ' + x.key.slice(2, 18) + '…' : x.key)}</dd>` : ''}</dl>
     <button class="link" data-open-chat="${esc(d.post.group)}:${d.post.msg}">Open in its chat</button>`;
   if (d.generic) h += `<p class="muted">This file appears in many unrelated posts (a logo or sticker), so it does not link posts together.</p>`;
+  h += placedNoteHTML(x);
   if (d.copies.length > 1) {
     h += `<b>${d.copies.length} copies in the archive</b>`;
     for (const c of d.copies) h += `<div class="copy"><img src="${esc(c.thumb)}" alt=""><div><b>${esc(c.groupName)}</b> · ${fmtDay(c.date)}${c.canon ? ' · <span class="ok">shown</span>' : ''}<br><span class="muted">${c.w ? c.w + '×' + c.h + ' · ' : ''}${fmtSize(c.size)} · ${esc(roleText[c.role] || c.role)}</span>
@@ -776,6 +778,22 @@ async function openEntity(kind, value) {
   showDialog(value, `<p class="muted">${esc(kindName[kind] || kind)} · in ${e.count} message(s) across ${e.chats} chat(s)${e.count > r.data.hits.length ? ' · the first ' + r.data.hits.length + ' are listed' : ''}</p>` +
     r.data.hits.map((h) => `<div class="appear"><div><span class="muted">${fmtDate(h.date)}</span></div><div><b>${esc(h.groupName)}</b> · <button class="link" data-open-chat="${esc(h.group)}:${h.msg}">open in chat</button><div style="white-space:pre-wrap;word-break:break-word">${mark(h.text)}</div></div></div>`).join(''));
 }
+
+// ---------- albums: lone files, same albums, chat overlap ----------
+// A lone file shown in the album beside it can be taken out (and put back).
+function placedNoteHTML(x) {
+  if (!x.inferred) return '';
+  return `<p class="muted">This file's message was not saved, but it sits between messages of this album, so it is shown as probably part of it. <button class="link" data-placed="${esc(x.group)}:${x.msg}" data-placed-do="out">Not part of this album</button></p>`;
+}
+document.addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-placed]'); if (!b) return;
+  const [g, m] = b.dataset.placed.split(/:(?=[^:]*$)/);
+  const out = b.dataset.placedDo === 'out';
+  const r = await api('POST', '/api/ix/browse/orphan', { group: g, msg: Number(m), decision: out ? 'out' : 'auto' });
+  if (!r.ok) { toast(errText(r)); return; }
+  toast(out ? 'Noted: it stands alone. The browser updates in a moment.' : 'Back to automatic.');
+  b.dataset.placedDo = out ? 'auto' : 'out'; b.textContent = out ? 'Undo' : 'Not part of this album';
+});
 
 loadInfo().then(resetFeed);
 </script>

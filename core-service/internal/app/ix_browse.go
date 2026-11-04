@@ -52,6 +52,7 @@ type ixMItem struct {
 	Thumb   bool   // the picture index made a grid thumbnail
 	Ident   string // not downloaded: Telegram's file identity (kind:id:size)
 	Post    int32
+	Placed  bool // a lone file placed in the album beside it (ix_orphans.go)
 }
 
 type ixMPost struct {
@@ -418,7 +419,16 @@ func (a *App) ixBuildModel(ctx context.Context) (*ixModel, error) {
 		}
 		return orphan[i].item.Msg < orphan[j].item.Msg
 	})
+	// Unless it sits inside an album of its chat (ix_orphans.go).
+	placer := newIxOrphanPlacer(m, a.ixOrphanNear(ctx), a.ixOrphansOut(ctx))
 	for _, f := range orphan {
+		if pi := placer.place(f.item.Group, f.item.Msg, f.created); pi >= 0 {
+			f.item.Placed = true
+			addItem(&m.Posts[pi], f.item)
+			ixPlaceInAlbum(m, pi, f.item.Msg)
+			m.ByMsg[f.item.Group+":"+strconv.Itoa(f.item.Msg)] = pi
+			continue
+		}
 		pi := int32(len(m.Posts))
 		m.Posts = append(m.Posts, ixMPost{Idx: pi, Group: f.item.Group, Msg: f.item.Msg, Msgs: []int{f.item.Msg}, Date: f.created, Origin: f.created, Family: -1, Orphan: true})
 		m.ByMsg[f.item.Group+":"+strconv.Itoa(f.item.Msg)] = pi

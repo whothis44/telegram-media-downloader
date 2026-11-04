@@ -70,6 +70,7 @@ type ixSetFixes struct {
 	alone map[string]bool              // post ref -> taken out of any set
 	ties  [][2]string                  // post refs tied together
 	item  map[string]map[string]string // set anchor -> file key -> in/out
+	apart [][2]string                  // post refs whose albums a person said differ: look-alikes never link them
 }
 
 func (a *App) ixLoadSetFixes(ctx context.Context) ixSetFixes {
@@ -102,6 +103,7 @@ func (a *App) ixLoadSetFixes(ctx context.Context) ixSetFixes {
 		}
 		rows.Close()
 	}
+	a.ixLoadAlbumFixes(ctx, &f)
 	return f
 }
 

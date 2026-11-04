@@ -44,6 +44,7 @@ func registerIxBrowseRoutes(mux *http.ServeMux, a *App) {
 	mux.Handle("POST /api/ix/freeze/check", h(a.handleIxFreezeCheck))
 	mux.Handle("GET /api/ix/diagnostics", h(a.handleIxDiagnostics))
 	registerIxSetRoutes(mux, a)
+	registerIxAlbumRoutes(mux, a)
 	mux.Handle("GET /api/ix/browse/people", h(a.handleIxPeople))
 	mux.Handle("GET /api/ix/browse/person", h(a.handleIxPerson))
 	mux.Handle("POST /api/ix/browse/person/{id}", h(a.handleIxPersonChange))
@@ -83,6 +84,7 @@ type ixJItem struct {
 	Sim      float32  `json:"sim,omitempty"`      // likeness (image recognition), 0 when not compared
 	Fixed    bool     `json:"fixed,omitempty"`    // a person placed it
 	OtherSet int32    `json:"otherSet,omitempty"` // elsewhere: that set's ID + 1
+	Inferred bool     `json:"inferred,omitempty"` // a lone file placed in the album beside it
 }
 
 type ixJPost struct {
@@ -132,7 +134,7 @@ func ixPathURL(rel string) string {
 
 func (m *ixModel) jitem(ii int32) ixJItem {
 	it := &m.Items[ii]
-	j := ixJItem{ID: it.ID, Key: it.Key, Type: it.Type, W: it.W, H: it.H, Dur: it.Dur, Size: it.Size, Status: it.Status, Group: it.Group, Msg: it.Msg, Name: it.Name}
+	j := ixJItem{ID: it.ID, Key: it.Key, Type: it.Type, W: it.W, H: it.H, Dur: it.Dur, Size: it.Size, Status: it.Status, Group: it.Group, Msg: it.Msg, Name: it.Name, Inferred: it.Placed}
 	switch {
 	case it.Thumb && it.Key != "":
 		j.Thumb = "/api/ix/thumb?key=" + url.QueryEscape(it.Key)
