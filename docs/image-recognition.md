@@ -8,7 +8,12 @@ The archive browser can use image recognition to:
   scene or subject, not just copies.
 - **Sort out sets.** A file that appears in only one post of a set is compared with the files the posts share.
   Files unlike all of them are set apart as **Probably not part of it**. Without image recognition they are listed
-  as belonging, because nothing else can tell them apart.
+  as belonging, because nothing else can tell them apart. How alike counts as "unlike" is measured on your own
+  sets, so it suits whichever model you use.
+- **Find the album of a lone file.** A file posted on its own that looks very like the files of one album (and
+  much less like any other) is offered in **Review → Lone files**: "Does this file belong with this album?"
+- **Spot the same album in two chats.** Albums whose files look the same (re-encoded, cropped or watermarked) are
+  offered in **Review → Same albums**; one answer settles every matching pair.
 
 It is the machine-learning service of [Immich](https://immich.app), a self-hosted photo library, used on its own.
 It runs in Docker on your PC and uses the graphics card. **No picture leaves your computer:**
