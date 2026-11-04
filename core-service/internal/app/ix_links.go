@@ -44,8 +44,6 @@ CREATE TABLE IF NOT EXISTS ix_msg_link ( -- messages sharing a saved file (ix_li
 	PRIMARY KEY (group_id, message_id)
 );
 CREATE INDEX IF NOT EXISTS ix_msg_link_tg ON ix_msg_link(tg_file);
--- ix.10.2 test builds wrote the identity with NUL separators.
-UPDATE ix_msg_link SET tg_file=replace(tg_file, char(0), ':') WHERE instr(tg_file, char(0))>0;
 `
 
 // ixLinkedKeptPaths are the files linked messages share (by path, or by

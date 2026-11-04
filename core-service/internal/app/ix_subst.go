@@ -305,7 +305,9 @@ func (a *App) ixSubstitute(ctx context.Context, item download.Item, client downl
 		return r.path, r.how, r.ok
 	}
 	path, how, same, checked := a.ixSubstCheck(ctx, item, remote, plan)
-	if checked {
+	// Only a "same" is kept: a copy may finish downloading in between (the
+	// library's same-size wait), and the next look must see it.
+	if checked && same {
 		a.ixSubstMemo().put(memoKey, ixSubstAnswer{path: path, how: how, ok: same})
 	}
 	return path, how, same
