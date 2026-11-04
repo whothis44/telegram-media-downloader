@@ -340,13 +340,18 @@ func (l *Library) followStaged(ctx context.Context, item Item) (Record, bool, er
 	if !l.stage.known.Load() {
 		return Record{}, false, nil
 	}
-	var path, sum string
-	err := l.reader.QueryRowContext(ctx, `SELECT path, sha256 FROM tgdl_stage_moves WHERE identity=? AND size=? AND state='waiting' ORDER BY created_at LIMIT 1`, item.Identity.Key(), item.Identity.Size).Scan(&path, &sum)
+	var path, sum, dir string
+	err := l.reader.QueryRowContext(ctx, `SELECT path, sha256, stage_dir FROM tgdl_stage_moves WHERE identity=? AND size=? AND state='waiting' ORDER BY created_at LIMIT 1`, item.Identity.Key(), item.Identity.Size).Scan(&path, &sum, &dir)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Record{}, false, nil
 	}
 	if err != nil {
 		return Record{}, false, err
+	}
+	// A staged file found missing is being queued again (stagedLost): this
+	// message is downloaded on its own instead of waiting for it.
+	if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(path))); errors.Is(err, fs.ErrNotExist) {
+		return Record{}, false, nil
 	}
 	payload, err := json.Marshal(item)
 	if err != nil {
@@ -896,17 +901,26 @@ func (l *Library) stagedLost(ctx context.Context, mv stagedMove, items []Item, f
 		return stageDoubt{"the staged copy is missing from the staging folder"}
 	}
 	for i, it := range items {
-		if fates[i] != stageCurrent && fates[i] != stageAdopt {
-			continue
-		}
-		if len(it.Requeue) == 0 {
+		if (fates[i] == stageCurrent || fates[i] == stageAdopt) && len(it.Requeue) == 0 {
 			return stageDoubt{"the staged copy is missing from the staging folder, and its message cannot be queued again on its own: download it again"}
 		}
-		if err := l.StageLost(ctx, it); err != nil {
-			return fmt.Errorf("the staged copy is missing from the staging folder; queueing its message again failed: %w", err)
+	}
+	// The other messages first, each forgotten once it is queued again, the
+	// first message last: when one fails, the retry queues none twice.
+	bg := context.WithoutCancel(ctx)
+	for i := len(items) - 1; i >= 0; i-- {
+		it := items[i]
+		if fates[i] == stageCurrent || fates[i] == stageAdopt {
+			if err := l.StageLost(ctx, it); err != nil {
+				return fmt.Errorf("the staged copy is missing from the staging folder; queueing its message again failed: %w", err)
+			}
+		}
+		if i > 0 {
+			if _, err := l.writer.ExecContext(bg, `DELETE FROM tgdl_stage_followers WHERE path=? AND group_id=? AND message_id=?`, mv.path, it.GroupID, it.MessageID); err != nil {
+				return err
+			}
 		}
 	}
-	bg := context.WithoutCancel(ctx)
 	_, _ = l.writer.ExecContext(bg, `DELETE FROM tgdl_stage_followers WHERE path=?`, mv.path)
 	_, _ = l.writer.ExecContext(bg, `DELETE FROM tgdl_stage_moves WHERE path=?`, mv.path)
 	l.stageSignal()

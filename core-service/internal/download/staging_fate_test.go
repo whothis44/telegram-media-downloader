@@ -258,7 +258,7 @@ func TestLostStagedFileQueuesItsMessagesAgain(t *testing.T) {
 					t.Fatalf("a failed requeue is retried: %+v", st)
 				}
 			case tc.requeue:
-				if len(lost) != 2 || string(lost[0].Requeue) != "queue item 1" || string(lost[1].Requeue) != "queue item 2" {
+				if len(lost) != 2 || string(lost[0].Requeue) != "queue item 2" || string(lost[1].Requeue) != "queue item 1" {
 					t.Fatalf("requeued %+v", lost)
 				}
 				if stageRows(t, db) != 0 || st.Stuck != 0 {
@@ -344,4 +344,61 @@ func TestStuckStagedFilesDoNotStopDownloads(t *testing.T) {
 		t.Fatal("went on with little free space")
 	}
 	_ = db
+}
+
+// Queueing a lost file's messages again fails part way (the first message):
+// the retry queues only what is left, never a message twice; meanwhile a
+// new download of the same file does not wait for the missing one.
+func TestPartlyFailedLostRequeueDoesNotRepeat(t *testing.T) {
+	ctx := context.Background()
+	dir, stage := t.TempDir(), t.TempDir()
+	l, db, _ := stagedLibrary(t, dir, stage)
+	queued := map[int64]int{}
+	failFirst := true
+	l.StageLost = func(_ context.Context, it Item) error {
+		if it.MessageID == 1 && failFirst {
+			failFirst = false
+			return errors.New("database is locked")
+		}
+		queued[it.MessageID]++
+		return nil
+	}
+	content := []byte("lost, queued again once")
+	var calls atomic.Int64
+	items := []Item{stagedItem(1, "q", len(content)), stagedItem(2, "q", len(content)), stagedItem(3, "q", len(content))}
+	var rec Record
+	for i := range items {
+		items[i].Requeue = []byte("queue item")
+		r, err := l.Ingest(ctx, items[i], bytesClient(&calls, content))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			rec = r
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("downloads: %d", calls.Load())
+	}
+	if err := os.Remove(filepath.Join(stage, StageFolder, filepath.FromSlash(rec.Path))); err != nil {
+		t.Fatal(err)
+	}
+	l.MoveStaged(ctx)
+	if queued[1] != 0 || queued[2] != 1 || queued[3] != 1 || stageRows(t, db) != 1 {
+		t.Fatalf("after the failure: %v, rows %d", queued, stageRows(t, db))
+	}
+	// A message with the same file downloads on its own: it does not follow
+	// the missing staged file.
+	other := stagedItem(4, "q", len(content))
+	if r, err := l.Ingest(ctx, other, bytesClient(&calls, content)); err != nil || r.Reused || calls.Load() != 2 {
+		t.Fatalf("followed a missing file: %+v %v, downloads %d", r, err, calls.Load())
+	}
+	moveDueNow(t, db)
+	l.MoveStaged(ctx)
+	if queued[1] != 1 || queued[2] != 1 || queued[3] != 1 || queued[4] != 0 {
+		t.Fatalf("after the retry: %v", queued)
+	}
+	if n := countRows(t, db, `SELECT COUNT(*) FROM tgdl_stage_moves WHERE path=?`, rec.Path); n != 0 {
+		t.Fatalf("lost entry left: %d", n)
+	}
 }
