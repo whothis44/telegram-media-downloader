@@ -29,8 +29,9 @@ import (
 //     lesser copies of a group of such videos waiting in the queue together;
 //   - copies found by image recognition on Telegram's 320 px preview of a
 //     queued video or large picture (ix_copies_ml.go);
-//   - "confirmed" copies: the first part of a big held video was fetched
-//     and its first frames match the saved video's (ix_copies_head.go).
+//   - "confirmed" copies: frames sampled across a big queued video (only
+//     the parts around them read from Telegram) match a saved video's
+//     fingerprint at one time offset (ix_copies_sample.go).
 //
 // Nothing is ever skipped for good: held files only wait, and every
 // message is archived in full either way.
@@ -61,6 +62,19 @@ CREATE TABLE IF NOT EXISTS ix_copy_thumb ( -- Telegram's small previews of queue
 	at         INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS ix_copy_thumb_msg ON ix_copy_thumb(group_id, message_id);
+CREATE TABLE IF NOT EXISTS ix_copy_sample ( -- big queued videos checked by frames sampled across the file
+	work_id    INTEGER PRIMARY KEY,
+	ident      TEXT    NOT NULL DEFAULT '',
+	size       INTEGER NOT NULL DEFAULT 0,  -- the file's size
+	result     TEXT    NOT NULL DEFAULT '', -- confirmed, nomatch, failed
+	note       TEXT    NOT NULL DEFAULT '',
+	of_key     TEXT    NOT NULL DEFAULT '', -- confirmed: the saved file
+	offset_s   REAL    NOT NULL DEFAULT 0,
+	parts      INTEGER NOT NULL DEFAULT 0,  -- 1 MiB parts read from Telegram, all tries
+	samples    INTEGER NOT NULL DEFAULT 0,
+	tries      INTEGER NOT NULL DEFAULT 0,
+	at         INTEGER NOT NULL DEFAULT 0
+);
 `
 
 func ixEnsureCopiesSchema(ctx context.Context, db *sql.DB) error {
@@ -258,6 +272,7 @@ type ixCopiesInfo struct {
 	Previews  int64         `json:"previews"`  // Telegram previews kept for files not downloaded
 	Threshold float64       `json:"threshold"` // likeness of previews that makes a probable copy
 	Calib     *ixCopyCalib  `json:"calibration,omitempty"`
+	Sampled   ixSampleTotals `json:"sampled"` // big videos checked by sampling (ix_copies_sample.go)
 	At        int64         `json:"at,omitempty"`
 }
 
@@ -289,6 +304,7 @@ func (a *App) ixCopiesMeasure(ctx context.Context) ixCopiesInfo {
 	info := ixCopiesInfo{Threshold: a.ixCopyThreshold(ctx), Calib: a.ixCopyCalibLast(ctx), At: time.Now().UnixMilli()}
 	info.Queue = a.ixCopiesQueueNow(ctx)
 	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM ix_copy_thumb WHERE path<>''`).Scan(&info.Previews)
+	info.Sampled = a.ixSampleTotalsNow(ctx)
 	box := a.ixCopies()
 	box.mu.Lock()
 	info.Known = box.known
@@ -495,7 +511,7 @@ func ixSavedCopyOf(saved []ixSavedVideo, f ixCopyFacts) int {
 // ---------- background ----------
 
 // ixRunCopies keeps the measurement current and runs the wider checks:
-// previews compared by recognition, and the first part of big held videos.
+// previews compared by recognition, and frames sampled across big videos.
 func (a *App) ixRunCopies(ctx context.Context) {
 	a.ixLoadPreviewIdents(ctx)
 	wait := 90 * time.Second
@@ -562,5 +578,8 @@ func (a *App) ixCopiesDiag(ctx context.Context) []string {
 	} else {
 		out = append(out, "  seen in messages, not downloaded: not measured yet")
 	}
+	s := c.Sampled
+	out = append(out, fmt.Sprintf("  big videos sampled: checked %d big videos using %d MB instead of %.1f GB; %d confirmed copies; %d could not be checked · previews kept %d · likeness threshold %.3f",
+		s.Checked, s.PartsMB, float64(s.SizeBytes)/(1<<30), s.Confirmed, s.Failed, c.Previews, c.Threshold))
 	return out
 }

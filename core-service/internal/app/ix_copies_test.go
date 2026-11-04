@@ -174,7 +174,7 @@ func TestIxCopiesAreMeasured(t *testing.T) {
 		t.Fatalf("kept: %+v", got.Known)
 	}
 	lines := a.ixCopiesDiag(ctx)
-	if len(lines) != 2 || !bytes.Contains([]byte(lines[1]), []byte("probable copies by the video checks 2 / 78 MB")) {
+	if len(lines) != 3 || !bytes.Contains([]byte(lines[1]), []byte("probable copies by the video checks 2 / 78 MB")) {
 		t.Fatalf("diagnostics: %q", lines)
 	}
 }

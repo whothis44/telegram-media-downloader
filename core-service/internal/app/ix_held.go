@@ -46,8 +46,8 @@ import (
 //     others wait for it (ix_copy_hold.of_work). Once it is saved they are
 //     checked against the saved file, as in 2; if it fails for good, the
 //     best of them goes instead. With image recognition, previews alike
-//     count too (ix_copies_ml.go), and the first part of a big held video
-//     can confirm the copy (ix_copies_head.go): confirmed copies wait
+//     count too (ix_copies_ml.go), and frames sampled across a big video
+//     can confirm the copy (ix_copies_sample.go): confirmed copies wait
 //     until everything else is done unless the setting says otherwise.
 //
 // Held copies do not count towards a backfill's queue limit (ixHeldWaiting):
@@ -387,8 +387,14 @@ func (a *App) ixHeldStep(ctx context.Context) error {
 	if !release {
 		return nil
 	}
+	// Just before they would go, big held videos not checked yet are
+	// checked by sampling (ix_copies_sample.go): a confirmed copy stays.
+	ixBeforeReleaseHook(a, ctx)
 	return a.ixReleaseSome(ctx, 25, s.ConfirmedGoEarly || a.ixOnlyConfirmedLeft(ctx))
 }
+
+// ixBeforeReleaseHook runs before held copies are let go.
+var ixBeforeReleaseHook = func(a *App, ctx context.Context) {}
 
 // ixQueuedVideo is a video in the download queue, as the checks see it.
 type ixQueuedVideo struct {

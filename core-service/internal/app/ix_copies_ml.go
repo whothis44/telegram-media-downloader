@@ -342,6 +342,14 @@ func init() {
 		if err := a.ixPreviewRound(ctx); err != nil && ctx.Err() == nil {
 			a.ixLog("copy previews: %v", err)
 		}
+		if err := a.ixSampleRound(ctx, false); err != nil && ctx.Err() == nil {
+			a.ixLog("checking big videos: %v", err)
+		}
+	}
+	ixBeforeReleaseHook = func(a *App, ctx context.Context) {
+		if err := a.ixSampleRound(ctx, true); err != nil && ctx.Err() == nil {
+			a.ixLog("checking big held videos: %v", err)
+		}
 	}
 }
 
