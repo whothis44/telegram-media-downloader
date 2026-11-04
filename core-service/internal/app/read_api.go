@@ -103,6 +103,7 @@ func (a *App) monitorStatusPayload(ctx context.Context) (map[string]any, error) 
 	if status["accounts"] == 0 {
 		status["accounts"] = accounts
 	}
+	status["throughput"] = a.throughputPayload(ctx) // throughput.go
 	return status, nil
 }
 

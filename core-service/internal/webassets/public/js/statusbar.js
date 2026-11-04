@@ -34,9 +34,69 @@ function applyState(state) {
     }
 }
 
+// Status-bar sizes: one decimal below 100 of a unit, none above, so the
+// chips keep a steady width ("2.4 MB/s", "512 KB/s", "18 GB").
+function compactBytes(n) {
+    const v = Number(n);
+    if (!Number.isFinite(v) || v <= 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.min(units.length - 1, Math.floor(Math.log(v) / Math.log(1024)));
+    const x = v / Math.pow(1024, i);
+    return `${i === 0 || x >= 100 ? Math.round(x) : parseFloat(x.toFixed(1))} ${units[i]}`;
+}
+
+function applyRecent(chipId, prefix, totals, titleKey, titleFallback) {
+    const chip = $(chipId);
+    if (!chip) return;
+    // null until the server has counted once: hide rather than show zeros.
+    if (!totals || totals.files == null) {
+        chip.classList.add('hidden');
+        return;
+    }
+    const files = Number(totals.files) || 0;
+    const size = compactBytes(totals.bytes);
+    const f = $(`${prefix}-files`);
+    if (f) f.textContent = files.toLocaleString();
+    const b = $(`${prefix}-bytes`);
+    if (b) b.textContent = `· ${size}`;
+    chip.title = i18nTf(titleKey, { files: files.toLocaleString(), size }, titleFallback);
+    chip.classList.remove('hidden');
+}
+
+// `throughput` rides the monitor status (internal/app/throughput.go):
+// speed while an engine run is in progress, and files + bytes completed
+// in the last hour / 24 h.
+function applyThroughput(tp) {
+    const speedChip = $('status-speed-chip');
+    if (speedChip) {
+        if (tp && tp.running) {
+            const s = $('status-speed');
+            if (s) s.textContent = tp.speed == null ? '—' : `${compactBytes(tp.speed)}/s`;
+            speedChip.classList.remove('hidden');
+        } else {
+            speedChip.classList.add('hidden');
+        }
+    }
+    applyRecent(
+        'status-hour-chip',
+        'status-hour',
+        tp?.lastHour,
+        'status.last_hour_title',
+        '{files} files ({size}) downloaded in the last hour',
+    );
+    applyRecent(
+        'status-day-chip',
+        'status-day',
+        tp?.last24h,
+        'status.last_24h_title',
+        '{files} files ({size}) downloaded in the last 24 hours',
+    );
+}
+
 function applyMonitor(mon) {
     if (!mon) return;
     applyState(mon.state);
+    applyThroughput(mon.throughput);
     const q = $('status-queue');
     if (q) q.textContent = mon.queue ?? 0;
     const a = $('status-active');
