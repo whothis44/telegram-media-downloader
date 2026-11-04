@@ -630,6 +630,17 @@ func (a *App) ixGroupFaceLocked(ctx context.Context, id int64, v []int8, unit fu
 	if len(units) < ixFaceMinFaces || len(good) < ixFaceMinGood {
 		return nil, nil
 	}
+	// A look-alike that would join a person already made goes there first,
+	// and this face is looked at again: files grouped several at a time
+	// must not start a second person out of faces that belong to the first
+	// (one face's turn may come before its look-alike's).
+	if joined, err := a.ixFaceJoinFirstLocked(ctx, take[1:], unit); err != nil || len(joined) > 0 {
+		if err != nil {
+			return nil, err
+		}
+		got, err := a.ixGroupFaceLocked(ctx, id, v, unit, reuse)
+		return append(joined, got...), err
+	}
 	var person int64
 	if reuse != nil {
 		person, take = reuse(take)
@@ -643,6 +654,46 @@ func (a *App) ixGroupFaceLocked(ctx context.Context, id int64, v []int8, unit fu
 		person, _ = res.LastInsertId()
 	}
 	return take, a.ixSetFacePerson(ctx, take, person)
+}
+
+// ixFaceJoinFirstLocked puts each of the loose faces that has a grouped
+// look-alike (at the likeness the pair needs, not a person it was taken out
+// of, not a second face in one picture) with that person, by the usual
+// rules. It says which were put. With the grouping lock held.
+func (a *App) ixFaceJoinFirstLocked(ctx context.Context, ids []int64, unit func(string) string) ([]int64, error) {
+	s := &a.ixMLBox().faces
+	type face struct {
+		id int64
+		v  []int8
+	}
+	var join []face
+	s.mu.RLock()
+	for _, id := range ids {
+		i, ok := s.index[id]
+		if !ok || s.person[i] != 0 || s.tier[i] == ixFaceJunk {
+			continue
+		}
+		d, tier := s.dim, s.tier[i]
+		v := s.vecs[int(i)*d : int(i+1)*d]
+		for _, n := range s.nearLocked(v, ixFaceSameSim, id) {
+			if n.person > 0 && n.sim >= ixFacePairSim(tier, s.tier[n.idx]) {
+				join = append(join, face{id, append([]int8(nil), v...)})
+				break
+			}
+		}
+	}
+	s.mu.RUnlock()
+	var placed []int64
+	for _, f := range join {
+		// ixGroupFaceLocked joins when it can; with no grouped look-alike it
+		// may start a person, but each of these has one.
+		got, err := a.ixGroupFaceLocked(ctx, f.id, f.v, unit, nil)
+		if err != nil {
+			return placed, err
+		}
+		placed = append(placed, got...)
+	}
+	return placed, nil
 }
 
 // ixRegroupFaces gives ungrouped faces another chance: a person may have
