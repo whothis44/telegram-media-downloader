@@ -218,6 +218,11 @@ func (a *App) ixMLStartSequence(ctx context.Context, s ixSettings) ([]ixMLStartR
 	for _, w := range wanted {
 		out = append(out, ixDockerStartContainer(ctx, d, bin, w))
 	}
+	// Shown while the services are given time to answer.
+	box := a.ixMLStartBox()
+	box.mu.Lock()
+	box.st.Containers = append([]ixMLStartResult{}, out...)
+	box.mu.Unlock()
 	a.ixMLStartWaitReady(ctx, s, out)
 	return out, nil
 }
