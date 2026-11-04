@@ -39,7 +39,8 @@ import (
 // The biggest files go first (a preview costs one request; the file may
 // cost thousands), then private chats. The previews are kept in the data
 // folder (ixpreviews): they show in the browser for files that may never
-// be downloaded.
+// be downloaded. A preview the pass for everything not downloaded kept
+// already (ix_previews_all.go) is looked at without asking Telegram again.
 
 const (
 	ixPreviewMinPicture = 2 << 20
