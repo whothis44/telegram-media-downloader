@@ -30,7 +30,7 @@ var (
 	// A Windows path (drive letter or \\server\share, either slash) runs to
 	// ": " (how Windows errors go on), a quote, or the end: folder names
 	// may hold spaces.
-	ixReWinPath = regexp.MustCompile(`(?i)(?:\b[A-Z]:[\\/]|\\\\)[^"'<>|\r\n]*?(?:: |["'<>|]|$)`)
+	ixReWinPath = regexp.MustCompile(`(?i)(?:\b[A-Z]:[\\/]|\\\\)[^"'<>|\r\n]*?(?:: |["'<>|\r\n]|$)`)
 	ixReUnix    = regexp.MustCompile(`(?:^|[\s"'(=])((?:[\w.\-()\[\] ]+/)+[\w.\-()\[\] ]*\.[A-Za-z0-9]{1,5})`)
 	ixReFile    = regexp.MustCompile(`[\w\-() ]+\.(?i:jpe?g|png|gif|webp|mp4|mkv|mov|avi|webm|mp3|ogg|oga|m4a|pdf|zip|rar|7z|docx?|xlsx?|txt|apk|exe|heic|tgs)\b`)
 	ixReAt      = regexp.MustCompile(`@[A-Za-z][A-Za-z0-9_]{3,}`)
@@ -62,7 +62,7 @@ func (r *ixRedactor) clean(s string) string {
 		switch {
 		case strings.HasSuffix(m, ": "):
 			end = ": "
-		case len(m) > 0 && strings.ContainsRune(`"'<>|`, rune(m[len(m)-1])):
+		case len(m) > 0 && strings.ContainsRune("\"'<>|\r\n", rune(m[len(m)-1])):
 			end = m[len(m)-1:]
 		}
 		return "<path>" + end

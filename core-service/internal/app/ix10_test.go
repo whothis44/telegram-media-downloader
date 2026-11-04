@@ -87,9 +87,10 @@ func TestIxReportHidesWindowsPathsWithSpaces(t *testing.T) {
 		`write \\NAS\Media\Telegram Archive\Family Group Chat\videos\.tgdl-clip.part: An unexpected network error occurred.`,
 		`open Z:\Telegram Archive\Ahmed and Sara\videos\x.mp4: The system cannot find the file specified.`,
 		`backup to Z:/Telegram index backups/2026-11-03 final failed`,
+		"Error opening input file D:\\Media\\Secret Group\\clip.mp4.\nError opening input files: Invalid data",
 	} {
 		out := r.clean(in)
-		for _, leak := range []string{"Archive", "Family", "Ahmed", "Sara", "videos", "backups", "Media"} {
+		for _, leak := range []string{"Archive", "Family", "Ahmed", "Sara", "videos", "backups", "Media", "Secret"} {
 			if strings.Contains(out, leak) {
 				t.Fatalf("%q leaks %q: %s", in, leak, out)
 			}
