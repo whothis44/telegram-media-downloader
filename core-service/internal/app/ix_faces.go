@@ -42,6 +42,7 @@ const (
 
 type ixFaceFound struct {
 	X1, Y1, X2, Y2 float64 // share of the picture's width and height
+	Px             float64 // short side of the box, in pixels of the picture
 	Score          float64
 	Vec            []float32
 }
@@ -82,7 +83,8 @@ func ixParseFaces(raw []byte) ([]ixFaceFound, error) {
 			return nil, fmt.Errorf("faces: %v", err)
 		}
 		clamp := func(x float64) float64 { return math.Max(0, math.Min(1, x)) }
-		out = append(out, ixFaceFound{X1: clamp(f.Box.X1 / resp.W), Y1: clamp(f.Box.Y1 / resp.H), X2: clamp(f.Box.X2 / resp.W), Y2: clamp(f.Box.Y2 / resp.H), Score: f.Score, Vec: v})
+		px := math.Max(0, math.Min(math.Min(f.Box.X2, resp.W)-math.Max(f.Box.X1, 0), math.Min(f.Box.Y2, resp.H)-math.Max(f.Box.Y1, 0)))
+		out = append(out, ixFaceFound{X1: clamp(f.Box.X1 / resp.W), Y1: clamp(f.Box.Y1 / resp.H), X2: clamp(f.Box.X2 / resp.W), Y2: clamp(f.Box.Y2 / resp.H), Px: px, Score: f.Score, Vec: v})
 	}
 	return out, nil
 }
@@ -99,7 +101,21 @@ type ixFaceStore struct {
 	vecs   []int8
 	norms  []float32
 	person []int64
+	key    []int32   // the face's file, an index into keys
+	frame  []int16   // the video frame it is in (0 for a picture)
+	tier   []int8    // good, weak or unusable (ixFaceTierOf)
+	qual   []float32 // for the cover picture (ixFaceQuality)
+	keys   []string
+	keyIdx map[string]int32
+	shots  map[int64][]int32 // one picture or video frame -> its faces
 	loaded bool
+}
+
+// ixFaceInfo is what is known of a face besides its embedding.
+type ixFaceInfo struct {
+	key             string
+	frame           int
+	score, px, blur float64
 }
 
 func (s *ixFaceStore) load(ctx context.Context, db *sql.DB, model string) error {
@@ -109,8 +125,9 @@ func (s *ixFaceStore) load(ctx context.Context, db *sql.DB, model string) error 
 		return nil
 	}
 	s.model, s.dim, s.ids, s.vecs, s.norms, s.person = model, 0, nil, nil, nil, nil
-	s.index = map[int64]int32{}
-	rows, err := db.QueryContext(ctx, `SELECT id, vec, person FROM ix_faces WHERE model=? ORDER BY id`, model)
+	s.key, s.frame, s.tier, s.qual, s.keys = nil, nil, nil, nil, nil
+	s.index, s.keyIdx, s.shots = map[int64]int32{}, map[string]int32{}, map[int64][]int32{}
+	rows, err := db.QueryContext(ctx, `SELECT id, vec, person, key, frame, score, px, blur FROM ix_faces WHERE model=? ORDER BY id`, model)
 	if err != nil {
 		return err
 	}
@@ -118,10 +135,11 @@ func (s *ixFaceStore) load(ctx context.Context, db *sql.DB, model string) error 
 	for rows.Next() {
 		var id, person int64
 		var blob []byte
-		if rows.Scan(&id, &blob, &person) != nil {
+		var fi ixFaceInfo
+		if rows.Scan(&id, &blob, &person, &fi.key, &fi.frame, &fi.score, &fi.px, &fi.blur) != nil {
 			continue
 		}
-		s.addLocked(id, ixBytesToInt8(blob), person)
+		s.addLocked(id, ixBytesToInt8(blob), person, fi)
 	}
 	s.loaded = true
 	return rows.Err()
@@ -135,28 +153,64 @@ func ixBytesToInt8(b []byte) []int8 {
 	return v
 }
 
-func (s *ixFaceStore) addLocked(id int64, v []int8, person int64) {
+func (s *ixFaceStore) addLocked(id int64, v []int8, person int64, fi ixFaceInfo) {
 	if s.dim == 0 {
 		s.dim = len(v)
 	}
 	if len(v) != s.dim {
 		return
 	}
+	if s.index == nil {
+		s.index, s.keyIdx, s.shots = map[int64]int32{}, map[string]int32{}, map[int64][]int32{}
+	}
 	var n float64
 	for _, x := range v {
 		n += float64(x) * float64(x)
 	}
-	s.index[id] = int32(len(s.ids))
+	k, ok := s.keyIdx[fi.key]
+	if !ok {
+		k = int32(len(s.keys))
+		s.keys = append(s.keys, fi.key)
+		s.keyIdx[fi.key] = k
+	}
+	i := int32(len(s.ids))
+	s.index[id] = i
 	s.ids = append(s.ids, id)
 	s.vecs = append(s.vecs, v...)
 	s.norms = append(s.norms, float32(math.Sqrt(n)))
 	s.person = append(s.person, person)
+	s.key = append(s.key, k)
+	s.frame = append(s.frame, int16(fi.frame))
+	s.tier = append(s.tier, ixFaceTierOf(fi.score, fi.px, fi.blur))
+	s.qual = append(s.qual, ixFaceQuality(fi.score, fi.px, fi.blur))
+	sh := ixFaceShot(k, int16(fi.frame))
+	s.shots[sh] = append(s.shots[sh], i)
+}
+
+// ixFaceShot names one picture, or one frame of a video.
+func ixFaceShot(key int32, frame int16) int64 { return int64(key)<<16 | int64(uint16(frame)) }
+
+func (s *ixFaceStore) shotLocked(i int32) int64 { return ixFaceShot(s.key[i], s.frame[i]) }
+
+// dropLocked forgets a face deleted from the table.
+func (s *ixFaceStore) dropLocked(id int64) {
+	if i, ok := s.index[id]; ok {
+		s.norms[i], s.person[i], s.tier[i] = 0, 0, ixFaceJunk
+	}
+}
+
+// setInfoLocked updates what a face was measured as.
+func (s *ixFaceStore) setInfoLocked(id int64, score, px, blur float64) {
+	if i, ok := s.index[id]; ok {
+		s.tier[i], s.qual[i] = ixFaceTierOf(score, px, blur), ixFaceQuality(score, px, blur)
+	}
 }
 
 type ixFaceNear struct {
 	id     int64
 	person int64
 	sim    float32
+	idx    int32
 }
 
 // near lists the faces at least min alike to v.
@@ -177,7 +231,7 @@ func (s *ixFaceStore) nearLocked(v []int8, min float32, skip int64) []ixFaceNear
 		}
 		c := float32(ixDot8(v, s.vecs[i*d:(i+1)*d])) / (qn * s.norms[i])
 		if c >= min {
-			out = append(out, ixFaceNear{id, s.person[i], c})
+			out = append(out, ixFaceNear{id, s.person[i], c, int32(i)})
 		}
 	}
 	sort.Slice(out, func(a, b int) bool { return out[a].sim > out[b].sim })
@@ -292,28 +346,40 @@ func (a *App) ixFaceItem(ctx context.Context, c *ixMLClient, it *ixMItem) error 
 		return a.ixMLReadErr(ctx, err)
 	}
 	// Faces of all frames; one person seen in several frames is kept once,
-	// by its clearest face.
+	// by their best face. Two faces in one frame are always kept as two.
 	type kept struct {
-		f   ixFaceFound
-		pic []byte
+		f     ixFaceFound
+		img   image.Image
+		frame int
+		blur  float64
+		q     float32
 	}
 	var found []kept
-	for _, pic := range pics {
+	for fi, pic := range pics {
 		fs, err := c.faces(ctx, pic)
 		if err != nil {
 			return ixMLFileErrOf(ctx, err)
 		}
+		if len(fs) == 0 {
+			continue
+		}
+		img, _, _ := image.Decode(bytes.NewReader(pic))
 	next:
 		for _, f := range fs {
+			blur := float64(ixFaceBlurUnknown)
+			if img != nil {
+				blur = ixFaceSharpness(img, ixFaceRect(img.Bounds(), f))
+			}
+			k := kept{f, img, fi, blur, ixFaceQuality(f.Score, f.Px, blur)}
 			for i := range found {
-				if ixCosF(found[i].f.Vec, f.Vec) >= ixFaceSameSim {
-					if f.Score > found[i].f.Score {
-						found[i] = kept{f, pic}
+				if found[i].frame != fi && ixCosF(found[i].f.Vec, f.Vec) >= ixFaceSameSim {
+					if k.q > found[i].q {
+						found[i] = k
 					}
 					continue next
 				}
 			}
-			found = append(found, kept{f, pic})
+			found = append(found, k)
 		}
 	}
 	box := a.ixMLBox()
@@ -327,6 +393,16 @@ func (a *App) ixFaceItem(ctx context.Context, c *ixMLClient, it *ixMItem) error 
 		return err
 	}
 	defer tx.Rollback()
+	var gone []int64
+	if rows, err := tx.QueryContext(ctx, `SELECT id FROM ix_faces WHERE key=? AND model=? AND manual=0 AND person=0`, it.Key, ixFaceModel); err == nil {
+		for rows.Next() {
+			var id int64
+			if rows.Scan(&id) == nil {
+				gone = append(gone, id)
+			}
+		}
+		rows.Close()
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM ix_faces WHERE key=? AND model=? AND manual=0 AND person=0`, it.Key, ixFaceModel); err != nil {
 		return err
 	}
@@ -339,8 +415,8 @@ func (a *App) ixFaceItem(ctx context.Context, c *ixMLClient, it *ixMItem) error 
 		for j, x := range q {
 			blob[j] = byte(x)
 		}
-		res, err := tx.ExecContext(ctx, `INSERT INTO ix_faces(key,model,x1,y1,x2,y2,score,vec,person,at) VALUES(?,?,?,?,?,?,?,?,0,?)`,
-			it.Key, ixFaceModel, f.X1, f.Y1, f.X2, f.Y2, f.Score, blob, ixNowMs())
+		res, err := tx.ExecContext(ctx, `INSERT INTO ix_faces(key,model,x1,y1,x2,y2,score,vec,person,at,frame,px,blur) VALUES(?,?,?,?,?,?,?,?,0,?,?,?,?)`,
+			it.Key, ixFaceModel, f.X1, f.Y1, f.X2, f.Y2, f.Score, blob, ixNowMs(), k.frame, f.Px, k.blur)
 		if err != nil {
 			return err
 		}
@@ -354,19 +430,21 @@ func (a *App) ixFaceItem(ctx context.Context, c *ixMLClient, it *ixMItem) error 
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	decoded := map[*byte]image.Image{}
+	box.faces.mu.Lock()
+	for _, id := range gone {
+		box.faces.dropLocked(id)
+	}
 	for i, k := range found {
-		box.faces.mu.Lock()
-		box.faces.addLocked(ids[i], qs[i], 0)
-		box.faces.mu.Unlock()
-		img, seen := decoded[&k.pic[0]]
-		if !seen {
-			img, _, _ = image.Decode(bytes.NewReader(k.pic))
-			decoded[&k.pic[0]] = img
+		box.faces.addLocked(ids[i], qs[i], 0, ixFaceInfo{key: it.Key, frame: k.frame, score: k.f.Score, px: k.f.Px, blur: k.blur})
+	}
+	box.faces.mu.Unlock()
+	for i, k := range found {
+		if k.img != nil {
+			a.ixWriteFaceCrop(ids[i], k.img, k.f)
 		}
-		if img != nil {
-			a.ixWriteFaceCrop(ids[i], img, k.f)
-		}
+	}
+	// Grouped once all the file's faces are known.
+	for i := range found {
 		if err := a.ixGroupFace(ctx, ids[i], qs[i]); err != nil {
 			return err
 		}
@@ -376,39 +454,89 @@ func (a *App) ixFaceItem(ctx context.Context, c *ixMLClient, it *ixMItem) error 
 	return nil
 }
 
-// ixGroupFace puts a new face with a person: the person of its closest
-// grouped look-alike, or a new person when enough ungrouped faces look
-// alike.
+// ixGroupFace puts a face with a person: the person of its closest grouped
+// look-alike, or a new person when enough faces look alike.
 func (a *App) ixGroupFace(ctx context.Context, id int64, v []int8) error {
 	box := a.ixMLBox()
 	// Grouping and a person's changes (merge, taking a face out) take turns,
 	// so a face never joins a person merged away a moment before.
 	box.faces.group.Lock()
 	defer box.faces.group.Unlock()
-	box.faces.mu.Lock()
-	near := box.faces.nearLocked(v, ixFaceSameSim, id)
-	box.faces.mu.Unlock()
-	for _, n := range near {
-		if n.person > 0 {
-			return a.ixSetFacePerson(ctx, []int64{id}, n.person)
-		}
-	}
-	var loose []int64
-	for _, n := range near {
-		if n.person == 0 {
-			loose = append(loose, n.id)
-		}
-	}
-	if len(loose)+1 < ixFaceMinFaces {
+	return a.ixGroupFaceLocked(ctx, id, v, a.ixFaceUnitOf(), nil)
+}
+
+// ixGroupFaceLocked does ixGroupFace with the grouping lock held. The rules:
+//   - unusable faces are never grouped;
+//   - a face joins the person of its closest grouped look-alike, at the
+//     likeness the pair needs (stricter when either face is weak);
+//   - otherwise a good face starts a new person when good look-alikes not
+//     yet grouped are seen in at least ixFaceMinFaces different files
+//     (copies of one file, and frames of one video, count once). It takes
+//     those faces with it, and the weak ones that are clearly alike.
+//
+// reuse, when set, may give an existing empty person for the new one.
+func (a *App) ixGroupFaceLocked(ctx context.Context, id int64, v []int8, unit func(string) string, reuse func([]int64) int64) error {
+	box := a.ixMLBox()
+	s := &box.faces
+	s.mu.RLock()
+	me, ok := s.index[id]
+	if !ok || s.person[me] != 0 || s.tier[me] == ixFaceJunk {
+		s.mu.RUnlock()
 		return nil
 	}
-	now := ixNowMs()
-	res, err := a.db.Writer.ExecContext(ctx, `INSERT INTO ix_people(name,created_at,updated_at) VALUES('',?,?)`, now, now)
-	if err != nil {
-		return err
+	tier := s.tier[me]
+	type cand struct {
+		ixFaceNear
+		tier int8
+		unit string
 	}
-	person, _ := res.LastInsertId()
-	return a.ixSetFacePerson(ctx, append(loose, id), person)
+	var grouped, loose []cand
+	for _, n := range s.nearLocked(v, ixFaceSameSim, id) {
+		t := s.tier[n.idx]
+		if t == ixFaceJunk || n.sim < ixFacePairSim(tier, t) {
+			continue
+		}
+		c := cand{n, t, ""}
+		switch {
+		case n.person > 0:
+			grouped = append(grouped, c)
+		case n.person == 0:
+			c.unit = unit(s.keys[s.key[n.idx]])
+			loose = append(loose, c)
+		}
+	}
+	myUnit := unit(s.keys[s.key[me]])
+	s.mu.RUnlock()
+	if len(grouped) > 0 {
+		return a.ixSetFacePerson(ctx, []int64{id}, grouped[0].person)
+	}
+	if tier != ixFaceGood {
+		return nil // weak faces only join
+	}
+	units := map[string]bool{myUnit: true}
+	take := []int64{id}
+	for _, n := range loose {
+		if n.tier == ixFaceGood {
+			units[n.unit] = true
+		}
+		take = append(take, n.id)
+	}
+	if len(units) < ixFaceMinFaces {
+		return nil
+	}
+	var person int64
+	if reuse != nil {
+		person = reuse(take)
+	}
+	if person == 0 {
+		now := ixNowMs()
+		res, err := a.db.Writer.ExecContext(ctx, `INSERT INTO ix_people(name,created_at,updated_at) VALUES('',?,?)`, now, now)
+		if err != nil {
+			return err
+		}
+		person, _ = res.LastInsertId()
+	}
+	return a.ixSetFacePerson(ctx, take, person)
 }
 
 // ixRegroupFaces gives ungrouped faces another chance: a person may have

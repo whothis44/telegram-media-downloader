@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -53,16 +55,35 @@ func ix8FakeML(t *testing.T) *httptest.Server {
 		out := map[string]any{"imageWidth": 64, "imageHeight": 64}
 		switch {
 		case entries["facial-recognition"] != nil:
+			// A face is "who[*likeness][:score[:size]]": who is one letter;
+			// "A*0.45" is someone only 0.45 alike to A (and alike to other
+			// "A*..." faces); score is the detection score (0.95), size the
+			// box's short side in pixels (180) of a 640 px picture.
+			out["imageWidth"], out["imageHeight"] = 640, 640
 			faces := []any{}
-			for i, who := range strings.Split(parts["faces"], ",") {
-				if who == "" {
+			for i, spec := range strings.Split(parts["faces"], ",") {
+				if spec == "" {
 					continue
 				}
+				fields := strings.Split(spec, ":")
+				who, score, size, like := fields[0], 0.95, 180.0, 1.0
+				if len(fields) > 1 {
+					score, _ = strconv.ParseFloat(fields[1], 64)
+				}
+				if len(fields) > 2 {
+					size, _ = strconv.ParseFloat(fields[2], 64)
+				}
+				if n, l, ok := strings.Cut(who, "*"); ok {
+					who = n
+					like, _ = strconv.ParseFloat(l, 64)
+				}
 				v := make([]float32, 512)
-				v[int(who[0])%512] = 1
-				v[(int(who[0])*7+i)%512] = 0.2 // a little difference between photos of one person
+				v[int(who[0])%512] = float32(like)
+				v[(300+int(who[0]))%512] = float32(math.Sqrt(1 - like*like))
+				v[(int(who[0])*7+i)%512] += 0.2 // a little difference between photos of one person
 				raw, _ := json.Marshal(v)
-				faces = append(faces, map[string]any{"boundingBox": map[string]any{"x1": 8 + i*20, "y1": 8, "x2": 24 + i*20, "y2": 28}, "embedding": string(raw), "score": 0.95})
+				x1 := 8 + float64(i)*210
+				faces = append(faces, map[string]any{"boundingBox": map[string]any{"x1": x1, "y1": 40, "x2": x1 + size, "y2": 40 + size*1.2}, "embedding": string(raw), "score": score})
 			}
 			out["facial-recognition"] = faces
 		case entries["ocr"] != nil:
@@ -118,9 +139,9 @@ func TestIxFacesBecomePeopleAndCanBeCorrected(t *testing.T) {
 		if it.Key == "s01" {
 			seed += ";text=FREE PARKING|Sunday only"
 		}
-		frame := append(ixMLTestPicture(), []byte("#"+seed)...)
+		frame := append(ix10FacePicture(), []byte("#"+seed)...)
 		if it.Key == "s02" { // a video: three frames, the same two people in each, a caption in one
-			return [][]byte{frame, frame, append(ixMLTestPicture(), []byte("#faces=A,B;text=free parking|LIVE")...)}, nil
+			return [][]byte{frame, frame, append(ix10FacePicture(), []byte("#faces=A,B;text=free parking|LIVE")...)}, nil
 		}
 		return [][]byte{frame}, nil
 	}
