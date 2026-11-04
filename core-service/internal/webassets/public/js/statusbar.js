@@ -42,7 +42,7 @@ function compactBytes(n) {
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
     const i = Math.min(units.length - 1, Math.floor(Math.log(v) / Math.log(1024)));
     const x = v / Math.pow(1024, i);
-    return `${i === 0 || x >= 100 ? Math.round(x) : x.toFixed(1)} ${units[i]}`;
+    return `${i === 0 || x >= 100 ? Math.round(x) : parseFloat(x.toFixed(1))} ${units[i]}`;
 }
 
 function applyRecent(chipId, prefix, totals, titleKey, titleFallback) {
