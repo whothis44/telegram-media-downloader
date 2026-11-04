@@ -121,6 +121,7 @@ type ixModel struct {
 	LooseSim   float32                           // likeness below which a one-off file is unlike a set
 	Soft       []ixSoftPair                      // look-alike pairs nobody has decided, and clips
 	SameAlbums []ixAlbumSug                      // albums that look the same, for review
+	Overlap    *ixOverlap                        // which chats repeat which
 }
 
 type ixModelBox struct {
@@ -533,6 +534,7 @@ func (a *App) ixBuildModel(ctx context.Context) (*ixModel, error) {
 	}
 	ixAssignFamilies(m)
 	m.Suggest = ixContentSuggestions(m)
+	m.Overlap = ixComputeOverlap(m)
 	a.ixLoadPeople(ctx, m)
 	m.EmbSim = a.ixEmbSim()
 	m.Soft = a.ixLoadSoftPairs(ctx)

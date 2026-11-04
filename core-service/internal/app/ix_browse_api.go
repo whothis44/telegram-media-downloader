@@ -305,6 +305,7 @@ type ixFeedQuery struct {
 	Status     string
 	Collection int64
 	Person     int64
+	Unique     bool // only posts with a file no other chat has
 	From, To   int64
 	Cursor     int
 	Limit      int
@@ -313,7 +314,7 @@ type ixFeedQuery struct {
 func ixParseFeed(r *http.Request) ixFeedQuery {
 	q := r.URL.Query()
 	f := ixFeedQuery{View: q.Get("view"), Group: q.Get("group"), Category: q.Get("category"), Type: q.Get("type"), Sort: q.Get("sort"), Q: strings.TrimSpace(q.Get("q")),
-		Dups: q.Get("dups") == "1", Status: q.Get("status")}
+		Dups: q.Get("dups") == "1", Status: q.Get("status"), Unique: q.Get("unique") == "1"}
 	f.Collection, _ = strconv.ParseInt(q.Get("collection"), 10, 64)
 	f.Person, _ = strconv.ParseInt(q.Get("person"), 10, 64)
 	f.From, _ = strconv.ParseInt(q.Get("from"), 10, 64)
@@ -399,6 +400,9 @@ func (m *ixModel) postMatches(pi int32, f ixFeedQuery, hits map[int32]bool) bool
 		}
 	}
 	if f.Dups && (p.Family < 0 || len(m.Families[p.Family].Posts) < 2) {
+		return false
+	}
+	if f.Unique && !m.ixPostOnlyHere(pi) {
 		return false
 	}
 	switch f.Type {

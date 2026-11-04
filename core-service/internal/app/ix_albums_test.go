@@ -170,6 +170,20 @@ func TestIxLoneFilesArePlacedInTheAlbumBesideThem(t *testing.T) {
 	if p := ixAlbPostOf(t, m, 13); p.Orphan || p.Grouped != "A" {
 		t.Fatalf("13 not placed again: %+v", p)
 	}
+	// The overlap endpoint answers for every chat and for one.
+	for _, q := range []string{"", "?group=" + ixAlbChat} {
+		rec := httptest.NewRecorder()
+		a.handleIxOverlap(rec, httptest.NewRequest("GET", "/api/ix/browse/overlap"+q, nil))
+		var got map[string]any
+		if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &got) != nil || (q == "" && got["cover"] == nil) || (q != "" && got["chat"] == nil) {
+			t.Fatalf("overlap%s: %d %s", q, rec.Code, rec.Body.String())
+		}
+	}
+	rec := httptest.NewRecorder()
+	a.handleIxOverlap(rec, httptest.NewRequest("GET", "/api/ix/browse/overlap?group=nope", nil))
+	if rec.Code != 404 {
+		t.Fatalf("unknown chat: %d", rec.Code)
+	}
 }
 
 // Without the database (as in the scale test) only media posts count as
@@ -480,5 +494,134 @@ func TestIxSameAlbumsAnsweredInOneClick(t *testing.T) {
 	}
 	if len(m.SameAlbums) != 0 {
 		t.Fatalf("still offered: %+v", m.SameAlbums)
+	}
+}
+
+// ---------- which chats repeat which ----------
+
+// ixTestModel builds a model from posts given as chat, date and file keys;
+// a key seen again is the same file.
+type ixTestModel struct{ m *ixModel }
+
+func newIxTestModel() *ixTestModel {
+	return &ixTestModel{&ixModel{GroupName: map[string]string{}, GroupCat: map[string]string{}, ByKey: map[string]int32{}, ByMsg: map[string]int32{},
+		PersonKeys: map[int64]map[string]bool{}, PersonHidden: map[int64]bool{}}}
+}
+
+func (x *ixTestModel) post(group string, date int64, keys ...string) int32 {
+	m := x.m
+	pi := int32(len(m.Posts))
+	msg := len(m.Posts) + 1
+	p := ixMPost{Idx: pi, Group: group, Msg: msg, Date: date, Origin: date, Family: -1}
+	if len(keys) > 1 {
+		p.Grouped = fmt.Sprint("g", msg)
+	}
+	for _, k := range keys {
+		cl := int32(len(m.Clusters))
+		if ii, ok := m.ByKey[k]; ok {
+			cl = m.Items[ii].Cluster
+		} else {
+			m.Clusters = append(m.Clusters, ixMCluster{Canon: int32(len(m.Items)), Kind: "photo"})
+		}
+		ii := int32(len(m.Items))
+		m.Items = append(m.Items, ixMItem{Group: group, Msg: msg, Key: k, Cluster: cl, Post: pi, Type: "photo", Status: "ok", W: 1080, H: 1920})
+		m.Clusters[cl].Items = append(m.Clusters[cl].Items, ii)
+		if _, ok := m.ByKey[k]; !ok {
+			m.ByKey[k] = ii
+		}
+		p.Items = append(p.Items, ii)
+	}
+	m.Posts = append(m.Posts, p)
+	m.ByMsg[ixPostRef(&p)] = pi
+	return pi
+}
+
+// done counts each cluster's posts and chats, as the model build does.
+func (x *ixTestModel) done() *ixModel {
+	m := x.m
+	for ci := range m.Clusters {
+		c := &m.Clusters[ci]
+		posts, chats := map[int32]bool{}, map[string]bool{}
+		for _, ii := range c.Items {
+			posts[m.Items[ii].Post] = true
+			chats[m.Items[ii].Group] = true
+		}
+		c.Posts, c.Chats = len(posts), len(chats)
+	}
+	return m
+}
+
+func ixKeys(prefix string, from, to int) []string {
+	var out []string
+	for i := from; i < to; i++ {
+		out = append(out, fmt.Sprintf("%s%d", prefix, i))
+	}
+	return out
+}
+
+func TestIxChatOverlapNamesMirrorsRepostersAndVarietyChats(t *testing.T) {
+	x := newIxTestModel()
+	// src posts 20 files first; mir reposts all of them; sub reposts 8 and
+	// one of its own; three more sources a, b, c have 10 files each; var
+	// takes 3 from each of src, a, b, c and adds one; own is mostly its own;
+	// tiny has 3 files.
+	for i := 0; i < 20; i += 5 {
+		x.post("src", int64(100+i), ixKeys("s", i, i+5)...)
+		x.post("mir", int64(1000+i), ixKeys("s", i, i+5)...)
+	}
+	x.post("sub", 2000, append(ixKeys("s", 0, 8), "sub0")...)
+	for _, g := range []string{"a", "b", "c"} {
+		x.post(g, 50, ixKeys(g, 0, 10)...)
+	}
+	x.post("var", 3000, append(append(append(append(ixKeys("s", 10, 13), ixKeys("a", 0, 3)...), ixKeys("b", 0, 3)...), ixKeys("c", 0, 3)...), "v0")...)
+	x.post("own", 400, append(ixKeys("o", 0, 10), "a9")...)
+	x.post("tiny", 500, "t0", "t1", "t2")
+	m := x.done()
+	o := ixComputeOverlap(m)
+	class := func(g string) (string, string) {
+		c, w := o.class(o.index[g])
+		if w < 0 {
+			return c, ""
+		}
+		return c, o.Groups[w]
+	}
+	for g, want := range map[string]string{"src": "mirror", "mir": "mirror", "var": "variety", "own": "unique", "tiny": "", "a": "unique"} {
+		if c, _ := class(g); c != want {
+			t.Errorf("%s: %q, want %q", g, c, want)
+		}
+	}
+	if c, w := class("sub"); c != "reposter" || (w != "src" && w != "mir") {
+		t.Errorf("sub: %s of %s", c, w)
+	}
+	if c, w := class("mir"); w != "src" {
+		t.Errorf("mir mirrors %q (%s)", w, c)
+	}
+	// src posted everything mir has, first.
+	p := o.pair(m, o.index["mir"], o.index["src"])
+	if p.Shared != 20 || p.Share != 1 || p.TheyFirst != 1 || p.WeFirst != 0 {
+		t.Fatalf("mir and src: %+v", p)
+	}
+	j := o.chat(m, o.index["var"])
+	if j.Files != 13 || j.Unique != 1 || j.Top == nil || j.Top.Shared != 3 {
+		t.Fatalf("var: %+v", j)
+	}
+	// What each chat adds: every distinct file once, the biggest chat first.
+	if o.Cover[0].Adds != 20 || o.Cover[len(o.Cover)-1].Total != 20+1+30+1+10+3 {
+		t.Fatalf("cover: %+v", o.Cover)
+	}
+	for _, s := range o.Cover {
+		if s.Group == "mir" && s.Adds != 0 {
+			t.Fatalf("a mirror adds %d", s.Adds)
+		}
+	}
+	// "Not in other chats": posts with a file only that chat has.
+	m.Overlap = o
+	f := ixFeedQuery{Unique: true}
+	for pi := range m.Posts {
+		g := m.Posts[pi].Group
+		want := g != "src" && g != "mir" // every other chat posted something of its own
+		if got := m.postMatches(int32(pi), f, nil); got != want {
+			t.Errorf("post in %s: unique=%v", g, got)
+		}
 	}
 }

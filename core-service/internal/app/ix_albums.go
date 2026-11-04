@@ -56,6 +56,7 @@ func registerIxAlbumRoutes(mux *http.ServeMux, a *App) {
 	mux.Handle("POST /api/ix/browse/review/lone", h(a.handleIxLoneDecide))
 	mux.Handle("GET /api/ix/browse/review/albums", h(a.handleIxAlbumReview))
 	mux.Handle("POST /api/ix/browse/review/albums", h(a.handleIxAlbumDecide))
+	mux.Handle("GET /api/ix/browse/overlap", h(a.handleIxOverlap))
 }
 
 // ixPairRefs orders two post refs the way ix_album_pairs stores them.
