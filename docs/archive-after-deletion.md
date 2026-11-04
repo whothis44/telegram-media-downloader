@@ -10,8 +10,9 @@ the app does before and after that date, and how to put things back from the bac
   app copies the Telegram session files and the database into a folder next to the index copy:
   `<index folder> backups`, for example `X:\Telegram index backups`. Each copy is a folder named by its date and
   time. The last 7 nightly copies are kept; older ones are removed. It is on unless you untick it in Settings.
-- **Every copy is checked.** Sizes and SHA-256 checksums are compared with the originals, and SQLite's integrity
-  check is run on the database copy. Archive → Overview shows the last backup (time, size, OK or failed); the
+- **Every copy is checked.** SQLite's integrity check is run on the database snapshot while it is still on this
+  computer, then sizes and SHA-256 checksums of everything copied are compared with the originals (SQLite never
+  opens a file on the NAS). Archive → Overview shows the last backup (time, size, OK or failed); the
   diagnostics report has the same numbers. A failed night is tried again an hour later, three times at most.
 - **The session stays encrypted.** The session files are copied as they are. The key that opens them,
   `secret.key` in the app's data folder, is **never** copied into the backups folder. To restore a session you
@@ -32,6 +33,12 @@ When Telegram reports that the account is deleted or deactivated, or that the se
 
 The deletion date alone does not switch it on: Telegram may delete the account later than it said, and the app keeps
 downloading for as long as Telegram still answers.
+
+One such error is not enough either: a file download from another Telegram data centre can briefly answer
+`AUTH_KEY_UNREGISTERED` after a reconnect while the account is fine. Before switching, the app asks Telegram a cheap
+question on the account's main connection; if that works, downloads go on. When it cannot ask (the engine itself
+stopped on the error), the error must repeat, on at least three items over at least ten minutes, before the archive
+becomes read-only.
 
 It does not keep retrying the dead session, so nothing loops and the log says it once.
 

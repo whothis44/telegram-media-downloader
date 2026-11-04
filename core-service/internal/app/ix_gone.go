@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -23,6 +25,16 @@ import (
 // stop. Everything that works from the saved archive keeps going: the
 // browser, search, recognition, faces, exports and backups.
 //
+// One error is not enough: gotd connections to another data centre (file
+// downloads) can answer AUTH_KEY_UNREGISTERED for a while after a reconnect
+// or an authorization export, while the account is fine. So before the mode
+// starts, a cheap call on the account's main connection (the freeze check,
+// help.getAppConfig) must fail the same way; while the engine is running
+// and that call works, the errors are ignored. When no such call can be
+// made (the engine is down, as when the main connection itself failed), the
+// error must have repeated: on at least ixGoneItems different items (queue
+// items, backfills, engine runs) over at least ixGoneSpan.
+//
 // The state is kept in kv, so it holds across restarts. "Try Telegram
 // again" (Overview) leaves the mode, for an appeal that was accepted; fresh
 // errors put it back.
@@ -34,6 +46,43 @@ var errIxReadOnly = errors.New("Telegram account gone: the archive is read-only 
 
 // ixGoneStartDelay is the wait before the first check after a start.
 var ixGoneStartDelay = time.Minute
+
+var (
+	// Without a live check, read-only mode needs the error on this many
+	// different items, the first and the last this far apart.
+	ixGoneItems = 3
+	ixGoneSpan  = 10 * time.Minute
+	// ixGoneCheckEvery spaces the live checks on the main connection out.
+	ixGoneCheckEvery = 5 * time.Minute
+	// ixGoneEngineMerge: engine errors this close together are one failure
+	// (a failed start can be reported twice).
+	ixGoneEngineMerge = time.Second
+)
+
+// ixGoneProbe asks Telegram on the account's main connection whether the
+// session still works (the freeze check: a cheap call). errIxNoProbe: no
+// call could be made.
+var ixGoneProbe = func(a *App, ctx context.Context) error {
+	if a.monitor == nil || a.monitor.RequireRunning() != nil {
+		return errIxNoProbe
+	}
+	if err := a.ixCheckFreeze(ctx); err != nil {
+		if ixDeactivatedRe.MatchString(err.Error()) {
+			return err
+		}
+		return fmt.Errorf("%w: %v", errIxNoProbe, err)
+	}
+	return nil
+}
+
+var errIxNoProbe = errors.New("no live check of the Telegram session could be made")
+
+// ixGoneSign is one error that says the account may be gone.
+type ixGoneSign struct {
+	key  string // the item it was seen on
+	at   int64  // Unix ms
+	code string
+}
 
 type ixGoneInfo struct {
 	Gone      bool   `json:"gone"`
@@ -49,10 +98,13 @@ type ixGoneBox struct {
 	mu     sync.Mutex
 	st     ixGoneInfo
 	loaded bool
-	// The last engine error that said the account is gone, and when.
-	engineErr string
-	engineAt  int64
-	wake      chan struct{}
+	// Engine errors that said the account may be gone (newest last).
+	engine []ixGoneSign
+	// The last live check on the main connection: when, and when it last
+	// showed the session working (errors before that do not count).
+	checkedAt, aliveAt int64
+	checkAlive         bool
+	wake               chan struct{}
 }
 
 func (a *App) ixGoneBox() *ixGoneBox {
@@ -123,19 +175,25 @@ func (a *App) ixKeepGone(ctx context.Context, st ixGoneInfo) {
 }
 
 // ixNoteEngine is told about every engine error (monitorEvent, and failed
-// starts). One that says the account is gone switches to read-only mode
-// right away, before anything can restart the engine, and the loop then
-// stops the engine.
+// starts). One that says the account may be gone is kept as a sign, and the
+// loop looks at once: the engine is down, so the error must repeat (each
+// restart of the engine tries the main connection again).
 func (a *App) ixNoteEngine(err error) {
 	if err == nil || a == nil || a.db == nil || !ixDeactivatedRe.MatchString(err.Error()) {
 		return
 	}
-	now := time.Now()
+	now := time.Now().UnixMilli()
 	box := a.ixGoneBox()
 	box.mu.Lock()
-	box.engineErr, box.engineAt = err.Error(), now.UnixMilli()
+	if n := len(box.engine); n > 0 && now-box.engine[n-1].at < ixGoneEngineMerge.Milliseconds() {
+		box.engine[n-1].at = now
+	} else {
+		box.engine = append(box.engine, ixGoneSign{key: "engine:" + strconv.FormatInt(now, 10), at: now, code: ixDeactivatedRe.FindString(err.Error())})
+		if len(box.engine) > 50 {
+			box.engine = box.engine[len(box.engine)-50:]
+		}
+	}
 	box.mu.Unlock()
-	a.ixEnterGone(context.Background(), "telegram", ixDeactivatedRe.FindString(err.Error()), now)
 	select {
 	case box.wake <- struct{}{}:
 	default:
@@ -183,39 +241,110 @@ func (a *App) ixGoneStep(ctx context.Context, now time.Time) {
 func (a *App) ixGoneWhy(ctx context.Context, st ixGoneInfo, now time.Time) (string, string) {
 	// The deletion date alone does not stop anything: Telegram may delete
 	// later than it said, and every hour it still answers is worth using.
-	// Its own errors decide.
-	// Only errors after "Try Telegram again" count.
-	since := max(now.Add(-6*time.Hour).UnixMilli(), st.ClearedAt)
-	if c := ixClassify(a.ixGoneErrors(ctx, since), now.UnixMilli()); c.Deactivated {
-		return "telegram", c.LastError
+	// Its own errors decide, confirmed (see the top of this file).
+	box := a.ixGoneBox()
+	box.mu.Lock()
+	alive := box.aliveAt
+	box.mu.Unlock()
+	// Only errors after "Try Telegram again", and after the session last
+	// answered on its main connection, count.
+	since := max(now.Add(-6*time.Hour).UnixMilli(), st.ClearedAt, alive)
+	signs := a.ixGoneSigns(ctx, since)
+	if len(signs) == 0 {
+		return "", ""
+	}
+	switch code, alive := a.ixGoneCheck(ctx, now); {
+	case code != "":
+		return "telegram", code
+	case alive:
+		return "", ""
+	}
+	if code := ixGoneRepeated(signs); code != "" {
+		return "telegram", code
 	}
 	return "", ""
 }
 
-// ixGoneErrors are the errors seen since a time: downloads, backfills, and
-// the engine itself.
-func (a *App) ixGoneErrors(ctx context.Context, since int64) []string {
-	var out []string
-	if rows, err := a.db.Reader.QueryContext(ctx, `SELECT error FROM tgdl_work WHERE error IS NOT NULL AND error<>'' AND updated_at>? ORDER BY updated_at DESC LIMIT 300`, since); err == nil {
+// ixGoneCheck makes the live check on the main connection (at most every
+// ixGoneCheckEvery; in between the last answer stands): code is the error
+// that confirms the account is gone, alive that the session answered.
+// Neither: no check could be made.
+func (a *App) ixGoneCheck(ctx context.Context, now time.Time) (code string, alive bool) {
+	box := a.ixGoneBox()
+	box.mu.Lock()
+	recent := box.checkedAt > 0 && now.UnixMilli()-box.checkedAt < ixGoneCheckEvery.Milliseconds()
+	wasAlive := box.checkAlive
+	box.mu.Unlock()
+	if recent {
+		return "", wasAlive
+	}
+	probe, cancel := context.WithTimeout(ctx, time.Minute)
+	err := ixGoneProbe(a, probe)
+	cancel()
+	box.mu.Lock()
+	defer box.mu.Unlock()
+	box.checkedAt, box.checkAlive = now.UnixMilli(), err == nil
+	switch {
+	case err == nil:
+		box.aliveAt = now.UnixMilli()
+		a.ixLog("Telegram errors said the account may be gone, but its main connection still answers: Telegram work goes on")
+		return "", true
+	case !errors.Is(err, errIxNoProbe) && ixDeactivatedRe.MatchString(err.Error()):
+		return ixDeactivatedRe.FindString(err.Error()), false
+	}
+	box.checkedAt = 0 // nothing learned: try again at the next look
+	return "", false
+}
+
+// ixGoneRepeated is the error code when the signs show the error on at
+// least ixGoneItems different items over at least ixGoneSpan ("" if not).
+func ixGoneRepeated(signs []ixGoneSign) string {
+	items := map[string]bool{}
+	var first, last ixGoneSign
+	for i, s := range signs {
+		items[s.key] = true
+		if i == 0 || s.at < first.at {
+			first = s
+		}
+		if i == 0 || s.at >= last.at {
+			last = s
+		}
+	}
+	if len(items) >= ixGoneItems && last.at-first.at >= ixGoneSpan.Milliseconds() {
+		return last.code
+	}
+	return ""
+}
+
+// ixGoneSigns are the errors since a time that say the account may be
+// gone, each with the item it was seen on: downloads, backfills, and the
+// engine itself.
+func (a *App) ixGoneSigns(ctx context.Context, since int64) []ixGoneSign {
+	var out []ixGoneSign
+	if rows, err := a.db.Reader.QueryContext(ctx, `SELECT group_id||'_'||message_id, updated_at, error FROM tgdl_work WHERE error IS NOT NULL AND error<>'' AND updated_at>? ORDER BY updated_at DESC LIMIT 300`, since); err == nil {
 		for rows.Next() {
+			var key string
+			var at int64
 			var e sql.NullString
-			if rows.Scan(&e) == nil && e.Valid {
-				out = append(out, e.String)
+			if rows.Scan(&key, &at, &e) == nil && e.Valid && ixDeactivatedRe.MatchString(e.String) {
+				out = append(out, ixGoneSign{key: "work:" + key, at: at, code: ixDeactivatedRe.FindString(e.String)})
 			}
 		}
 		rows.Close()
 	}
 	a.historyMu.Lock()
 	for _, j := range a.historyJobs {
-		if j.Error != nil && j.FinishedAt != nil && *j.FinishedAt > since {
-			out = append(out, *j.Error)
+		if j.Error != nil && j.FinishedAt != nil && *j.FinishedAt > since && ixDeactivatedRe.MatchString(*j.Error) {
+			out = append(out, ixGoneSign{key: "history:" + j.ID, at: *j.FinishedAt, code: ixDeactivatedRe.FindString(*j.Error)})
 		}
 	}
 	a.historyMu.Unlock()
 	box := a.ixGoneBox()
 	box.mu.Lock()
-	if box.engineAt > since {
-		out = append(out, box.engineErr)
+	for _, s := range box.engine {
+		if s.at > since {
+			out = append(out, s)
+		}
 	}
 	box.mu.Unlock()
 	return out
@@ -239,6 +368,10 @@ func (a *App) ixStopTelegram(ctx context.Context) {
 // is meant to run; if the account is really gone, the next error puts the
 // archive back in read-only mode.
 func (a *App) ixGoneClear(ctx context.Context) {
+	box := a.ixGoneBox()
+	box.mu.Lock()
+	box.engine, box.checkedAt, box.checkAlive = nil, 0, false
+	box.mu.Unlock()
 	a.ixSetGone(ctx, ixGoneInfo{ClearedAt: time.Now().UnixMilli()})
 	a.ixLog("read-only archive turned off by hand: Telegram work may start again")
 	a.ixWake()
