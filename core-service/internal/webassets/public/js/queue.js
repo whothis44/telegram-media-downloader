@@ -19,7 +19,7 @@ import { showToast, escapeHtml, formatBytes, getFileIcon } from './utils.js';
 import { t as i18nT, tf as i18nTf } from './i18n.js';
 import { getGroupName } from './store.js';
 import { fileTokenQuery } from './media-url.js';
-import { confirmSheet } from './sheet.js';
+import { confirmSheet, openSheet } from './sheet.js';
 
 // ============ Constants ============
 //
@@ -75,11 +75,18 @@ const STATUS_FILTERS = [
         fallback: 'Queued',
         match: (j) => j.status === 'queued',
     },
+    // Paused by a person — the archive's own set-asides have their chip.
     {
         id: 'paused',
         i18n: 'queue.chip.paused',
         fallback: 'Paused',
-        match: (j) => j.status === 'paused',
+        match: (j) => j.status === 'paused' && !j.archiveHold,
+    },
+    {
+        id: 'held',
+        i18n: 'queue.chip.held',
+        fallback: 'Set aside by the archive',
+        match: (j) => isArchiveHeld(j),
     },
     {
         id: 'dupe',
@@ -94,6 +101,41 @@ const STATUS_FILTERS = [
         match: (j) => j.nsfwBlocked === true,
     },
 ];
+
+// ============ Set aside by the archive ============
+//
+// The archive pauses some queue items itself (snapshot `archiveHold`):
+// larger files wait while private chats and smaller files go first, likely
+// copies of saved files wait to be checked, and originals wait until their
+// smaller version is replaced. It lets them go by itself. A person resuming
+// one makes it theirs — the archive never sets it aside again — so these
+// rows are told apart from the ones a person paused, and resuming them
+// always asks first.
+const HOLD_REASONS = {
+    deadline: [
+        'queue.hold.reason.deadline',
+        'larger file, private chats and smaller files first',
+    ],
+    copy: ['queue.hold.reason.copy', 'likely copy of a saved file'],
+    lowq: [
+        'queue.hold.reason.lowq',
+        'original waiting for its smaller version to be replaced',
+    ],
+};
+
+function isArchiveHeld(j) {
+    return j?.status === 'paused' && !!j.archiveHold;
+}
+
+function holdReasonText(j) {
+    const r = HOLD_REASONS[j?.archiveHold];
+    return r ? i18nT(r[0], r[1]) : '';
+}
+
+// Whole-queue counts from the server (the snapshot lists up to 1000
+// waiting items, the counts cover all of them). Adjusted by single-row WS
+// events; bulk events reload the snapshot.
+const holdCounts = { archive: null, person: null };
 
 // ============ Store ============
 //
@@ -367,7 +409,46 @@ function scheduleSelectionRender() {
 async function runBatchAction(action) {
     if (_selected.size === 0) return;
     const keys = Array.from(_selected);
+    const extra = {};
     try {
+        if (action === 'resume') {
+            const held = keys.filter((k) => isArchiveHeld(store.get(k))).length;
+            if (held > 0) {
+                const mine = keys.length - held;
+                const choices = [];
+                if (mine > 0) {
+                    choices.push({
+                        id: 'mine',
+                        primary: true,
+                        label: i18nTf(
+                            'queue.hold.resume_mine_n',
+                            { n: mine },
+                            `Resume only the ${mine} paused by you`,
+                        ),
+                    });
+                }
+                choices.push({
+                    id: 'all',
+                    danger: true,
+                    label: i18nTf(
+                        'queue.hold.resume_held_n',
+                        { n: held },
+                        `Also resume the ${held} set aside by the archive`,
+                    ),
+                });
+                const pick = await choiceSheet({
+                    title: i18nT('queue.hold.resume_title', 'Resume files the archive set aside?'),
+                    message: i18nTf(
+                        'queue.hold.resume_selected_body',
+                        { n: held },
+                        `${held} of the selected files were set aside by the archive. It lets them go by itself, in order.\nResume them by hand and they download now as your decision — the archive will never set them aside again.`,
+                    ),
+                    choices,
+                });
+                if (!pick) return;
+                extra.includeArchive = pick === 'all';
+            }
+        }
         if (action === 'cancel') {
             if (
                 !(await confirmSheet({
@@ -385,7 +466,8 @@ async function runBatchAction(action) {
             )
                 return;
         }
-        const r = await api.post('/api/queue/batch', { keys, action });
+        const r = await api.post('/api/queue/batch', { keys, action, ...extra });
+        if (action === 'resume') refreshSoon();
         // The downloader's per-key `queue_changed` events update each
         // row, but `dismiss` is a client-only "drop from view" — handle
         // it here so the UI reacts immediately for done/failed rows.
@@ -477,6 +559,8 @@ async function loadSnapshot() {
         globalPaused = !!snap.globalPaused;
         engineRunning = !!snap.engineRunning;
         maxSpeedConfig = snap.maxSpeed ?? null;
+        holdCounts.archive = Number.isFinite(snap.archiveHeldCount) ? snap.archiveHeldCount : null;
+        holdCounts.person = Number.isFinite(snap.personPausedCount) ? snap.personPausedCount : null;
         for (const j of snap.active || []) upsert({ ...j });
         for (const j of snap.queued || []) upsert({ ...j });
         for (const j of snap.recent || []) upsert({ ...j });
@@ -494,6 +578,60 @@ async function loadSnapshot() {
             );
         }
     }
+}
+
+// Reload the snapshot shortly — after bulk changes whose WS event carries
+// no per-row detail (resume all, batch), and when the page is shown again
+// (the archive sets items aside and lets them go without per-row events).
+let _refreshTimer = 0;
+function refreshSoon(ms = 400) {
+    clearTimeout(_refreshTimer);
+    _refreshTimer = setTimeout(() => loadSnapshot(), ms);
+}
+
+// A sheet with one button per choice; resolves to the chosen id, or null
+// when dismissed.
+function choiceSheet({ title, message, choices }) {
+    return new Promise((resolve) => {
+        let decided = false;
+        const settle = (v) => {
+            if (decided) return;
+            decided = true;
+            resolve(v);
+        };
+        const cls = (c) =>
+            c.danger
+                ? 'bg-red-500/15 text-red-300 hover:bg-red-500/25'
+                : c.primary
+                  ? 'bg-tg-blue text-white hover:bg-opacity-90'
+                  : 'bg-tg-bg/60 text-tg-text hover:bg-tg-hover';
+        const msg = String(message || '')
+            .split('\n')
+            .map((line) => escapeHtml(line))
+            .join('<br>');
+        const sheet = openSheet({
+            title,
+            size: 'sm',
+            content: `
+                <div class="text-tg-text text-sm leading-relaxed">${msg}</div>
+                <div class="flex flex-col gap-2 mt-5">
+                    ${choices
+                        .map(
+                            (c) =>
+                                `<button type="button" data-choice="${escapeHtml(c.id)}" class="px-4 py-2 rounded-lg text-sm font-medium text-left transition ${cls(c)}">${escapeHtml(c.label)}</button>`,
+                        )
+                        .join('')}
+                    <button type="button" data-choice="" class="px-4 py-2 rounded-lg text-sm text-tg-textSecondary hover:bg-tg-hover transition">${escapeHtml(i18nT('common.cancel', 'Cancel'))}</button>
+                </div>`,
+            onClose: () => settle(null),
+        });
+        sheet.root.addEventListener('click', (e) => {
+            const b = e.target.closest('[data-choice]');
+            if (!b) return;
+            settle(b.dataset.choice || null);
+            sheet.close();
+        });
+    });
 }
 
 // ============ WS handlers ============
@@ -526,12 +664,21 @@ function handleWs(msg) {
         if (p.op === 'resume-all') {
             globalPaused = false;
             scheduleStructuralRender();
+            // Rows the resume lifted (and, without includeArchive, the
+            // set-aside rows it kept) come from the server.
+            refreshSoon();
+            return;
+        }
+        if (p.op === 'batch') {
+            refreshSoon();
             return;
         }
         if (p.op === 'cancel-all') {
             for (const [k, v] of store) {
                 if (v.status === 'queued' || v.status === 'paused') remove(k);
             }
+            holdCounts.archive = holdCounts.archive == null ? null : 0;
+            holdCounts.person = holdCounts.person == null ? null : 0;
             scheduleStructuralRender();
             return;
         }
@@ -559,11 +706,20 @@ function handleWs(msg) {
         }
         const cur = store.get(p.key);
         if (p.op === 'pause' && cur) {
+            if (cur.status !== 'paused' && holdCounts.person != null) holdCounts.person++;
+            // Paused by a person, whatever held it before.
+            cur.archiveHold = null;
             cur.status = 'paused';
             bumpStatus('queued', -1);
             bumpStatus('active', -1);
             bumpStatus('paused', 1);
         } else if (p.op === 'resume' && cur) {
+            if (cur.status === 'paused') {
+                const k = cur.archiveHold ? 'archive' : 'person';
+                if (holdCounts[k] != null) holdCounts[k] = Math.max(0, holdCounts[k] - 1);
+            }
+            // Resumed by a person: theirs now, never set aside again.
+            cur.archiveHold = null;
             cur.status = cur.received ? 'active' : 'queued';
             bumpStatus('paused', -1);
             bumpStatus(cur.status, 1);
@@ -758,8 +914,10 @@ function _chipCounts() {
     // (O(n), n bounded by MAX_FINISHED + live jobs). Without this the
     // "Duplicate" chip always showed 0 even when rows carried the badge.
     let dupe = 0;
+    let held = 0;
     for (const j of store.values()) {
         if (j.deduped === true) dupe += 1;
+        if (isArchiveHeld(j)) held += 1;
     }
     const active = statusCounts.get('active') || 0;
     const queued = statusCounts.get('queued') || 0;
@@ -769,7 +927,9 @@ function _chipCounts() {
         all: store.size,
         active,
         queued,
-        paused,
+        // Paused by a person; the archive's own are `held`.
+        paused: Math.max(0, paused - held),
+        held,
         failed: statusCounts.get('failed') || 0,
         done: statusCounts.get('done') || 0,
         dupe,
@@ -1149,8 +1309,9 @@ function _patchRowNode(rowEl, job) {
         meta.textContent = [sizeLine, speed, eta].filter(Boolean).join(' · ');
     }
     // Status pill — only DOM-touch when the status actually changed
+    // (a row the archive set aside counts as its own state).
     const pillEl = rowEl.querySelector('[data-row-status]');
-    if (pillEl && pillEl.dataset.status !== job.status) {
+    if (pillEl && pillEl.dataset.status !== rowStatusTag(job)) {
         // Status change can flip the action set (active → done changes
         // the per-row buttons). Cheapest correct fix: re-render this
         // single row.
@@ -1162,7 +1323,12 @@ function _patchRowNode(rowEl, job) {
     }
 }
 
+function rowStatusTag(j) {
+    return isArchiveHeld(j) ? 'held' : j.status;
+}
+
 function renderRow(j) {
+    const held = isArchiveHeld(j);
     const name =
         j.fileName ||
         (j.messageId ? `#${j.messageId}` : i18nT('queue.row.unnamed', 'Unnamed file'));
@@ -1206,8 +1372,20 @@ function renderRow(j) {
             paused: 'bg-tg-orange/20 text-tg-orange',
             failed: 'bg-red-500/20 text-red-400',
             done: 'bg-tg-green/20 text-tg-green',
-        }[j.status] || 'bg-gray-700/40 text-gray-300';
-    const pillLabel = i18nT(`queue.status.${j.status}`, j.status);
+            // Set aside by the archive: waiting by design, not a problem.
+            held: 'bg-tg-blue/10 text-tg-textSecondary',
+        }[rowStatusTag(j)] || 'bg-gray-700/40 text-gray-300';
+    const pillLabel = held
+        ? i18nT('queue.status.held', 'Set aside')
+        : i18nT(`queue.status.${j.status}`, j.status);
+    const heldLabel = held ? i18nT('queue.hold.label', 'Set aside by the archive') : '';
+    const heldReason = held ? holdReasonText(j) : '';
+    const heldTitle = held ? (heldReason ? `${heldLabel}: ${heldReason}` : heldLabel) : '';
+    const pillTitle = held
+        ? ` title="${escapeHtml(heldTitle)}"`
+        : j.status === 'paused'
+          ? ` title="${escapeHtml(i18nT('queue.status.paused_tooltip', 'Paused by you'))}"`
+          : '';
 
     // "Duplicate" tag — emitted when the downloader finished but the file
     // hash matched an existing on-disk row. The file isn't downloaded
@@ -1273,7 +1451,16 @@ function renderRow(j) {
             ),
         );
     } else if (j.status === 'paused') {
-        actions.push(actionBtn('resume', 'ri-play-line', i18nT('queue.action.resume', 'Resume')));
+        // Same action for a set-aside row; runRowAction asks first.
+        actions.push(
+            actionBtn(
+                'resume',
+                'ri-play-line',
+                held
+                    ? i18nT('queue.action.resume_held', 'Download now…')
+                    : i18nT('queue.action.resume', 'Resume'),
+            ),
+        );
         actions.push(
             actionBtn(
                 'cancel',
@@ -1316,6 +1503,10 @@ function renderRow(j) {
     // `data-row-status` let `_patchRowNode()` update only the changing
     // bits on every WS progress tick (no full re-render of the row).
     const rowSelClass = isSelected ? ' bg-tg-blue/10' : '';
+    // Why the archive set this row aside — its own line under the file.
+    const holdLine = held
+        ? `<div data-row-hold class="text-[11px] text-tg-textSecondary flex items-center gap-1 min-w-0" title="${escapeHtml(heldTitle)}"><i class="ri-inbox-archive-line shrink-0" aria-hidden="true"></i><span class="truncate">${escapeHtml(heldTitle)}</span></div>`
+        : '';
     const metaLine = [
         j.addedAt
             ? `<span class="inline-flex items-center gap-0.5 tabular-nums" title="${escapeHtml(i18nT('queue.row.added_tooltip', 'Added to queue'))}"><i class="ri-add-circle-line"></i>${escapeHtml(_fmtClock(j.addedAt))}</span>`
@@ -1344,6 +1535,7 @@ function renderRow(j) {
                     ${metaLine.map((s) => `<span class="text-tg-textSecondary/40">·</span>${s}`).join('')}
                     ${j.error ? `<span class="text-tg-textSecondary/40">·</span><span class="text-red-400/80 truncate">${escapeHtml(j.error)}</span>` : ''}
                 </div>
+                ${holdLine}
             </div>
             <div class="hidden md:block text-xs text-tg-textSecondary text-right tabular-nums">${escapeHtml(sizeStr)}</div>
             <div class="mt-1.5 md:mt-0">
@@ -1354,14 +1546,14 @@ function renderRow(j) {
                     <span data-row-pct class="text-[10px] text-tg-textSecondary tabular-nums">${escapeHtml(pctLabel)}</span>
                     <span class="text-[10px] text-tg-textSecondary tabular-nums">${escapeHtml(sizeStr)}</span>
                     <span data-row-meta class="text-[10px] text-tg-textSecondary tabular-nums">${escapeHtml(speedStr !== '—' ? speedStr : '')}</span>
-                    <span data-row-status data-status="${escapeHtml(j.status)}" class="text-[10px] px-1.5 py-0.5 rounded-full ${pillCls} ml-auto">${escapeHtml(pillLabel)}</span>
+                    <span data-row-status data-status="${escapeHtml(rowStatusTag(j))}"${pillTitle} class="text-[10px] px-1.5 py-0.5 rounded-full ${pillCls} ml-auto">${escapeHtml(pillLabel)}</span>
                     ${actions.length ? `<span class="flex items-center gap-1.5">${actions.join('')}</span>` : ''}
                 </div>
                 <div data-row-pct class="hidden md:block text-[10px] text-tg-textSecondary tabular-nums mt-0.5">${escapeHtml(pctLabel)}</div>
             </div>
             <div class="hidden md:block" data-row-meta><span class="text-xs text-tg-textSecondary text-right tabular-nums">${escapeHtml(speedStr)}</span></div>
             <div class="hidden md:block text-xs text-tg-textSecondary text-right tabular-nums">${escapeHtml(etaStr)}</div>
-            <div class="hidden md:block"><span data-row-status data-status="${escapeHtml(j.status)}" class="text-[11px] px-2 py-0.5 rounded-full ${pillCls}">${escapeHtml(pillLabel)}</span>${dupBadge}</div>
+            <div class="hidden md:block"><span data-row-status data-status="${escapeHtml(rowStatusTag(j))}"${pillTitle} class="text-[11px] px-2 py-0.5 rounded-full ${pillCls}">${escapeHtml(pillLabel)}</span>${dupBadge}</div>
             <div class="hidden md:flex items-center justify-end gap-1">${actions.join('')}</div>
             </div></div>
         </div>`;
@@ -1463,13 +1655,34 @@ function renderAggregate() {
     }
     _pushSpeed(totalBps);
     const speed = totalBps ? `${formatBytes(totalBps)}/s` : '0 B/s';
+    const { held, paused } = pausedSplit();
+    const pausedLine =
+        held || paused
+            ? `<span data-queue-paused-split title="${escapeHtml(i18nT('queue.agg.held_tooltip', 'The archive pauses some files itself and lets them go in order: larger files after private chats and smaller files, likely copies until they are checked, originals until their smaller version is replaced. Nothing is wrong with them.'))}"><i class="ri-pause-circle-line"></i> ${escapeHtml(
+                  [
+                      i18nTf('queue.agg.held', { n: held }, `${held} set aside by the archive`),
+                      i18nTf('queue.agg.paused_mine', { n: paused }, `${paused} paused by you`),
+                  ].join(' · '),
+              )}</span>`
+            : '';
     host.innerHTML = `
         <span><i class="ri-loader-2-line text-tg-blue"></i> ${i18nTf('queue.agg.active', { n: active }, `${active} active`)}</span>
         <span><i class="ri-time-line"></i> ${i18nTf('queue.agg.queued', { n: queued }, `${queued} queued`)}</span>
+        ${pausedLine}
         <span><i class="ri-flashlight-line"></i> ${escapeHtml(speed)}${_speedSparkline()}</span>
         ${globalPaused ? `<span class="text-tg-orange">· ${escapeHtml(i18nT('queue.agg.paused_global', 'Globally paused'))}</span>` : ''}
         ${!engineRunning ? `<span class="text-tg-textSecondary">· ${escapeHtml(i18nT('queue.agg.engine_stopped', 'Engine stopped'))}</span>` : ''}
     `;
+}
+
+// Paused items split by who paused them: the server's whole-queue counts
+// when it sent them, else what the store holds.
+function pausedSplit() {
+    if (holdCounts.archive != null && holdCounts.person != null) {
+        return { held: holdCounts.archive, paused: holdCounts.person };
+    }
+    const c = _chipCounts();
+    return { held: c.held, paused: c.paused };
 }
 
 function updateNavBadge() {
@@ -1490,6 +1703,26 @@ async function runRowAction(action, key) {
         if (action === 'pause') {
             await api.post(`/api/queue/${encodeURIComponent(key)}/pause`);
         } else if (action === 'resume') {
+            const job = store.get(key);
+            if (isArchiveHeld(job)) {
+                const reason = holdReasonText(job);
+                if (
+                    !(await confirmSheet({
+                        title: i18nT(
+                            'queue.hold.resume_one_title',
+                            'Resume a file the archive set aside?',
+                        ),
+                        message: i18nTf(
+                            'queue.hold.resume_one_body',
+                            { reason },
+                            `The archive set this file aside (${reason}) and will let it go by itself, in order.\nResume it now and it downloads as your decision — the archive will never set it aside again.`,
+                        ),
+                        confirmLabel: i18nT('queue.hold.resume_one_confirm', 'Resume anyway'),
+                        danger: true,
+                    }))
+                )
+                    return;
+            }
             await api.post(`/api/queue/${encodeURIComponent(key)}/resume`);
         } else if (action === 'cancel') {
             // Confirm before aborting an in-flight download — easy to
@@ -1533,8 +1766,54 @@ async function runGlobalAction(action) {
             await api.post('/api/queue/pause-all');
             showToast(i18nT('queue.toast.paused_all', 'Paused all downloads'), 'info');
         } else if (action === 'resume-all') {
-            await api.post('/api/queue/resume-all');
-            showToast(i18nT('queue.toast.resumed_all', 'Resumed all downloads'), 'success');
+            // Never lifts the archive's own set-asides unless asked: resumed
+            // by hand, they would never be set aside again.
+            const { held } = pausedSplit();
+            let includeArchive = false;
+            if (held > 0) {
+                const pick = await choiceSheet({
+                    title: i18nT('queue.hold.resume_all_title', 'Resume all downloads?'),
+                    message: i18nTf(
+                        'queue.hold.resume_all_body',
+                        { n: held },
+                        `${held} files were set aside by the archive. They are not stuck: it lets them go by itself, in order.\nResume them by hand and they download now as your decision — the archive will never set them aside again.`,
+                    ),
+                    choices: [
+                        {
+                            id: 'mine',
+                            primary: true,
+                            label: i18nT(
+                                'queue.hold.resume_all_keep',
+                                'Resume, and keep set-aside files waiting',
+                            ),
+                        },
+                        {
+                            id: 'all',
+                            danger: true,
+                            label: i18nTf(
+                                'queue.hold.resume_held_n',
+                                { n: held },
+                                `Also resume the ${held} set aside by the archive`,
+                            ),
+                        },
+                    ],
+                });
+                if (!pick) return;
+                includeArchive = pick === 'all';
+            }
+            const r = await api.post('/api/queue/resume-all', { includeArchive });
+            refreshSoon();
+            const kept = r?.keptAside || 0;
+            showToast(
+                kept > 0
+                    ? i18nTf(
+                          'queue.toast.resumed_all_kept',
+                          { n: kept },
+                          `Resumed. ${kept} files set aside by the archive keep waiting.`,
+                      )
+                    : i18nT('queue.toast.resumed_all', 'Resumed all downloads'),
+                'success',
+            );
         } else if (action === 'cancel-all') {
             if (
                 !(await confirmSheet({
@@ -1630,6 +1909,7 @@ export async function showQueuePage(params = {}) {
         invalidateFilterCache();
     }
     if (!view.booted) await loadSnapshot();
+    else refreshSoon(0); // the archive sets items aside without per-row events
     wireOnce();
     bindThrottleSlider();
     renderChips();
