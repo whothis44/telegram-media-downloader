@@ -318,6 +318,14 @@ func (a *App) ixDeadlineStep(ctx context.Context) error {
 			UNION ALL SELECT x.band FROM ix_deferred x JOIN tgdl_work w ON w.id=x.work_id WHERE x.released_at=0 AND w.status='pending')`, args...).Scan(&cur); err != nil {
 		return err
 	}
+	// Files the rescans have not queued yet count too (ixUnqueuedBand):
+	// otherwise a queue holding only big files sees the big band as the
+	// smallest with work, sets nothing aside, the backfill finds its queue
+	// limit full of them and stops, and the smaller files never arrive.
+	unqueued := false
+	if ub, ok := a.ixUnqueuedBand(ctx); ok && (!cur.Valid || int64(ub) < cur.Int64) {
+		cur, unqueued = sql.NullInt64{Int64: int64(ub), Valid: true}, true
+	}
 	if !cur.Valid {
 		return nil
 	}
@@ -339,7 +347,131 @@ func (a *App) ixDeadlineStep(ctx context.Context) error {
 	if err = tx.Commit(); err != nil {
 		return err
 	}
-	return a.ixDeadlineRelease(ctx, band)
+	if err = a.ixDeadlineRelease(ctx, band); err != nil {
+		return err
+	}
+	if unqueued {
+		return a.ixDeadlineKeepBusy(ctx, acctClause, args)
+	}
+	return nil
+}
+
+// ixUnqueuedBand is the band of the files the backfills still have to
+// queue: 0 while a chat without a public username still has its files
+// pass to come (waiting or running in the rescan queue) or a backfill that
+// queues files is running for one, ixPublicLane when only public chats
+// have; ok is false when nothing is left to queue. A rescan queue that a
+// person stopped, or that is held for good (the pause on freeze, a logged
+// out or deleted account), counts only for the pass already running: the
+// others may not start for a long time, and the files set aside meanwhile
+// would only wait. Quiet hours end within the day: they do not count.
+func (a *App) ixUnqueuedBand(ctx context.Context) (band int, ok bool) {
+	groups := map[string]bool{}
+	if q, err := a.ixLoadQueue(ctx); err == nil && q.Running {
+		acct := a.ixAccount()
+		held := a.ixGoneHold() != "" || acct.Deactivated || acct.Frozen && a.ixLoadSettings(ctx).PauseOnFreeze
+		for _, it := range q.Items {
+			if it.Phase == ixPhaseFiles && (it.State == "running" || it.State == "waiting" && !held) {
+				groups[it.GroupID] = true
+			}
+		}
+	}
+	a.historyMu.Lock()
+	for _, j := range a.historyJobs {
+		if j.State == "running" && !j.MessagesOnly && !j.Cancelled {
+			groups[j.GroupID] = true
+		}
+	}
+	a.historyMu.Unlock()
+	if len(groups) == 0 {
+		return 0, false
+	}
+	public := map[string]bool{}
+	if rows, err := a.db.Reader.QueryContext(ctx, `SELECT group_id FROM ix_group_info WHERE username<>''`); err == nil {
+		for rows.Next() {
+			var id string
+			if rows.Scan(&id) == nil {
+				public[id] = true
+			}
+		}
+		rows.Close()
+	}
+	for id := range groups {
+		if !public[id] {
+			return 0, true
+		}
+	}
+	return ixPublicLane, true
+}
+
+// ixEngineWorkers is how many files the engine downloads at once now
+// (replaceable in tests).
+var ixEngineWorkers = func(a *App, ctx context.Context) int {
+	if a.monitor == nil {
+		return 0
+	}
+	g, err := a.monitor.Gauges(ctx)
+	if err != nil {
+		return 0
+	}
+	return g.Workers
+}
+
+// ixDeadlineKeepBusy: while files are set aside for files not queued yet,
+// workers that would have nothing to do take set-aside files after all,
+// smallest first, so that downloads never stop while the rescans read
+// chats holding only big files. Only as many go as there are idle workers,
+// so that the smaller files the rescans bring find workers free. Those not
+// taken by the next step are set aside again (they are pending and
+// unpaused); the big-file lane (engine.BigFileLane) still limits the
+// biggest. acctClause and args are ixDeadlineStep's: now, then the
+// working accounts.
+func (a *App) ixDeadlineKeepBusy(ctx context.Context, acctClause string, args []any) error {
+	workers := ixEngineWorkers(a, ctx)
+	if workers <= 0 {
+		workers = 25
+	}
+	var ready, busy int
+	if err := a.db.Reader.QueryRowContext(ctx, `SELECT COALESCE(SUM(status='pending' AND paused=0 AND retry_at<=?),0), COALESCE(SUM(status='processing'),0)
+		FROM tgdl_work WHERE status IN ('pending','processing')`+acctClause, args...).Scan(&ready, &busy); err != nil {
+		return err
+	}
+	need := workers - ready - busy
+	if need <= 0 {
+		return nil
+	}
+	q := `SELECT w.id FROM ix_deferred x JOIN tgdl_work w ON w.id=x.work_id
+		WHERE x.released_at=0 AND w.status='pending' AND w.paused=1 AND w.retry_at<=?` + strings.ReplaceAll(acctClause, "account_id", "w.account_id") + `
+		AND w.id NOT IN (SELECT work_id FROM ix_held WHERE released_at=0 AND reason<>'')
+		ORDER BY x.band, w.file_size, w.id LIMIT ` + strconv.Itoa(need)
+	rows, err := a.db.Reader.QueryContext(ctx, q, args...)
+	if err != nil {
+		return err
+	}
+	var ids []any
+	for rows.Next() {
+		var id int64
+		if rows.Scan(&id) == nil {
+			ids = append(ids, id)
+		}
+	}
+	rows.Close()
+	if len(ids) == 0 {
+		return rows.Err()
+	}
+	in := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	tx, err := a.db.Writer.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `UPDATE tgdl_work SET paused=0 WHERE status='pending' AND paused=1 AND id IN (`+in+`)`, ids...); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE ix_deferred SET released_at=? WHERE released_at=0 AND work_id IN (`+in+`)`, append([]any{time.Now().UnixMilli()}, ids...)...); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ixEngineRun is the engine's run (engine.Controller.Running); replaceable
