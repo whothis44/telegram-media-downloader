@@ -501,3 +501,21 @@ func TestIxOrderLeavesLiveItemsOutOfAManualRun(t *testing.T) {
 		}
 	}
 }
+
+// The accounts that can download are those the engine runs; with the
+// engine stopped, those that downloaded lately.
+func TestIxWorkingAccountsAreTheEnginesWhenItRuns(t *testing.T) {
+	a, ctx := ix8App(t, nil)
+	done := ixTestWork(t, a, "lately", "-1001", 1, "photo", 1<<20, 0)
+	if _, err := a.db.Writer.Exec(`UPDATE tgdl_work SET status='completed', updated_at=? WHERE id=?`, time.Now().UnixMilli(), done); err != nil {
+		t.Fatal(err)
+	}
+	ixTestEngine(t, []string{"running"}, true, true)
+	if got := a.ixWorkingAccounts(ctx, time.Now()); len(got) != 1 || got[0] != "running" {
+		t.Fatalf("engine running: %v", got)
+	}
+	ixTestEngine(t, nil, false, false)
+	if got := a.ixWorkingAccounts(ctx, time.Now()); len(got) != 1 || got[0] != "lately" {
+		t.Fatalf("engine stopped: %v", got)
+	}
+}

@@ -351,9 +351,14 @@ var ixEngineRun = func(a *App) (accounts []string, observing, running bool) {
 	return a.monitor.Running()
 }
 
-// ixWorkingAccounts are the accounts that downloaded something in the last
-// day or are downloading now (none known: no limit).
+// ixWorkingAccounts are the accounts that can download now: those the
+// engine runs. With the engine stopped, a guess: the accounts that
+// downloaded something in the last day or are downloading now (none known:
+// no limit).
 func (a *App) ixWorkingAccounts(ctx context.Context, now time.Time) []string {
+	if ids, _, running := ixEngineRun(a); running && len(ids) > 0 {
+		return ids
+	}
 	var out []string
 	rows, err := a.db.Reader.QueryContext(ctx, `SELECT DISTINCT account_id FROM tgdl_work WHERE status='processing' OR (status='completed' AND updated_at>=?)`, now.Add(-24*time.Hour).UnixMilli())
 	if err != nil {
