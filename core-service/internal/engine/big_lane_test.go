@@ -125,11 +125,10 @@ func TestBigFileLaneHoldsUnderConcurrentClaims(t *testing.T) {
 	}
 }
 
-func TestClaimWithLaneKeepsItsIndex(t *testing.T) {
-	withLane(t, 2)
-	s := testStore(t)
-	where, args := claimFilter([]string{"one", "two"}, time.Now(), true)
-	rows, err := s.reader.Query(`EXPLAIN QUERY PLAN SELECT id FROM tgdl_work WHERE `+where+` ORDER BY `+claimPriority+`,id LIMIT 1`, args...)
+func claimPlan(t *testing.T, s *WorkStore, accounts []string) string {
+	t.Helper()
+	pick, args := claimSelect(accounts, time.Now(), true)
+	rows, err := s.reader.Query(`EXPLAIN QUERY PLAN `+pick, args...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,8 +141,81 @@ func TestClaimWithLaneKeepsItsIndex(t *testing.T) {
 		}
 		plan = append(plan, detail)
 	}
-	joined := strings.Join(plan, "; ")
-	if !strings.Contains(joined, "idx_tgdl_work_priority") || strings.Contains(joined, "TEMP B-TREE") || strings.Contains(joined, "SCAN tgdl_work") {
-		t.Fatalf("claim with the big-file lane no longer comes from its index: %s", joined)
+	return strings.Join(plan, "; ")
+}
+
+// The claim comes from its index in claim order, for one account as for
+// several: no sort of the pending rows, no scan of the table.
+func TestClaimWithLaneKeepsItsIndex(t *testing.T) {
+	s := testStore(t)
+	for i := 1; i <= 300; i++ {
+		addOldRow(t, s, i, int64(i%3)<<30, []string{"history", "url", "live"}[i%3], 0)
+	}
+	if _, err := s.writer.Exec(`ANALYZE`); err != nil { // the planner with statistics, as after PRAGMA optimize
+		t.Fatal(err)
+	}
+	for _, lane := range []int{2, 0} {
+		withLane(t, lane)
+		index := "idx_tgdl_work_claim"
+		if lane == 0 {
+			index = "idx_tgdl_work_priority"
+		}
+		for _, accounts := range [][]string{{"one"}, {"one", "two"}} {
+			plan := claimPlan(t, s, accounts)
+			if !strings.Contains(plan, index) || strings.Contains(plan, "TEMP B-TREE") || strings.Contains(plan, "SCAN tgdl_work") {
+				t.Fatalf("lane %d, %d account(s): the claim no longer comes from %s: %s", lane, len(accounts), index, plan)
+			}
+		}
+	}
+}
+
+// The index is on the very expression the claim uses.
+func TestClaimIndexMatchesTheLane(t *testing.T) {
+	s := testStore(t)
+	var def string
+	if err := s.reader.QueryRow(`SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_tgdl_work_claim'`).Scan(&def); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(def, bigRowSQL) || !strings.Contains(def, claimPriority) {
+		t.Fatalf("idx_tgdl_work_claim %q does not use %q and %q", def, bigRowSQL, claimPriority)
+	}
+}
+
+// A claim that finds nothing in a queue of big files waiting for the lane
+// does not walk the queue: idle workers poll it.
+func TestClaimFindingNothingIsCheap(t *testing.T) {
+	withLane(t, 2)
+	s := testStore(t)
+	tx, err := s.writer.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 50000; i++ {
+		if _, err := tx.Exec(`INSERT INTO tgdl_work(account_id,group_id,group_name,message_id,version,identity,media_type,file_name,file_size,body,status,origin,created_at,updated_at)
+			VALUES('one','-1001','G',?,1,?,'video','f.mp4',?,X'00',?,'history',1,1)`, i, "id"+strconv.Itoa(i), BigFileSize+int64(i), map[bool]string{true: "processing", false: "pending"}[i <= 4]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	for _, accounts := range [][]string{{"one"}, {"one", "two"}} {
+		start := time.Now()
+		for i := 0; i < 20; i++ {
+			w, err := s.Claim(context.Background(), accounts, time.Now(), true)
+			if err != nil || w != nil {
+				t.Fatalf("claimed %+v, %v", w, err)
+			}
+		}
+		// Walking the 50,000 rows took some 16 ms a claim; generous for -race.
+		if per := time.Since(start) / 20; per > 5*time.Millisecond {
+			t.Fatalf("%d account(s): a claim finding nothing took %v", len(accounts), per)
+		}
+	}
+	// A small file arriving is still found, before any waiting big file.
+	addOldRow(t, s, 60001, 1<<20, "history", 0)
+	w, err := s.Claim(context.Background(), []string{"one"}, time.Now(), true)
+	if err != nil || w == nil || w.FileSize != 1<<20 {
+		t.Fatalf("claimed %+v, %v", w, err)
 	}
 }

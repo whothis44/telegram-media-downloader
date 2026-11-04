@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -148,8 +149,8 @@ const claimPriority = `CASE WHEN ttl_seconds>0 THEN 0 WHEN origin='history' THEN
 //
 // It is part of Claim's one statement (the writer is a single connection),
 // so two workers cannot both take the last place, and it leaves the claim
-// order (idx_tgdl_work_priority) as it is: a big file over the limit is
-// only skipped.
+// order (claimPriority, then id) as it is: a big file over the limit is
+// only skipped. See claimSelect for how the statement finds its row.
 const BigFileSize int64 = 1 << 30
 
 // DefaultBigFileLane is how many big files download at once unless set.
@@ -167,31 +168,60 @@ func SetBigFileLane(n int) { bigFileLane.Store(int64(max(0, n))) }
 // (0: no limit).
 func BigFileLane() int { return int(bigFileLane.Load()) }
 
-// claimFilter is Claim's condition on pending rows (unqualified columns),
-// with its arguments in order.
-func claimFilter(accounts []string, now time.Time, manualOnly bool) (string, []any) {
+// bigRowSQL is true for a row of the big-file lane. It is spelled as in
+// idx_tgdl_work_claim (store/migrate.go), which SQLite only uses for the
+// very same expression; TestClaimIndexMatchesTheLane checks the two agree.
+var bigRowSQL = `(ttl_seconds=0 AND file_size>=` + strconv.FormatInt(BigFileSize, 10) + `)`
+
+// claimKeyBase orders a row by (claimPriority, id) as one number,
+// priority*claimKeyBase+id: ids stay far below it.
+const claimKeyBase int64 = 1 << 52
+
+// claimSelect is the SELECT giving the id Claim takes (NULL: none), with
+// its arguments in order.
+//
+// Without the lane it walks idx_tgdl_work_priority in claim order. With
+// the lane, the best row of each part of idx_tgdl_work_claim (pending rows
+// split into big and the others) is found from the index, the big part
+// only while the lane has room, and the better of the two is taken: the
+// same row as one walk of the whole queue in claim order would give, but a
+// queue full of big files waiting for the lane is not walked row by row
+// on every claim that finds nothing (some 20 ms at 50,000 rows, on the
+// only writer connection, for each idle worker's poll). The account is
+// written +account_id so that a single account does not pick the index
+// on accounts (idx_tgdl_work_pending) and sort every pending row.
+func claimSelect(accounts []string, now time.Time, manualOnly bool) (string, []any) {
 	marks := strings.TrimSuffix(strings.Repeat("?,", len(accounts)), ",")
-	args := make([]any, 0, 2*len(accounts)+8)
-	for _, id := range accounts {
-		args = append(args, id)
-	}
-	args = append(args, now.UnixMilli())
-	origin, sOrigin := "", ""
-	if manualOnly {
-		origin, sOrigin = " AND origin<>'live'", " AND s.origin<>'live'"
-	}
-	where := `status='pending' AND paused=0 AND (SELECT paused FROM tgdl_queue_state WHERE id=1)=0 AND +account_id IN (` + marks + `) AND retry_at<=?` + origin
-	if n := BigFileLane(); n > 0 {
-		where += ` AND (ttl_seconds>0 OR file_size<? OR (SELECT COUNT(*) FROM tgdl_work b WHERE b.status='processing' AND b.file_size>=? AND b.ttl_seconds=0)
-	 < CASE WHEN EXISTS (SELECT 1 FROM tgdl_work s WHERE s.status='pending' AND s.paused=0 AND s.account_id IN (` + marks + `) AND s.retry_at<=?` + sOrigin + `
-	 AND (s.file_size<? OR s.ttl_seconds>0)) THEN ? ELSE ? END)`
-		args = append(args, BigFileSize, BigFileSize)
+	base := func(args []any) (string, []any) {
 		for _, id := range accounts {
 			args = append(args, id)
 		}
-		args = append(args, now.UnixMilli(), BigFileSize, n, 2*n)
+		where := `status='pending' AND paused=0 AND +account_id IN (` + marks + `) AND retry_at<=?`
+		if manualOnly {
+			where += ` AND origin<>'live'`
+		}
+		return where, append(args, now.UnixMilli())
 	}
-	return where, args
+	const open = `(SELECT paused FROM tgdl_queue_state WHERE id=1)=0`
+	n := BigFileLane()
+	if n <= 0 {
+		where, args := base(nil)
+		return `SELECT id FROM tgdl_work WHERE ` + where + ` AND ` + open + ` ORDER BY ` + claimPriority + `,id LIMIT 1`, args
+	}
+	key := claimPriority + `*` + strconv.FormatInt(claimKeyBase, 10) + `+id`
+	order := ` ORDER BY ` + claimPriority + `,id LIMIT 1`
+	var args []any
+	small, args := base(args)
+	smallSQL := `SELECT ` + key + ` FROM tgdl_work WHERE ` + small + ` AND ` + bigRowSQL + `=0` + order
+	exists, args := base(args)
+	args = append(args, n, 2*n)
+	big, args := base(args)
+	// The lane's room is checked before the big part is looked at (a CASE,
+	// not a WHERE term, which SQLite would test on every row it walks).
+	bigSQL := `CASE WHEN (SELECT COUNT(*) FROM tgdl_work WHERE status='processing' AND ` + bigRowSQL + `)
+	 < CASE WHEN EXISTS (SELECT 1 FROM tgdl_work WHERE ` + exists + ` AND ` + bigRowSQL + `=0) THEN ? ELSE ? END
+	 THEN (SELECT ` + key + ` FROM tgdl_work WHERE ` + big + ` AND ` + bigRowSQL + `=1` + order + `) END`
+	return `SELECT MIN(k) % ` + strconv.FormatInt(claimKeyBase, 10) + ` FROM (SELECT (` + smallSQL + `) AS k UNION ALL SELECT ` + bigSQL + `) WHERE ` + open, args
 }
 
 // Claim changes pending -> processing in one SQLite statement. Only accounts
@@ -200,10 +230,10 @@ func (s *WorkStore) Claim(ctx context.Context, accounts []string, now time.Time,
 	if len(accounts) == 0 {
 		return nil, nil
 	}
-	where, filterArgs := claimFilter(accounts, now, len(manualOnly) > 0 && manualOnly[0])
-	args := append([]any{now.UnixMilli()}, filterArgs...)
+	pick, pickArgs := claimSelect(accounts, now, len(manualOnly) > 0 && manualOnly[0])
+	args := append([]any{now.UnixMilli()}, pickArgs...)
 	row := s.writer.QueryRowContext(ctx, `UPDATE tgdl_work SET status='processing',claim_generation=generation,attempts=attempts+1,updated_at=?
-	 WHERE id=(SELECT id FROM tgdl_work WHERE `+where+` ORDER BY `+claimPriority+`,id LIMIT 1)
+	 WHERE id=(`+pick+`)
  RETURNING id,account_id,group_id,group_name,message_id,generation,media_type,file_name,file_size,body,attempts,created_at,refresh_required,origin`, args...)
 	w := new(Work)
 	if err := row.Scan(&w.ID, &w.AccountID, &w.GroupID, &w.GroupName, &w.MessageID, &w.Generation, &w.MediaType, &w.FileName, &w.FileSize, &w.body, &w.Attempts, &w.CreatedAt, &w.ForceRefresh, &w.Origin); err != nil {
