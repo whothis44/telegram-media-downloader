@@ -192,7 +192,7 @@ func (a *App) drainFileCleanup(ctx context.Context) error {
 		}
 		return filepath.Join(rootPath, name)
 	}
-	for _, path := range owned {
+	for _, path := range append(owned, a.ixLowqKeptPaths(ctx, tx)...) {
 		if name, err := mediaName(path); err == nil {
 			keep[key(name)] = true
 		}

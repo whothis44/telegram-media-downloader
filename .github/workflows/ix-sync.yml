@@ -1,17 +1,21 @@
 name: Sync with the original project
 
-# Daily: merge botnick/telegram-media-downloader into this fork, run the
-# tests, and publish a release that ix-update.ps1 installs on next start.
-# On a merge conflict or a failing test nothing is published and this run
-# fails, so GitHub emails the owner.
+# On request: merge botnick/telegram-media-downloader into a branch of this fork,
+# run the tests, and open a pull request for a person to review. Nothing is
+# merged into main or published by this job: start.bat installs whatever is
+# released on this fork, so an unreviewed change of the original project
+# must never reach a running archive on its own. On a failing test the
+# pull request is not opened and this run fails, so GitHub emails the owner.
 
+# Off by default: it runs only when started by hand (Actions → Sync with the
+# original project → Run workflow). The daily schedule was removed while the
+# archive races the account's deletion date.
 on:
-  schedule:
-    - cron: '17 9 * * *'
   workflow_dispatch: {}
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   sync:
@@ -70,15 +74,18 @@ jobs:
         run: |
           go -C core-service vet ./...
           go -C core-service test ./...
-      - name: Push and publish the release
+      - name: Open a pull request for review
         if: steps.merge.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.merge.outputs.version }}
         run: |
           set -eu
-          git push origin HEAD:main
-          RELEASE_VERSION="$VERSION" TGDL_RELEASE_TARGETS="windows/amd64 windows/arm64 linux/amd64" ./scripts/build-server-release.sh
-          gh release create "v$VERSION" core-service/dist/tgdl-server-*.tar.gz core-service/dist/SHA256SUMS \
-            --title "v$VERSION" --target main \
-            --notes "Synced with the original project ($(git log -1 --format=%h upstream/main)). Archive features unchanged."
+          branch="sync/upstream-$(git log -1 --format=%h upstream/main)"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            echo "Already offered for review in $branch."
+            exit 0
+          fi
+          git push origin "HEAD:refs/heads/$branch"
+          gh pr create --base main --head "$branch" --title "Sync with the original project ($VERSION)" \
+            --body "The original project changed ($(git log -1 --format=%h upstream/main)). Merged into this branch, with the archive's tests passing. Where both sides changed the same lines, the original project's version was taken: review before merging. Nothing is released until a person publishes a release."

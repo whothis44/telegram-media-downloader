@@ -44,6 +44,7 @@ func registerIxBrowseRoutes(mux *http.ServeMux, a *App) {
 	mux.Handle("POST /api/ix/freeze/check", h(a.handleIxFreezeCheck))
 	mux.Handle("GET /api/ix/diagnostics", h(a.handleIxDiagnostics))
 	registerIxSetRoutes(mux, a)
+	registerIxAlbumRoutes(mux, a)
 	mux.Handle("GET /api/ix/browse/people", h(a.handleIxPeople))
 	mux.Handle("GET /api/ix/browse/person", h(a.handleIxPerson))
 	mux.Handle("POST /api/ix/browse/person/{id}", h(a.handleIxPersonChange))
@@ -81,8 +82,12 @@ type ixJItem struct {
 	Like     *ixJItem `json:"like,omitempty"`     // held: the saved copy it probably is
 	Role     string   `json:"role,omitempty"`     // in a media set: core, member, loose, elsewhere
 	Sim      float32  `json:"sim,omitempty"`      // likeness (image recognition), 0 when not compared
+	AtMs     int64    `json:"atMs,omitempty"`     // a video found by one of its frames: where (ms)
 	Fixed    bool     `json:"fixed,omitempty"`    // a person placed it
 	OtherSet int32    `json:"otherSet,omitempty"` // elsewhere: that set's ID + 1
+	// Not downloaded, but Telegram's preview is kept (Thumb).
+	PreviewOnly bool `json:"previewOnly,omitempty"`
+	Inferred    bool `json:"inferred,omitempty"` // a lone file placed in the album beside it
 }
 
 type ixJPost struct {
@@ -120,6 +125,8 @@ type ixJCard struct {
 	Deleted   bool           `json:"deleted,omitempty"`
 	Families  int            `json:"families,omitempty"` // a media set's families
 	Roles     map[string]int `json:"roles,omitempty"`
+	Why       []string       `json:"why,omitempty"`  // a search: where it matched (caption, text, speech, name, looks)
+	Weak      bool           `json:"weak,omitempty"` // a search: only a weak likeness, shown as nothing closer stands out
 }
 
 func ixPathURL(rel string) string {
@@ -132,7 +139,7 @@ func ixPathURL(rel string) string {
 
 func (m *ixModel) jitem(ii int32) ixJItem {
 	it := &m.Items[ii]
-	j := ixJItem{ID: it.ID, Key: it.Key, Type: it.Type, W: it.W, H: it.H, Dur: it.Dur, Size: it.Size, Status: it.Status, Group: it.Group, Msg: it.Msg, Name: it.Name}
+	j := ixJItem{ID: it.ID, Key: it.Key, Type: it.Type, W: it.W, H: it.H, Dur: it.Dur, Size: it.Size, Status: it.Status, Group: it.Group, Msg: it.Msg, Name: it.Name, Inferred: it.Placed}
 	switch {
 	case it.Thumb && it.Key != "":
 		j.Thumb = "/api/ix/thumb?key=" + url.QueryEscape(it.Key)
@@ -140,6 +147,9 @@ func (m *ixModel) jitem(ii int32) ixJItem {
 		j.Thumb = "/api/thumbs/" + strconv.FormatInt(it.ID, 10)
 	default:
 		j.Thumb = "/api/ix/preview?group=" + url.QueryEscape(it.Group) + "&msg=" + strconv.Itoa(it.Msg)
+		if u := ixCopyPreviewURL(it.Ident); u != "" && it.Key == "" {
+			j.Thumb, j.PreviewOnly = u, true // Telegram's 320 px preview, kept (ix_copies_ml.go)
+		}
 	}
 	if it.Path != "" {
 		j.Src = ixPathURL(it.Path)
@@ -302,18 +312,26 @@ type ixFeedQuery struct {
 	Dups       bool
 	Status     string
 	Collection int64
-	Person     int64
+	Person     []int64 // all of them in one post (person=1,7)
+	Unique     bool    // only posts with a file no other chat has
 	From, To   int64
 	Cursor     int
 	Limit      int
+	Match      string           // a search: words, looks or both
+	Rank       bool             // a search: best match first
+	people     []map[int32]bool // each person's duplicate sets (ixPeopleSets)
 }
 
 func ixParseFeed(r *http.Request) ixFeedQuery {
 	q := r.URL.Query()
 	f := ixFeedQuery{View: q.Get("view"), Group: q.Get("group"), Category: q.Get("category"), Type: q.Get("type"), Sort: q.Get("sort"), Q: strings.TrimSpace(q.Get("q")),
-		Dups: q.Get("dups") == "1", Status: q.Get("status")}
+		Dups: q.Get("dups") == "1", Status: q.Get("status"), Match: q.Get("match"), Rank: q.Get("rank") == "relevance", Unique: q.Get("unique") == "1"}
 	f.Collection, _ = strconv.ParseInt(q.Get("collection"), 10, 64)
-	f.Person, _ = strconv.ParseInt(q.Get("person"), 10, 64)
+	for _, v := range strings.Split(q.Get("person"), ",") {
+		if id, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil && id > 0 && len(f.Person) < 4 {
+			f.Person = append(f.Person, id)
+		}
+	}
 	f.From, _ = strconv.ParseInt(q.Get("from"), 10, 64)
 	f.To, _ = strconv.ParseInt(q.Get("to"), 10, 64)
 	f.Cursor, _ = strconv.Atoi(q.Get("cursor"))
@@ -325,48 +343,6 @@ func ixParseFeed(r *http.Request) ixFeedQuery {
 		f.View = "families"
 	}
 	return f
-}
-
-// ixSearchPosts finds the posts whose messages match a text search.
-func (a *App) ixSearchPosts(ctx context.Context, m *ixModel, q string) map[int32]bool {
-	out := map[int32]bool{}
-	var fts int
-	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE name='ix_fts'`).Scan(&fts)
-	var rowsErr error
-	collect := func(query string, args ...any) {
-		rows, err := a.db.Reader.QueryContext(ctx, query, args...)
-		if err != nil {
-			rowsErr = err
-			return
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var g string
-			var msg int
-			if rows.Scan(&g, &msg) == nil {
-				if pi, ok := m.ByMsg[g+":"+strconv.Itoa(msg)]; ok {
-					out[pi] = true
-				}
-			}
-		}
-	}
-	if fts > 0 {
-		collect(`SELECT m.group_id, m.message_id FROM ix_fts JOIN ix_messages m ON m.rowid=ix_fts.rowid WHERE ix_fts MATCH ? LIMIT 20000`, ixFTSQuery(q))
-	}
-	if fts == 0 || rowsErr != nil {
-		like := "%" + strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(q) + "%"
-		collect(`SELECT group_id, message_id FROM ix_messages WHERE text LIKE ? ESCAPE '\' LIMIT 20000`, like)
-	}
-	// Text read from pictures and speech written out.
-	a.ixSearchMediaText(ctx, m, q, out)
-	// File names too.
-	lower := strings.ToLower(q)
-	for i := range m.Items {
-		if m.Items[i].Name != "" && strings.Contains(strings.ToLower(m.Items[i].Name), lower) {
-			out[m.Items[i].Post] = true
-		}
-	}
-	return out
 }
 
 func (m *ixModel) postMatches(pi int32, f ixFeedQuery, hits map[int32]bool) bool {
@@ -383,49 +359,45 @@ func (m *ixModel) postMatches(pi int32, f ixFeedQuery, hits map[int32]bool) bool
 	if hits != nil && !hits[pi] {
 		return false
 	}
-	if f.Person > 0 {
-		keys := m.PersonKeys[f.Person]
-		found := false
-		for _, ii := range p.Items {
-			if c := m.Items[ii].Cluster; c >= 0 && int(c) < len(m.Clusters) && keys[m.Items[m.Clusters[c].Canon].Key] {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
-		}
+	if len(f.Person) > 0 && !m.postHasPeople(pi, f) {
+		return false
 	}
 	if f.Dups && (p.Family < 0 || len(m.Families[p.Family].Posts) < 2) {
 		return false
 	}
+	if f.Unique && !m.ixPostOnlyHere(pi) {
+		return false
+	}
+	if f.Type == "album" && len(p.Items) < 2 {
+		return false
+	}
+	if f.Type == "" || f.Type == "album" {
+		if f.Status == "" {
+			return true
+		}
+	}
+	// One file must be of the kind and in the state asked for.
+	for _, ii := range p.Items {
+		if ixItemMatches(&m.Items[ii], f) {
+			return true
+		}
+	}
+	return false
+}
+
+// ixItemMatches: a file of the kind (photo, video, other) and state asked for.
+func ixItemMatches(it *ixMItem, f ixFeedQuery) bool {
 	switch f.Type {
 	case "photo", "video":
-		for _, ii := range p.Items {
-			if m.Items[ii].Type == f.Type {
-				return true
-			}
+		if it.Type != f.Type {
+			return false
 		}
-		return false
-	case "album":
-		return len(p.Items) > 1
 	case "other":
-		for _, ii := range p.Items {
-			if t := m.Items[ii].Type; t != "photo" && t != "video" {
-				return true
-			}
+		if it.Type == "photo" || it.Type == "video" {
+			return false
 		}
-		return false
 	}
-	if f.Status != "" {
-		for _, ii := range p.Items {
-			if m.Items[ii].Status == f.Status {
-				return true
-			}
-		}
-		return false
-	}
-	return true
+	return f.Status == "" || it.Status == f.Status
 }
 
 func (a *App) handleIxBrowseFeed(w http.ResponseWriter, r *http.Request) {
@@ -436,9 +408,19 @@ func (a *App) handleIxBrowseFeed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f := ixParseFeed(r)
-	var hits map[int32]bool
+	var rank *ixRank
 	if f.Q != "" {
-		hits = a.ixSearchPosts(ctx, m, f.Q)
+		rank = a.ixHybridSearch(ctx, m, f) // words and looks, fused (ix_search_rank.go)
+	}
+	a.ixWriteFeed(ctx, w, m, f, rank)
+}
+
+// ixWriteFeed answers a page of the feed: the posts that match f (and the
+// search, when rank is set), in the view asked for.
+func (a *App) ixWriteFeed(ctx context.Context, w http.ResponseWriter, m *ixModel, f ixFeedQuery, rank *ixRank) {
+	var hits map[int32]bool
+	if rank != nil {
+		hits = rank.hits()
 	}
 	if f.Collection > 0 {
 		refs, err := a.ixCollectionRefs(ctx, f.Collection)
@@ -462,9 +444,20 @@ func (a *App) handleIxBrowseFeed(w http.ResponseWriter, r *http.Request) {
 		}
 		hits = in
 	}
-	var cards []ixJCard
-	total := 0
+	f.people = m.ixPeopleSets(f.Person)
+	cards, total, next := m.ixFeedPage(f, hits, rank)
+	out := map[string]any{"cards": cards, "total": total, "next": next, "built": m.Built.UnixMilli()}
+	if rank != nil {
+		out["search"] = rank.info
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// ixFeedPage lists the matching cards of a view, one page from f.Cursor:
+// by date, or best match first when rank says so.
+func (m *ixModel) ixFeedPage(f ixFeedQuery, hits map[int32]bool, rank *ixRank) (cards []ixJCard, total, next int) {
 	newest := f.Sort != "old"
+	byScore := rank.ordered()
 	page := func(n int, card func(int) ixJCard) {
 		total = n
 		for i := f.Cursor; i < n && len(cards) < f.Limit; i++ {
@@ -474,7 +467,28 @@ func (a *App) handleIxBrowseFeed(w http.ResponseWriter, r *http.Request) {
 	switch f.View {
 	case "sets":
 		list := m.ixSetFeed(f, hits)
-		page(len(list), func(i int) ixJCard { return m.setCard(list[i]) })
+		if byScore {
+			score := map[int32]float64{}
+			for _, si := range list {
+				for _, fi := range m.Sets[si].Families {
+					for _, pi := range m.Families[fi].Posts {
+						if s, ok := rank.post[pi]; ok && s > score[si] && m.postMatches(pi, f, hits) {
+							score[si] = s
+						}
+					}
+				}
+			}
+			sort.SliceStable(list, func(i, j int) bool { return score[list[i]] > score[list[j]] })
+		}
+		page(len(list), func(i int) ixJCard {
+			c := m.setCard(list[i])
+			var posts []int32
+			for _, fi := range m.Sets[list[i]].Families {
+				posts = append(posts, m.Families[fi].Posts...)
+			}
+			rank.decorate(m, &c, posts, nil)
+			return c
+		})
 	case "posts":
 		var list []int32
 		for pi := range m.Posts {
@@ -483,13 +497,22 @@ func (a *App) handleIxBrowseFeed(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		sort.SliceStable(list, func(i, j int) bool {
+			if byScore {
+				if x, y := rank.post[list[i]], rank.post[list[j]]; x != y {
+					return x > y
+				}
+			}
 			a, b := &m.Posts[list[i]], &m.Posts[list[j]]
 			if a.Date != b.Date {
 				return a.Date > b.Date == newest
 			}
 			return (list[i] > list[j]) == newest
 		})
-		page(len(list), func(i int) ixJCard { return m.postCard(list[i]) })
+		page(len(list), func(i int) ixJCard {
+			c := m.postCard(list[i])
+			rank.decorate(m, &c, list[i:i+1], nil)
+			return c
+		})
 	case "media":
 		// One tile per duplicate set (its best copy), placed where it first appeared.
 		type tile struct {
@@ -504,55 +527,85 @@ func (a *App) handleIxBrowseFeed(w http.ResponseWriter, r *http.Request) {
 			}
 			for _, ii := range m.Posts[pi].Items {
 				it := &m.Items[ii]
-				if f.Type == "photo" || f.Type == "video" {
-					if it.Type != f.Type {
-						continue
-					}
-				}
-				c := it.Cluster
-				if seen[c] {
+				if !ixItemMatches(it, f) {
 					continue
 				}
+				c := it.Cluster
+				if seen[c] || len(f.Person) > 0 && !m.setHasAnyone(c, f) {
+					continue
+				}
+				if rank != nil {
+					if _, ok := rank.cluster[c]; !ok {
+						continue // a search: only the files found
+					}
+				}
 				seen[c] = true
-				list = append(list, tile{m.Clusters[c].Canon, m.Posts[pi].Origin})
+				show := m.Clusters[c].Canon
+				if f.Status != "" {
+					show = ii // the copy in the state asked for, not the best one
+				}
+				list = append(list, tile{show, m.Posts[pi].Origin})
 			}
 		}
 		sort.SliceStable(list, func(i, j int) bool {
+			if byScore {
+				x, y := rank.cluster[m.Items[list[i].item].Cluster], rank.cluster[m.Items[list[j].item].Cluster]
+				if x != y {
+					return x > y
+				}
+			}
 			if list[i].date != list[j].date {
 				return list[i].date > list[j].date == newest
 			}
 			return (list[i].item > list[j].item) == newest
 		})
-		page(len(list), func(i int) ixJCard { return m.mediaCard(list[i].item) })
+		page(len(list), func(i int) ixJCard {
+			c := m.mediaCard(list[i].item)
+			rank.decorate(m, &c, nil, []int32{m.Items[list[i].item].Cluster})
+			return c
+		})
 	default:
 		// Originals only: one card per family that has a matching post.
 		seen := map[int32]bool{}
+		score := map[int32]float64{}
 		var list []int32
 		for pi := range m.Posts {
 			fam := m.Posts[pi].Family
-			if fam < 0 || seen[fam] || !m.postMatches(int32(pi), f, hits) {
+			if fam < 0 || seen[fam] && !byScore || !m.postMatches(int32(pi), f, hits) {
 				continue
 			}
-			seen[fam] = true
-			list = append(list, fam)
+			if byScore {
+				score[fam] = max(score[fam], rank.post[int32(pi)])
+			}
+			if !seen[fam] {
+				seen[fam] = true
+				list = append(list, fam)
+			}
 		}
 		sort.SliceStable(list, func(i, j int) bool {
+			if x, y := score[list[i]], score[list[j]]; x != y {
+				return x > y
+			}
 			a, b := &m.Families[list[i]], &m.Families[list[j]]
 			if a.First != b.First {
 				return a.First > b.First == newest
 			}
 			return (list[i] > list[j]) == newest
 		})
-		page(len(list), func(i int) ixJCard { return m.familyCard(list[i]) })
+		page(len(list), func(i int) ixJCard {
+			c := m.familyCard(list[i])
+			rank.decorate(m, &c, m.Families[list[i]].Posts, nil)
+			return c
+		})
 	}
-	next := f.Cursor + len(cards)
+	next = f.Cursor + len(cards)
 	if next >= total {
 		next = 0
 	}
 	if cards == nil {
 		cards = []ixJCard{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"cards": cards, "total": total, "next": next, "built": m.Built.UnixMilli()})
+	return cards, total, next
 }
 
 func errString(err error) string {
@@ -1090,7 +1143,7 @@ func (a *App) handleIxMovePlan(w http.ResponseWriter, r *http.Request) {
 	switch kind {
 	case "duplicate-copies":
 		ops, err = a.ixPlanDuplicateCopies(ctx)
-		title = "Move extra byte-identical copies to _trash"
+		title = "Move extra copies to _trash (byte-identical files, and near-identical videos: the best copy stays)"
 	case "collection", "originals":
 		m, merr := a.ixModelNow(ctx)
 		if m == nil {

@@ -52,6 +52,27 @@ type freezeSource interface {
 	FreezeState(context.Context) (telegram.FreezeState, error)
 }
 
+type sessionCheckSource interface {
+	SessionCheck(context.Context) error
+}
+
+var _ sessionCheckSource = (*telegram.Account)(nil)
+
+// SessionCheck makes a call only a logged-in session can make
+// (telegram.Account.SessionCheck): nil when the session works.
+func (s *MessageSession) SessionCheck() error {
+	if err := s.ctx.Err(); err != nil {
+		return err
+	}
+	source, ok := s.source.(sessionCheckSource)
+	if !ok {
+		return errors.New("account cannot check its session")
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
+	defer cancel()
+	return source.SessionCheck(ctx)
+}
+
 type byIDSource interface {
 	MessagesByID(context.Context, telegram.Dialog, []int) (telegram.ByIDPage, error)
 }

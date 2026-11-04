@@ -87,6 +87,8 @@ async function load() {
     state.status = r.data; state.error = '';
   } else state.error = 'Could not load: ' + errText(r);
   render();
+  // A start under way (from the button or when the archive started): follow it.
+  if (r.ok && r.data.mlStart && r.data.mlStart.running && !mlStartTimer) watchMLStart();
 }
 
 function groups() { return ((state.status && state.status.groups) || []).filter((g) => g.configured).sort((a, b) => natural(a.name, b.name)); }
@@ -99,6 +101,19 @@ function banner() {
   let h = '';
   const acct = s.account || {};
   const fz = s.freeze || {};
+  // Read-only archive (ix_gone.go): the other account banners no longer apply.
+  const ro = s.readonly || {};
+  if (ro.gone) {
+    return `<div class="status bad"><b>Telegram account gone: the archive is read-only now.</b> ${ro.reason === 'date' ? 'The deletion date has passed.' : `Telegram said ${esc(ro.code)}.`} The app has stopped all Telegram work (downloads, rescans, checks) and does not try the session again. Everything saved keeps working: the media browser, search, recognition, faces, the index copy and the nightly backups. See docs/archive-after-deletion.md. <button class="mini" data-act="readonly-clear">Try Telegram again</button></div>`;
+  }
+  // The day before the deletion date (ix_final.go).
+  const fin = (s.backup && s.backup.final) || {};
+  if (fin.window) {
+    const run = fin.run || {};
+    const errs = [run.exportError, run.backupError].filter(Boolean);
+    const ran = run.finishedAt ? `A last index copy and backup were made ${esc(fmtTime(run.finishedAt))}${errs.length ? ` <span class="bad">(not everything worked: ${esc(errs.join('; '))})</span>` : ''}.` : run.startedAt ? 'A last index copy and backup are being made now.' : 'A last index copy and backup will be made in the next few minutes.';
+    h += `<div class="status bad"><b>Telegram deletes this account in less than a day.</b> Keep the app running until then: it keeps saving messages and files for as long as Telegram lets it. ${ran} Also copy the app's data folder <code>${esc(s.backup.dataDir || '')}</code> somewhere safe: it holds the session, the secret key that opens it, and the database.</div>`;
+  }
   if (fz.until) {
     const days = Math.max(0, Math.floor((fz.until * 1000 - Date.now()) / 86400000));
     h += `<div class="status bad"><b>Telegram will delete this account on ${esc(new Date(fz.until * 1000).toLocaleString())} — ${days} day(s) left</b> unless an appeal is accepted${fz.appealUrl ? ` (<a href="${esc(fz.appealUrl)}" target="_blank" rel="noopener">appeal</a>)` : ''}. Rescans now take private chats before public ones. <b>Never log this account out of the app:</b> a frozen account cannot sign in again. <button class="mini" data-act="freeze-check">Check again</button></div>`;
@@ -107,10 +122,28 @@ function banner() {
   else if (acct.frozen) h += `<div class="status warn"><b>Telegram reports this account is frozen</b> (${esc(acct.lastError)}). Rescans keep going for as long as Telegram still lets the account read history${s.settings && s.settings.pauseOnFreeze ? ' — except that you chose to pause them on a freeze (Settings)' : ''}. Messages saved here stay saved even if the account is later deleted.</div>`;
   else if (acct.floodWait) h += `<div class="status"><b>Telegram asked the app to slow down</b> (${esc(acct.lastError)}, seen on a download in the last 6 hours). The app waits as asked; nothing to do. The Downloads card shows how often it happened in the last hour.</div>`;
   if (s.hold && (!acct.deactivated)) h += `<div class="status warn">${esc(s.hold)}</div>`;
+  // The local staging folder (ix_staging.go).
+  const g = s.staging || {};
+  if (g.full && g.fullSince && Date.now() - g.fullSince > 10 * 60000) h += `<div class="status bad"><b>Downloads are waiting for room in the local staging folder</b> (since ${esc(fmtTime(g.fullSince))}): ${fmtNum(g.waiting || 0)} file(s), ${fmtSize(g.bytes || 0)}, wait to be copied to the downloads folder${g.failing ? ', and copying them fails' : ''}. Check that the downloads folder (the NAS) can be reached; raising the staging space in Settings also lets downloads go on.</div>`;
+  if (g.stuck) h += `<div class="status warn"><b>${fmtNum(g.stuck)} file(s) in the local staging folder need you</b> (${fmtSize(g.stuckBytes || 0)}): they could not be copied to the downloads folder. Their local copies are kept and do not hold up downloads; the diagnostics report says why.</div>`;
   return h;
 }
 
 // ---------------- Overview ----------------
+// The nightly backup of the session and the database (ix_backup.go).
+function viewBackup() {
+  const b = state.status.backup; if (!b) return '';
+  const st = b.status || {};
+  let line;
+  if (st.running) line = '<span class="muted">Making a backup now…</span>';
+  else if (!st.finishedAt) line = '<span class="muted">No backup made yet.</span>';
+  else if (st.ok) line = `<span class="ok">OK</span> — last backup ${esc(fmtTime(st.finishedAt))}, ${fmtSize(st.bytes)} (database ${fmtSize(st.dbBytes)}, ${fmtNum(st.sessions)} session file(s)); ${fmtNum(st.kept)} nightly cop${st.kept === 1 ? 'y' : 'ies'} kept.${st.sessions ? '' : ' <span class="warn">No Telegram session file was found to copy.</span>'}`;
+  else line = `<span class="bad">Failed</span> ${esc(fmtTime(st.finishedAt))}: ${esc(st.error)}.${st.lastOkAt ? ` The last good backup is from ${esc(fmtTime(st.lastOkAt))} (${fmtSize(st.lastOkBytes)}).` : ' There is no good backup yet.'}`;
+  return `<div class="card"><h2>Backup of the session and database</h2><div>${line}</div>
+<div class="muted">${b.enabled ? `Made every night after the index copy, into <code>${esc(b.dir || '?')}</code>; the last ${fmtNum(b.keep)} nights are kept.` : 'The nightly backup is turned off (Settings).'} Each copy is checked (SQLite's integrity check on the database snapshot on this computer, then sizes and checksums of everything copied). The session files stay encrypted: restoring them also needs the app's secret key, <code>secret.key</code> in the data folder <code>${esc(b.dataDir || '?')}</code>, which is never copied there. Keep a copy of that folder somewhere safe too.</div>${b.dirError ? `<div class="bad">${esc(b.dirError)}</div>` : ''}
+<div class="btns"><button class="b" data-act="backup-now" ${st.running ? 'disabled' : ''}>Back up now</button></div></div>`;
+}
+
 function viewDeadline() {
   const d = state.status.deadline; if (!d) return '';
   const days = (sec) => (sec / 86400).toFixed(1);
@@ -123,7 +156,7 @@ function viewDeadline() {
   const deferred = (d.deferred || []).reduce((a, b) => a + b, 0);
   let h = `<div class="card"><h2>Before the deadline</h2>
 <div>${d.until ? `Telegram deletes this account in <b>${days(Math.max(0, left))} days</b>. ` : 'Telegram has not set a deletion date. '}<b>${fmtNum(d.toGetFiles || d.leftFiles)}</b> distinct file(s), <b>${fmtSize(d.toGetBytes || d.leftBytes)}</b>, still to download${d.copies ? ` (${fmtNum(d.copies)} more are copies of these or of saved files: they come free)` : ''}; ${fmtNum(d.leftFiles)} of them are in the download queue now${d.unscanned ? `, the rest come as the ${fmtNum(d.unscanned)} group(s) still waiting for their rescan are reached` : ''}. ${verdict}</div>
-<div class="muted">Speed: ${rate(d.rate24h)} over the last day, ${rate(d.rate1h)} over the last hour (files covered by a saved copy not counted).${d.active ? ` <b>Smaller files are going first</b>${deferred ? ` (${fmtNum(deferred)} larger file(s) set aside for now)` : ''}.` : d.mode === 'off' ? ' Order: normal (Settings).' : ''}</div>
+<div class="muted">Speed: ${rate(d.rate24h)} over the last day, ${rate(d.rate1h)} over the last hour (files covered by a saved copy not counted).${d.active ? ` <b>Private chats go first, smaller files before larger ones</b>${deferred ? ` (${fmtNum(deferred)} file(s) set aside for now: public chats' files and larger files)` : ''}. Public chats can still be read from another account after the deletion; private ones can't.` : d.mode === 'off' ? ' Order: normal (Settings).' : ''}</div>
 <div class="btns"><button class="b" data-act="dl-loss">${state.loss ? 'Refresh' : 'Show'} what would be lost today</button></div>`;
   const L = state.loss;
   if (L && L.error) h += `<div class="bad">${esc(L.error)}</div>`;
@@ -147,6 +180,7 @@ function viewOverview() {
 ${ex.running ? `<div class="muted">${esc(ex.progress || 'Working…')}</div>` : ''}
 ${ex.finishedAt && !ex.running ? `<div class="muted">Last written ${esc(fmtTime(ex.finishedAt))}${ex.error ? ` — <span class="bad">failed: ${esc(ex.error)}</span>` : ` (${fmtNum(ex.files)} files)`}.</div>` : ''}
 </div>`;
+  h += viewBackup();
   h += viewDeadline();
   h += viewDownloads();
   h += viewKeeping();
@@ -198,17 +232,52 @@ ${(() => {
   else if (d.engineRunning && (p.dcs || []).length) {
     x += `<div style="margin-top:6px">Speed: <b>${mbs(p.speed5m || 0)}</b> over the last 5 minutes (${mbs(p.speed || 0)} now). The app is allowed ${fmtNum(p.window)} file part(s) of 1 MB in flight at once and finds that number by measuring: more while it makes downloads faster, fewer as soon as Telegram asks it to wait${p.floods1h ? ` (it asked ${fmtNum(p.floods1h)} time(s) in the last hour)` : ''}.</div>`;
     if (p.premium24h) x += `<div class="muted">Telegram's speed limit for accounts without Premium: ${fmtNum(p.premium1h)} wait(s) in the last hour, ${fmtNum(p.premium24h)} in the last day. Telegram applies it after an account has downloaded tens of gigabytes; asking for fewer parts doesn't avoid it, so the app waits it out without slowing down further.</div>`;
-    x += `<div class="muted">${p.dcs.map((c) => `Telegram server ${c.dc}${c.account ? ' (' + esc(c.account) + ')' : ''}: ${c.window} at once, ${mbs(c.speed5m || 0)}, ${esc(c.state || '')}`).join(' · ')}</div>`;
+    x += `<div class="muted">${p.dcs.map((c) => `Telegram server ${c.dc}${c.account ? ' (' + esc(c.account) + ')' : ''}: ${c.window} at once, ${mbs(c.speed5m || 0)}${c.partSecs ? ', ' + c.partSecs.toFixed(1) + ' s a part' : ''}, ${esc(c.state || '')}`).join(' · ')}</div>`;
   }
   if ((d.days || []).length) x += `<div class="muted">Downloaded per day: ${d.days.map((y) => `${esc(y.day.slice(5))} <b>${fmtNum(y.files)}</b> files, ${fmtSize(y.bytes)}`).join(' · ')}</div>`;
   return x;
-})()}
+})()}${transferNotes()}
 <div class="muted">A failed file is first retried a few times by the download engine. ${state.status.settings.autoRetry ? `After that, it goes back in the queue every ${Math.round(d.retryAfterMin / 60)} hours, up to ${d.retryRounds} times (Settings).` : 'Automatic retries every few hours are <b>off</b> (Settings).'} A group's files pass also tries its failed files again.</div>`;
   if (d.errors && d.errors.length) {
     h += `<div class="list" style="margin-top:8px"><table><tr><th>Why files failed</th><th>Files</th></tr>${d.errors.map((e) => `<tr><td class="muted">${esc(e.error)}</td><td class="n">${fmtNum(e.count)}</td></tr>`).join('')}</table></div>`;
   }
+  h += viewCopies();
   h += `<div class="btns"><button class="b" data-act="dl-retry" ${d.failed && d.engineRunning ? '' : 'disabled'}>Retry all ${fmtNum(d.failed)} failed now</button>${state.dlMsg ? `<span class="muted">${esc(state.dlMsg)}</span>` : ''}</div></div>`;
   return h;
+}
+
+// Settings → Copies (ix_copies*.go).
+function viewCopySettings(s) {
+  const c = state.status.copies || {}, q = c.queue || {}, sm = c.sampled || {}, cal = c.calibration;
+  const n = (x) => fmtNum((x || {}).files || 0);
+  return `<div class="card"><h2>Copies</h2>
+<div class="muted">Held copies only wait: nothing is skipped for good, and every message is archived in full. Now: ${n(q.held)} held (${n(q.vsSaved)} copies of saved videos, ${n(q.vsQueued)} lesser copies of queued ones, ${n(q.recog)} by image recognition), ${n(q.confirmed)} confirmed. Big videos checked by sampling: ${fmtNum(sm.checked || 0)}, using ${fmtNum(sm.partsMb || 0)} MB instead of ${fmtSize(sm.sizeBytes || 0)}; ${fmtNum(sm.confirmed || 0)} confirmed copies.</div>
+<label><input type="checkbox" data-set="skipConfirmed" ${s.confirmedGoEarly ? '' : 'checked'}> Skip confirmed copies until everything else is done (recommended). A confirmed copy is a held video whose frames, sampled across the file without downloading it, match a saved video. “Download the held files now” (Overview) still fetches them.</label>
+<label><input type="checkbox" data-set="copyThumbs" ${s.copyThumbsOff ? '' : 'checked'}> Compare Telegram's small previews of queued videos and large pictures with saved files (needs image recognition; one small request per file, a few seconds apart). The previews are kept and shown in the browser for files not downloaded.</label>
+<div class="muted">Likeness that makes a probable copy: ${((c.threshold || 0.95) * 100).toFixed(1)}%${cal ? ` (calibrated on ${fmtNum(cal.pictures)} of your pictures: a picture and its 320 px preview ${(cal.sameMin * 100).toFixed(1)}% or more alike, different pictures at most ${(cal.diffMax * 100).toFixed(1)}%)` : ' (not calibrated)'}.</div>
+<div class="btns"><button class="b primary" data-act="set-save">Save settings</button><button class="b" data-act="copy-calib" ${state.status.ml && state.status.ml.enabled ? '' : 'disabled'}>Calibrate on my pictures</button>${state.copyMsg ? `<span class="muted">${esc(state.copyMsg)}</span>` : ''}</div></div>`;
+}
+
+// Copies among what is left to download (ix_copies.go).
+function viewCopies() {
+  const c = state.status.copies;
+  if (!c || !c.queue) return '';
+  const q = c.queue, k = c.known || {};
+  const n = (x) => `<b>${fmtNum((x || {}).files || 0)}</b> (${fmtSize((x || {}).bytes || 0)})`;
+  let x = `<div style="margin-top:6px"><b>Copies in the queue:</b> of ${n(q.all)} queued, ${n(q.same)} are the same Telegram file as one saved or queued before (never downloaded twice) and ${n(q.held)} are probable copies held at the back: ${fmtNum((q.vsSaved || {}).files || 0)} of saved videos, ${fmtNum((q.vsQueued || {}).files || 0)} lesser copies of queued ones, ${fmtNum((q.recog || {}).files || 0)} found by image recognition; ${n(q.confirmed)} confirmed by their first frames.</div>`;
+  if (k.measured) x += `<div class="muted">Everything seen in messages and not downloaded: ${n(k.missing)}; ${n(k.same)} are the same Telegram file as another, ${n(k.held)} are held, and ${n(k.likely)} more videos look like copies (they will be held when queued).${c.previews ? ` ${fmtNum(c.previews)} Telegram preview(s) kept for files not downloaded.` : ''}</div>`;
+  return x;
+}
+
+// Big videos saved in a lower quality first, and the local staging folder.
+function transferNotes() {
+  const q = state.status.lowq || {}; const g = state.status.staging || {};
+  let x = '';
+  if (q.saved) x += `<div class="muted">${fmtNum(q.saved)} big video(s) saved in a lower quality first (${fmtSize(q.savedBytes)} instead of ${fmtSize(q.origBytes)}); ${fmtNum(q.upgraded)} upgraded to the original${q.extraBytes ? ` (their lower qualities cost ${fmtSize(q.extraBytes)} extra)` : ''}${q.waiting ? `, ${fmtNum(q.waiting)} original(s) still to come after everything else` : ''}.</div>`;
+  if (g.on || g.waiting) {
+    x += `<div class="muted">Local staging folder: ${fmtNum(g.waiting || 0)} file(s), ${fmtSize(g.bytes || 0)}, waiting to be copied to the downloads folder${g.failing ? ` · <span class="warn">${fmtNum(g.failing)} copy attempt(s) failing; they are retried and the local files are kept</span>` : ''}${g.stuck ? ` · <span class="bad">${fmtNum(g.stuck)} need you: their local files are kept (see the diagnostics report)</span>` : ''}.</div>`;
+  }
+  return x;
 }
 
 // ---------------- Rescan ----------------
@@ -381,6 +450,39 @@ function viewSearch() {
 }
 
 // ---------------- Settings ----------------
+// Starting the recognition services (Docker): the latest progress seen.
+const mlStartNow = () => state.mlStart || (state.status && state.status.mlStart) || {};
+function mlStartHtml() {
+  const st = mlStartNow();
+  if (!st.startedAt) return '';
+  const word = { running: 'running', started: 'started', missing: 'not installed', error: 'could not start' };
+  let h = st.running ? `<div>${esc(st.step || 'Starting…')}</div>`
+    : st.error ? `<div class="bad">${esc(st.error)}</div>`
+      : `<div class="muted">Last start: ${esc(fmtTime(st.finishedAt))}${st.auto ? ' (when the archive started)' : ''}</div>`;
+  for (const c of st.containers || []) {
+    const good = c.state === 'running' || c.state === 'started';
+    h += `<div>${esc(c.service)} (${esc(c.name)}): <span class="${good ? 'ok' : 'bad'}">${esc(word[c.state] || c.state)}</span>${c.message ? ' · ' + esc(c.message) : ''}</div>`;
+  }
+  return h;
+}
+let mlStartTimer = 0;
+// While a start is under way, only its lines are redrawn (not the settings
+// being edited); the whole page reloads once it is done.
+function watchMLStart() {
+  clearTimeout(mlStartTimer);
+  mlStartTimer = setTimeout(async () => {
+    const r = await api('GET', '/api/ix/ml/start');
+    if (r.ok && r.data) state.mlStart = r.data;
+    const st = mlStartNow();
+    const box = document.getElementById('ml-start');
+    if (box) box.innerHTML = mlStartHtml();
+    const btn = $app.querySelector('[data-act="ml-start"]');
+    if (btn) { btn.disabled = !!st.running; btn.textContent = st.running ? 'Starting…' : 'Start the recognition services'; }
+    if (r.ok && st.running) { watchMLStart(); return; }
+    if (!r.ok) state.mlMsg = 'Could not follow the start: ' + errText(r);
+    mlStartTimer = 0; state.mlStart = null; load();
+  }, 1500);
+}
 function viewSettings() {
   const s = state.status.settings;
   return `<div class="card"><h2>Diagnostics report</h2>
@@ -391,11 +493,20 @@ ${state.diag ? `<textarea id="diag" readonly style="width:100%;min-height:260px;
 <label><input type="checkbox" data-set="exportEnabled" ${s.exportEnabled ? 'checked' : ''}> Write a copy of the index every night</label>
 <div class="btns">At <input class="t" data-set-text="exportTime" value="${esc(s.exportTime)}" style="width:80px"> (24-hour, this computer's time)</div>
 <div class="btns">Folder: <input class="t" data-set-text="exportDir" value="${esc(s.exportDir)}" placeholder="${esc(state.status.exportDir || '')}" style="flex:1;min-width:240px"></div>
-<div class="muted">Leave the folder empty to use a folder next to your downloads folder. It can't be inside the downloads folder.</div></div>
+<div class="muted">Leave the folder empty to use a folder next to your downloads folder. It can't be inside the downloads folder.</div>
+<label><input type="checkbox" data-set="backupEnabled" ${s.backupOff ? '' : 'checked'}> Also back up the Telegram session and the database every night, into a folder next to the index copy${state.status.backup && state.status.backup.dir ? ` (<code>${esc(state.status.backup.dir)}</code>)` : ''}. The last 7 nights are kept.</label>
+<div class="muted">The session files are copied as they are, still encrypted. The key that opens them (<code>secret.key</code> in the app's data folder) is never copied there, so restoring also needs the app's secret key from its data folder: keep a copy of that folder somewhere safe. Saved with the Save settings button below.</div></div>
+<div class="card"><h2>Big videos and the NAS</h2>
+<label><input type="checkbox" data-set="lowqFirst" ${s.lowqFirst ? 'checked' : ''}> Save a lower quality of very large videos first when time is short: when a deletion date is set and a video of 200 MB or more would not be reached in time, a smaller copy Telegram keeps of it (at least 480p, at most 40% of the size) is saved first; the original follows after everything else and then replaces it. Not done for likely copies.</label>
+<label style="margin-left:22px"><input type="checkbox" data-set="lowqKeep" ${s.lowqKeep ? 'checked' : ''}> …and keep the lower quality after the original arrives</label>
+<div class="btns">Download first to this folder on this computer: <input class="t" data-set-text="stageDir" value="${esc(s.stageDir || '')}" placeholder="empty = off; for example ${esc((state.status.staging || {}).suggest || '')}" style="flex:1;min-width:240px"></div>
+<div class="btns">Space it may use: <input class="t" data-set-text="stageCapGb" value="${esc(String(s.stageCapGb || 20))}" style="width:70px"> GB</div>
+<div class="muted">Downloads are written to this local folder, checked, then copied to the downloads folder (your NAS) and checked again before the local copy is removed, so a network hiccup on the share doesn't fail a download. A copy that fails is retried for as long as it takes; nothing on the NAS is ever replaced. The folder must exist and must not be inside the downloads folder. When it is full, new downloads wait for copies to finish.</div>
+<div class="btns"><button class="b primary" data-act="set-save">Save settings</button></div></div>
 <div class="card"><h2>Account safety</h2>
 <label>Pace of rescans: <select class="t" data-set-select="pace"><option value="normal" ${s.pace === 'normal' ? 'selected' : ''}>Normal</option><option value="gentle" ${s.pace === 'gentle' ? 'selected' : ''}>Gentle (pauses more often, smaller download batches)</option></select></label>
 <div class="btns">Quiet hours (no new group starts): <input class="t" data-set-text="quietStart" value="${esc(s.quietStart)}" placeholder="22:00" style="width:80px"> to <input class="t" data-set-text="quietEnd" value="${esc(s.quietEnd)}" placeholder="07:00" style="width:80px"> <span class="muted">empty = none</span></div>
-<label>When Telegram has set a deletion date: <select class="t" data-set-select="deadlineOrder">${[['auto', 'smaller files first, only if the backup would not finish in time (recommended)'], ['on', 'smaller files first, always'], ['off', 'keep the normal order']].map(([v, l]) => `<option value="${v}" ${(s.deadlineOrder || 'auto') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+<label>When Telegram has set a deletion date: <select class="t" data-set-select="deadlineOrder">${[['auto', 'private chats first, then smaller files, only if the backup would not finish in time (recommended)'], ['on', 'private chats first, then smaller files, always'], ['off', 'keep the normal order']].map(([v, l]) => `<option value="${v}" ${(s.deadlineOrder || 'auto') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
 <label><input type="checkbox" data-set="downloadPacing" ${s.downloadPacing ? 'checked' : ''}> Pace downloads by measuring (recommended): the app finds how many file parts to ask Telegram for at once, backing off when Telegram asks it to wait. Untick to download as ix.8 did.</label>
 <label><input type="checkbox" data-set="pauseOnFreeze" ${s.pauseOnFreeze ? 'checked' : ''}> Pause rescans when Telegram reports the account frozen</label>
 <label><input type="checkbox" data-set="autoRetry" ${s.autoRetry ? 'checked' : ''}> Retry failed downloads automatically every few hours (up to 5 times per file)</label>
@@ -406,6 +517,7 @@ ${state.diag ? `<textarea id="diag" readonly style="width:100%;min-height:260px;
 <div class="muted">A frozen account can still read history. Leave this off to keep capturing messages while you can.</div>
 <div class="btns"><button class="b primary" data-act="set-save">Save settings</button></div>
 ${state.setMsg ? `<div class="muted">${esc(state.setMsg)}</div>` : ''}</div>
+${viewCopySettings(s)}
 <div class="card"><h2>Image recognition (optional)</h2>
 <div class="muted">Lets the archive browser find pictures and videos by what they show (“bikes in the snow”, in any language), show “more like this”, set apart files in a set that don't look like the rest, list what pictures show (Things), and, if you turn them on, read the text in pictures and group faces into people. It uses the machine-learning part of Immich (a self-hosted photo app), running in Docker on this PC; nothing is sent anywhere else, and only addresses on this computer or your local network are accepted. Each distinct picture is looked at once, in the background. Instructions: docs/image-recognition.md.</div>
 <div class="btns">Address: <input class="t" data-set-text="mlUrl" value="${esc(s.mlUrl || '')}" placeholder="http://127.0.0.1:3003 (empty = off)" style="flex:1;min-width:240px"></div>
@@ -423,10 +535,13 @@ ${(() => {
   const line = (label, x) => x && x.on ? `<div>${label}: ${fmtNum(x.done || 0)} done, ${fmtNum(x.pending || 0)} to go${x.failed ? ', ' + fmtNum(x.failed) + ' unreadable' : ''}${x.lastError ? ` · <span class="bad">${esc(x.lastError)}</span>` : ''}</div>` : '';
   return `<div>${m.reachable ? '<span class="ok">Connected.</span>' : `<span class="bad">${esc(m.lastError || 'Not checked yet.')}</span>`} What pictures show: ${fmtNum(m.embedded || 0)} looked at, ${fmtNum(m.pending || 0)} to go${m.failed ? ', ' + fmtNum(m.failed) + ' unreadable' : ''}${m.running ? ' · working' : ''}.</div>${line('Text in pictures', t.text)}${line('Faces', t.faces)}`;
 })()}
-<div class="btns"><button class="b primary" data-act="set-save">Save settings</button><button class="b" data-act="ml-check">Check the connection</button></div>
+<div class="btns">Docker containers: image recognition <input class="t" data-set-text="mlContainer" value="${esc(s.mlContainer || 'immich-ml')}" placeholder="immich-ml" style="width:140px"> speech to text <input class="t" data-set-text="sttContainer" value="${esc(s.sttContainer || 'speaches')}" placeholder="speaches" style="width:140px"></div>
+<label><input type="checkbox" data-set="mlAutoStart" ${s.mlAutoStart ? 'checked' : ''}> Start them when the archive starts (Docker Desktop first, if it isn't running), and again every 30 minutes while they don't answer.</label>
+<div class="btns"><button class="b primary" data-act="set-save">Save settings</button><button class="b" data-act="ml-check">Check the connection</button>${(() => { const busy = mlStartNow().running; return `<button class="b" data-act="ml-start" ${busy ? 'disabled' : ''}>${busy ? 'Starting…' : 'Start the recognition services'}</button>`; })()}</div>
+<div id="ml-start">${mlStartHtml()}</div>
 ${state.mlMsg ? `<div class="muted">${esc(state.mlMsg)}</div>` : ''}</div>
 <div class="card"><h2>Speech to text (optional)</h2>
-<div class="muted">Writes out what is said in voice notes, audio and videos, so the search finds it and the browser shows it next to the file. It uses a Whisper server (speaches) in a second Docker container on this PC; nothing is sent anywhere else. Many languages are recognised on their own. Only the first 90 minutes of a recording are written out. Instructions: docs/image-recognition.md.</div>
+<div class="muted">Writes out what is said in voice notes, audio and videos, so the search finds it and the browser shows it next to the file. It uses a Whisper server (speaches) in a second Docker container on this PC; nothing is sent anywhere else. Many languages are recognised on their own. Only the first 90 minutes of a recording are written out. Instructions: docs/image-recognition.md. “Start the recognition services”, under Image recognition, starts this container too.</div>
 <div class="btns">Address: <input class="t" data-set-text="sttUrl" value="${esc(s.sttUrl || '')}" placeholder="http://127.0.0.1:8000 (empty = off)" style="flex:1;min-width:240px"></div>
 <div class="btns">Model: <input class="t" data-set-text="sttModel" value="${esc(s.sttModel || '')}" placeholder="Systran/faster-whisper-large-v3" style="flex:1;min-width:240px"></div>
 ${(() => { const x = (state.status.ml || {}).speech || {}; if (!x.on) return ''; return `<div>${x.reachable ? '<span class="ok">Connected.</span>' : `<span class="bad">${esc(x.lastError || 'Not checked yet.')}</span>`} ${fmtNum(x.done || 0)} written out, ${fmtNum(x.pending || 0)} to go${x.failed ? ', ' + fmtNum(x.failed) + ' unreadable' : ''}.</div>`; })()}
@@ -530,6 +645,7 @@ $app.addEventListener('click', async (ev) => {
     case 'diag': { const r = await fetch('/api/ix/diagnostics', { credentials: 'same-origin' }); state.diag = r.ok ? await r.text() : ''; state.diagMsg = r.ok ? '' : 'Could not make the report: HTTP ' + r.status; render(); break; }
     case 'diag-copy': { try { await navigator.clipboard.writeText(state.diag); state.diagMsg = 'Copied.'; } catch { const t = document.getElementById('diag'); if (t) { t.select(); document.execCommand('copy'); } state.diagMsg = 'Copied.'; } render(); break; }
     case 'freeze-check': { const r = await api('POST', '/api/ix/freeze/check'); if (!r.ok) state.error = 'Could not read the freeze state: ' + errText(r); load(); break; }
+    case 'copy-calib': { state.copyMsg = 'Calibrating…'; render(); const r = await api('POST', '/api/ix/copies/calibrate'); state.copyMsg = r.ok ? 'Calibrated.' : errText(r); load(); break; }
     case 'held-release': { const r = await api('POST', '/api/ix/held/release'); state.keepMsg = r.ok ? 'The held files are back in the download queue.' : errText(r); load(); break; }
     case 'subst-fetch': {
       if (!confirm('Download the real files of every re-upload that was matched to a saved file? Their groups get a files pass.')) break;
@@ -543,6 +659,11 @@ $app.addEventListener('click', async (ev) => {
       state.dlMsg = r.ok ? `${fmtNum(r.data.retried)} file(s) put back in the queue.` : 'Could not retry: ' + errText(r);
       load(); break;
     }
+    case 'readonly-clear': {
+      if (!confirm('Leave read-only mode and let the app connect to Telegram again? This only helps if the account still works (for example after an accepted appeal). If Telegram still refuses, the archive goes back to read-only.')) break;
+      const r = await api('POST', '/api/ix/readonly/clear'); if (!r.ok) state.error = errText(r); load(); break;
+    }
+    case 'backup-now': { const r = await api('POST', '/api/ix/backup'); if (!r.ok) state.error = errText(r); load(); break; }
     case 'export': { const r = await api('POST', '/api/ix/export'); if (!r.ok) state.error = errText(r); load(); break; }
     case 'q-start': case 'q-pause': case 'q-clear-finished': case 'q-clear': {
       if (act === 'q-clear' && !confirm('Remove every group from the queue? A group being rescanned now is kept.')) break;
@@ -605,6 +726,12 @@ $app.addEventListener('click', async (ev) => {
       const r = await api('POST', '/api/ix/ml/check');
       state.mlMsg = r.ok ? 'Image recognition works.' : 'Image recognition: ' + errText(r);
       load(); break;
+    }
+    case 'ml-start': {
+      state.mlMsg = '';
+      const r = await api('POST', '/api/ix/ml/start');
+      if (!r.ok) { state.mlMsg = 'Could not start the services: ' + errText(r); render(); break; }
+      state.mlStart = r.data.status; render(); watchMLStart(); break;
     }
     case 'stt-check': {
       state.sttMsg = 'Checking (the first time, the service downloads its model, about 3 GB: this can take a while)…'; render();

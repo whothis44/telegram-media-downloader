@@ -37,6 +37,12 @@ import (
 //     smaller one is kept if it loses less than half of what it could. After
 //     a bigger window brought nothing, the next try is a smaller one, so a
 //     lucky measurement is taken back later rather than built on;
+//   - when Telegram answers parts slowly (more than 8 s a part on average),
+//     the window keeps only as many parts as it answers within 8 s at that
+//     speed: Telegram may slow an account down instead of asking it to
+//     wait, and more parts then only wait longer, until they time out;
+//   - a FLOOD_PREMIUM_WAIT (Telegram's speed limit for accounts without
+//     Premium) is waited out without changing the window;
 //   - when nobody waits for room, the window stays as it is.
 //
 // The window learned for each datacenter is kept next to the session, so a
@@ -61,6 +67,8 @@ const (
 	paceBase       = 2                // intervals measured at a window before trying another
 	paceHistoryLen = 30               // intervals kept for the 5-minute speed
 	paceFullRecent = 2 * time.Minute  // windows full this recently say how many files are enough
+	paceSlow       = 8 * time.Second  // parts answered slower than this on average: fewer in flight
+	paceSlowMin    = 2                // the fewest a slow answer cuts to
 )
 
 var pacingOff atomic.Bool
@@ -79,11 +87,14 @@ type dcPace struct {
 	wake     chan struct{}
 
 	// This interval.
-	bytes   int64
-	parts   int
-	floods  int
-	premium int // FLOOD_PREMIUM_WAITs
-	waited  bool
+	bytes    int64
+	parts    int
+	floods   int
+	premium  int // FLOOD_PREMIUM_WAITs
+	waited   bool
+	took     time.Duration // answered parts' time, summed
+	answers  int
+	lastTook time.Duration // average of the last interval with answers
 
 	// Learning.
 	steady       []float64 // speeds of the last full intervals at this window
@@ -119,10 +130,12 @@ type downloadPacer struct {
 	now       func() time.Time
 	saved     map[int]int
 	running   atomic.Bool
+	hours     []PaceHour // the last 48 hours (pacer_hours.go)
 }
 
 func newDownloadPacer(path string) *downloadPacer {
 	p := &downloadPacer{dcs: map[int]*dcPace{}, path: path, now: time.Now, saved: map[int]int{}}
+	p.loadHours()
 	if path != "" {
 		if data, err := os.ReadFile(path); err == nil {
 			var kept map[string]int
@@ -198,6 +211,15 @@ func (p *downloadPacer) release(dc int, n int) {
 	d.broadcast()
 }
 
+// answered records how long Telegram took to answer a part of dc.
+func (p *downloadPacer) answered(dc int, took time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	d := p.dcLocked(dc)
+	d.took += took
+	d.answers++
+}
+
 // flood records a wait Telegram answered a part of dc with. A
 // FLOOD_PREMIUM_WAIT (premium) is its speed limit for accounts without
 // Premium after tens of gigabytes: fewer parts in flight would not avoid it
@@ -208,6 +230,7 @@ func (p *downloadPacer) flood(dc int, premium bool) {
 	defer p.mu.Unlock()
 	now := p.now()
 	d := p.dcLocked(dc)
+	p.hourWaitLocked(now, premium)
 	if premium {
 		d.premium++
 		d.premiumAt = append(d.premiumAt, now)
@@ -248,11 +271,15 @@ func (p *downloadPacer) tick() {
 	}
 	p.last = now
 	changed := false
+	p.recordHourLocked(now, secs)
 	for _, d := range p.dcs {
 		d.speed = float64(d.bytes) / secs
 		d.history = lastOf(append(d.history, d.speed), paceHistoryLen)
 		if d.waited {
 			d.fullAt = now
+		}
+		if d.answers > 0 {
+			d.lastTook = d.took / time.Duration(d.answers)
 		}
 		before := d.window
 		switch {
@@ -264,6 +291,20 @@ func (p *downloadPacer) tick() {
 			d.state = "slowed: Telegram asked to wait"
 		case d.floods > 0:
 			// Answers to parts asked for before the last cut.
+		case d.answers > 0 && d.took/time.Duration(d.answers) > paceSlow && d.window > paceSlowMin && now.Sub(d.lastCut) >= paceFloodHold:
+			// Telegram answers slowly (it may slow an account down rather
+			// than ask it to wait). Parts in flight are speed × time per
+			// part, so keep only as many as are answered within paceSlow at
+			// this speed: no slower, and nothing left waiting long enough to
+			// time out.
+			lat := d.took / time.Duration(d.answers)
+			if d.trial != 0 {
+				d.window, d.trial = d.trialFrom, 0
+			}
+			d.window = max(paceSlowMin, int(float64(d.window)*paceSlow.Seconds()/lat.Seconds()))
+			d.growFast, d.nextDown, d.steady = false, false, nil
+			d.holdUntil, d.lastCut = now.Add(paceFloodHold), now
+			d.state = "slowed: Telegram answers slowly"
 		case d.premium > 0:
 			// Telegram's speed limit for free accounts: keep the window,
 			// take back a try (its speed says nothing now) and try nothing
@@ -331,6 +372,7 @@ func (p *downloadPacer) tick() {
 			d.broadcast()
 		}
 		d.bytes, d.parts, d.floods, d.premium, d.waited = 0, 0, 0, 0, false
+		d.took, d.answers = 0, 0
 		d.floodAt = trimTimes(d.floodAt, now.Add(-time.Hour))
 		d.premiumAt = trimTimes(d.premiumAt, now.Add(-time.Hour))
 	}
@@ -432,6 +474,7 @@ type DCPace struct {
 	Speed5m   float64 `json:"speed5m"`  // bytes a second, last 5 minutes
 	Floods1h  int     `json:"floods1h"`
 	Premium1h int     `json:"premium1h"` // FLOOD_PREMIUM_WAITs in the last hour
+	PartSecs  float64 `json:"partSecs"`  // seconds Telegram took per part, last interval
 	State     string  `json:"state"`
 }
 
@@ -444,10 +487,11 @@ type PaceStats struct {
 	Floods1h  int     `json:"floods1h"`
 	Floods24h int     `json:"floods24h"`
 	// Premium waits: Telegram's speed limit for accounts without Premium.
-	Premium1h  int      `json:"premium1h"`
-	Premium24h int      `json:"premium24h"`
-	FloodsHour [24]int  `json:"floodsByHour"` // [0] is the current hour
-	DCs        []DCPace `json:"dcs"`
+	Premium1h  int        `json:"premium1h"`
+	Premium24h int        `json:"premium24h"`
+	FloodsHour [24]int    `json:"floodsByHour"` // [0] is the current hour
+	Hours      []PaceHour `json:"hours"`        // the last 48 hours, newest first
+	DCs        []DCPace   `json:"dcs"`
 }
 
 func (p *downloadPacer) stats() PaceStats {
@@ -466,7 +510,7 @@ func (p *downloadPacer) stats() PaceStats {
 		if len(d.history) > 0 {
 			avg /= float64(len(d.history))
 		}
-		x := DCPace{DC: d.dc, Window: d.window, InFlight: d.inflight, Waiting: d.waiting, Speed: d.speed, Speed5m: avg, Floods1h: len(trimTimes(d.floodAt, now.Add(-time.Hour))), Premium1h: len(trimTimes(d.premiumAt, now.Add(-time.Hour))), State: d.state}
+		x := DCPace{PartSecs: d.lastTook.Seconds(), DC: d.dc, Window: d.window, InFlight: d.inflight, Waiting: d.waiting, Speed: d.speed, Speed5m: avg, Floods1h: len(trimTimes(d.floodAt, now.Add(-time.Hour))), Premium1h: len(trimTimes(d.premiumAt, now.Add(-time.Hour))), State: d.state}
 		s.DCs = append(s.DCs, x)
 		s.Speed += x.Speed
 		s.Speed5m += x.Speed5m

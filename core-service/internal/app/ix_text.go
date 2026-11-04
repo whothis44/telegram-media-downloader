@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/botnick/telegram-media-downloader/core-service/internal/procutil"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/seekbar"
 )
 
@@ -109,6 +110,7 @@ func (a *App) ixOCRTask(ctx context.Context, c *ixMLClient) *ixMLTask {
 				ON CONFLICT(key) DO UPDATE SET model=excluded.model, text=excluded.text, at=excluded.at`, it.Key, model, text, ixNowMs()); err != nil {
 				return err
 			}
+			a.ixIndexMediaText(ctx, "ix_ocr", it.Key, text)
 			_, _ = a.db.Writer.ExecContext(ctx, `DELETE FROM ix_ml_err WHERE task='text' AND key=?`, it.Key)
 			a.ixMLMarkDone("text", it.Key)
 			return nil
@@ -230,7 +232,7 @@ func (c *ixSTTClient) transcribe(ctx context.Context, audio []byte, seconds ...f
 		}
 		pw.CloseWithError(err)
 	}()
-	req, err := http.NewRequestWithContext(rctx, http.MethodPost, c.base+"/v1/audio/transcriptions", pr)
+	req, err := http.NewRequestWithContext(ixMLTraced(rctx), http.MethodPost, c.base+"/v1/audio/transcriptions", pr)
 	if err != nil {
 		pr.Close()
 		return ixTranscript{}, err
@@ -285,6 +287,7 @@ var ixSTTAudioHook = func(a *App, ctx context.Context, it *ixMItem) ([]byte, err
 var errIxNoAudio = errors.New("no sound track")
 
 func (a *App) ixSTTAudio(ctx context.Context, it *ixMItem) ([]byte, error) {
+	defer ixMLClock(ctx, ixStFFmpeg)()
 	rel := ixNormPath(it.Path)
 	if rel == "" {
 		return nil, errors.New("bad path")
@@ -301,6 +304,7 @@ func (a *App) ixSTTAudio(ctx context.Context, it *ixMItem) ([]byte, error) {
 	defer cancel()
 	cmd := exec.CommandContext(fctx, bin, "-hide_banner", "-nostdin", "-loglevel", "error", "-i", full, "-vn", "-sn", "-dn",
 		"-ac", "1", "-ar", "16000", "-t", strconv.Itoa(ixSTTMaxSeconds), "-c:a", "flac", "-f", "flac", "pipe:1")
+	procutil.HideWindow(cmd)
 	var out, errOut bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errOut
 	err := cmd.Run()
@@ -351,6 +355,7 @@ func (a *App) ixSTTTask(ctx context.Context, c *ixSTTClient) *ixMLTask {
 				it.Key, c.model, t.Language, t.Text, string(segs), ixNowMs()); err != nil {
 				return err
 			}
+			a.ixIndexMediaText(ctx, "ix_stt", it.Key, t.Text)
 			_, _ = a.db.Writer.ExecContext(ctx, `DELETE FROM ix_ml_err WHERE task='speech' AND key=?`, it.Key)
 			a.ixMLMarkDone("speech", it.Key)
 			return nil
@@ -439,17 +444,7 @@ func (a *App) ixTextOf(ctx context.Context, key string) (ocr string, speech *ixT
 // ixSearchMediaText finds the posts whose pictures show, or whose
 // recordings say, the words searched for.
 func (a *App) ixSearchMediaText(ctx context.Context, m *ixModel, q string, out map[int32]bool) {
-	like := "%" + strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(q) + "%"
-	rows, err := a.db.Reader.QueryContext(ctx, `SELECT key FROM ix_ocr WHERE text LIKE ? ESCAPE '\' UNION SELECT key FROM ix_stt WHERE text LIKE ? ESCAPE '\' LIMIT 20000`, like, like)
-	if err != nil {
-		return
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var k string
-		if rows.Scan(&k) != nil {
-			continue
-		}
+	for _, k := range append(a.ixMediaTextKeys(ctx, "ix_ocr", q), a.ixMediaTextKeys(ctx, "ix_stt", q)...) {
 		ii, ok := m.ByKey[k]
 		if !ok {
 			continue
@@ -496,5 +491,5 @@ func (a *App) handleIxExtra(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	ocr, speech := a.ixTextOf(ctx, key)
-	writeJSON(w, http.StatusOK, map[string]any{"faces": a.ixFacesOf(ctx, key), "text": ocr, "speech": speech})
+	writeJSON(w, http.StatusOK, map[string]any{"faces": a.ixFacesOf(ctx, key), "text": ocr, "speech": speech, "frames": a.ixVideoFrameTimes(ctx, key)})
 }

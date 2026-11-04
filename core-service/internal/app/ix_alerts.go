@@ -80,6 +80,7 @@ func (a *App) ixAlertConditions(ctx context.Context, s ixSettings, now time.Time
 		out = append(out, ixAlert{Key: "downloads:stalled", Title: "Downloads stalled",
 			Message: fmt.Sprintf("%d file(s) are waiting, but none has finished for over an hour.", d.Waiting)})
 	}
+	out = append(out, ixStagingAlerts(a.ixStagingStatus(ctx), now)...)
 	if ex := a.ixExportStatus(); ex.Error != "" && ex.FinishedAt > 0 {
 		out = append(out, ixAlert{Key: fmt.Sprintf("export:%d", ex.FinishedAt), Once: true, Title: "Writing the index failed",
 			Message: "The index and data files could not be written to the NAS: " + ex.Error})

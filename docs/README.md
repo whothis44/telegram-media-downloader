@@ -27,6 +27,7 @@ Run it with Docker or as a native binary on Linux, Windows or macOS.
 |---|---|
 | [Features](FEATURES.md) | Everything 3.x does, and what is still missing |
 | [Backup](BACKUP.md) | Local, S3, SFTP, FTP/FTPS, Google Drive and Dropbox backups, encryption, offline restore |
+| [After the deletion date](archive-after-deletion.md) | Archive: nightly session and database backups, the read-only archive, restoring |
 | [Cluster mode](CLUSTER.md) | Pair several instances into one library |
 | [AI: faces, NSFW and previews](AI.md) | Seekbar previews, the `tgdl-faces` and `tgdl-nsfw` sidecars |
 | [API reference](API.md) | HTTP and WebSocket endpoints |

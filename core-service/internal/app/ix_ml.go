@@ -16,7 +16,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -24,8 +23,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-
-	"github.com/botnick/telegram-media-downloader/core-service/internal/seekbar"
 )
 
 // Image recognition, optional and entirely on the user's own machines: the
@@ -111,7 +108,9 @@ func (a *App) ixMLClientNow(ctx context.Context) *ixMLClient {
 // the address that was checked.
 var ixMLHTTP = &http.Client{
 	Timeout: 10 * time.Minute,
-	Transport: &http.Transport{Proxy: nil, MaxIdleConns: 4, IdleConnTimeout: 30 * time.Second,
+	// Idle connections are kept for every file in flight (ixMLParMax),
+	// rather than opened again for each request.
+	Transport: &http.Transport{Proxy: nil, MaxIdleConns: 2 * ixMLParMax, MaxIdleConnsPerHost: ixMLParMax, IdleConnTimeout: 30 * time.Second,
 		// A local name could resolve to a public address: check the address
 		// actually connected to.
 		DialContext: (&net.Dialer{Timeout: 10 * time.Second, Control: func(_, address string, _ syscall.RawConn) error {
@@ -182,7 +181,7 @@ func (c *ixMLClient) predict(ctx context.Context, task map[string]any, image []b
 	if err := w.Close(); err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/predict", &body)
+	req, err := http.NewRequestWithContext(ixMLTraced(ctx), http.MethodPost, c.base+"/predict", &body)
 	if err != nil {
 		return nil, err
 	}
@@ -192,7 +191,9 @@ func (c *ixMLClient) predict(ctx context.Context, task map[string]any, image []b
 		return nil, ixMLUnreachable{err}
 	}
 	defer resp.Body.Close()
+	answer := ixMLClock(ctx, ixStAnswer)
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	answer()
 	if err != nil {
 		return nil, ixMLUnreachable{err}
 	}
@@ -292,8 +293,9 @@ type ixMLBox struct {
 	notes        map[string]ixMLTaskNote    // task -> whether its service answered, its last error
 	done         map[string]map[string]bool // task -> files looked at (faces, text, speech)
 	doneModel    map[string]string
-	regroupAfter int64 // the last ungrouped face given another chance
-	running      int   // steps under way
+	regroupAfter int64         // the last ungrouped face given another chance
+	running      int           // steps under way
+	wake         chan struct{} // a service came back: stop waiting
 }
 
 type ixMLStatus struct {
@@ -310,6 +312,7 @@ type ixMLStatus struct {
 	Version   string                    `json:"immichVersion"`
 	Tasks     map[string]ixMLTaskStatus `json:"tasks"`
 	Speech    ixMLTaskStatus            `json:"speech"`
+	Par       map[string]int            `json:"par"` // files in flight at once, per task (ix_mlpace.go)
 }
 
 type ixMLTaskNote struct {
@@ -439,8 +442,9 @@ func (s *ixEmbStore) sim(a, b string) (float32, bool) {
 }
 
 type ixEmbHit struct {
-	Key string
-	Sim float32
+	Key  string
+	Sim  float32
+	AtMs int64 // for a video found by one of its frames: where (0 otherwise)
 }
 
 // nearest lists the stored files closest to q (a unit vector), best first.
@@ -468,7 +472,7 @@ func (s *ixEmbStore) nearest(q []float32, k int, keep func(string) bool, skip st
 		if keep != nil && !keep(key) {
 			continue
 		}
-		hits = append(hits, ixEmbHit{key, c})
+		hits = append(hits, ixEmbHit{Key: key, Sim: c})
 		if len(hits) > 2*k {
 			sort.Slice(hits, func(x, y int) bool { return hits[x].Sim > hits[y].Sim })
 			hits = hits[:k]
@@ -516,6 +520,29 @@ func (a *App) ixEmbSim() func(string, string) (float32, bool) {
 
 // ---------- worker ----------
 
+// ixMLWakeChan is closed when the recognition service comes back, so the
+// background work does not sit out its wait after the service was down.
+func (a *App) ixMLWakeChan() <-chan struct{} {
+	box := a.ixMLBox()
+	box.mu.Lock()
+	defer box.mu.Unlock()
+	if box.wake == nil {
+		box.wake = make(chan struct{})
+	}
+	return box.wake
+}
+
+// ixMLWake ends the background work's wait.
+func (a *App) ixMLWake() {
+	box := a.ixMLBox()
+	box.mu.Lock()
+	defer box.mu.Unlock()
+	if box.wake != nil {
+		close(box.wake)
+	}
+	box.wake = make(chan struct{})
+}
+
 func (a *App) ixRunML(ctx context.Context) {
 	wait := 45 * time.Second
 	for {
@@ -523,6 +550,7 @@ func (a *App) ixRunML(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-time.After(wait):
+		case <-a.ixMLWakeChan():
 		}
 		wait = time.Minute
 		if !ixVdupBackground.Load() {
@@ -570,20 +598,34 @@ func (a *App) ixRunML(ctx context.Context) {
 		}()
 		// Each kind of work takes its turn: what a picture shows first (it
 		// powers search and sets), then faces, then text.
-		wait = time.Minute
-		for _, t := range a.ixMLTasks(ctx, c, s) {
-			w := a.ixMLRoundTask(ctx, t, m, 500)
-			if w > time.Minute { // the service is down or failing: stop here
-				wait = w
-				break
-			}
-			if w < wait {
-				wait = w
-			}
-		}
+		wait = a.ixMLRoundAll(ctx, a.ixMLTasks(ctx, c, s), m)
 		close(stop)
 		a.ixMLCount(ctx, m)
 	}
+}
+
+// ixMLRoundAll gives each task its turn and says when to try again. A task
+// marked idle runs only when the tasks before it had nothing left.
+func (a *App) ixMLRoundAll(ctx context.Context, tasks []*ixMLTask, m *ixModel) time.Duration {
+	wait, busy := time.Minute, false
+	for _, t := range tasks {
+		if t.idle && busy {
+			continue
+		}
+		n := 500
+		if t.per > 0 {
+			n = t.per
+		}
+		w := a.ixMLRoundTask(ctx, t, m, n)
+		if w > time.Minute { // the service is down or failing: stop here
+			return w
+		}
+		busy = busy || w < time.Minute
+		if w < wait {
+			wait = w
+		}
+	}
+	return wait
 }
 
 // ixMLTask is one kind of work done once per distinct file.
@@ -598,6 +640,8 @@ type ixMLTask struct {
 	note     func(reachable bool, msg string)
 	finish   func(ctx context.Context) // after a round that did something
 	par      int                       // files at a time
+	per      int                       // steps per round, each up to par files (0: 500)
+	idle     bool                      // only when the tasks before it have nothing left
 }
 
 // ixMLTasks lists the image-recognition work that is switched on.
@@ -609,6 +653,7 @@ func (a *App) ixMLTasks(ctx context.Context, c *ixMLClient, s ixSettings) []*ixM
 	if s.MLText {
 		out = append(out, a.ixOCRTask(ctx, c))
 	}
+	out = append(out, a.ixVideoFramesTask(ctx, c)) // older videos, frame by frame (ix_vframes.go)
 	return out
 }
 
@@ -673,8 +718,11 @@ func (a *App) ixMLRound(ctx context.Context, c *ixMLClient, m *ixModel, n int) t
 	return a.ixMLRoundTask(ctx, a.ixClipTask(c), m, n)
 }
 
-// ixMLRoundTask does up to n files of one task and says when to try again.
+// ixMLRoundTask does up to n×par files of one task and says when to try
+// again.
 func (a *App) ixMLRoundTask(ctx context.Context, t *ixMLTask, m *ixModel, n int) time.Duration {
+	pace := a.ixMLPaceOf(t) // files at once, and where their time goes (ix_mlpace.go)
+	ctx = ixMLWithStats(ctx, pace.stats)
 	t.note(true, "")
 	r := &ixMLRun{failed: a.ixMLFailedKeys(ctx, t), tried: map[string]bool{}, noFFmpeg: !ixHaveFFmpeg()}
 	defer func() {
@@ -691,8 +739,8 @@ func (a *App) ixMLRoundTask(ctx context.Context, t *ixMLTask, m *ixModel, n int)
 			t.finish(ctx)
 		}
 	}()
-	for i := 0; i < n && ctx.Err() == nil; i++ {
-		worked, err := a.ixMLStep(ctx, t, m, r)
+	{
+		worked, err := a.ixMLFiles(ctx, t, m, r, pace, n*max(1, t.par))
 		var down ixMLUnreachable
 		switch {
 		case errors.Is(err, errIxMLOffline):
@@ -793,57 +841,90 @@ func ixMLWanted(m *ixModel, c int) (int32, bool) {
 	return cl.Canon, true
 }
 
-// ixMLStep does the next file of a task; false when none is left.
-func (a *App) ixMLStep(ctx context.Context, t *ixMLTask, m *ixModel, r *ixMLRun) (bool, error) {
-	items := a.ixMLNext(t, m, r, max(1, t.par))
-	if len(items) == 0 {
-		return false, nil
+// ixMLFiles does up to budget files of a task; false when none was left.
+// Files go through continuously, as many at a time as the task's pace
+// allows: the next file is started as soon as one ends, so reading files
+// (from the NAS, or frames out of videos) overlaps the requests of the
+// others and the graphics card is kept busy rather than waiting for the
+// slowest file of a batch.
+func (a *App) ixMLFiles(ctx context.Context, t *ixMLTask, m *ixModel, r *ixMLRun, pace *ixMLPace, budget int) (bool, error) {
+	type done struct {
+		it      *ixMItem
+		err     error
+		started time.Time
 	}
-	// A few files at a time: reading them (from the NAS, or frames out of
-	// videos) and the service's work overlap, so the graphics card is kept
-	// busy rather than waiting for each file in turn.
+	fctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	results := make(chan done)
 	box := a.ixMLBox()
-	box.mu.Lock()
-	box.running++
-	box.st.Running = true
-	box.mu.Unlock()
-	errs := make([]error, len(items))
-	var wg sync.WaitGroup
-	for i, it := range items {
-		wg.Add(1)
-		go func(i int, it *ixMItem) {
-			defer wg.Done()
-			errs[i] = t.run(ctx, it)
-		}(i, it)
-	}
-	wg.Wait()
-	box.mu.Lock()
-	box.running--
-	box.st.Running = box.running > 0
-	box.mu.Unlock()
+	inflight, started, dry := 0, 0, false
 	var first error
-	for i, it := range items {
+	pace.begin(time.Now())
+	defer func() {
+		if started > 0 {
+			box.mu.Lock()
+			box.running--
+			box.st.Running = box.running > 0
+			box.mu.Unlock()
+		}
+	}()
+	for {
+		for first == nil && !dry && started < budget && inflight < pace.size() && ctx.Err() == nil {
+			items := a.ixMLNext(t, m, r, 1)
+			if len(items) == 0 {
+				dry = true
+				break
+			}
+			if started == 0 {
+				box.mu.Lock()
+				box.running++
+				box.st.Running = true
+				box.mu.Unlock()
+			}
+			started++
+			inflight++
+			pace.launched(1)
+			go func(it *ixMItem, began time.Time) {
+				err := t.run(fctx, it)
+				pace.stats.ns[ixStFile].Add(int64(time.Since(began)))
+				pace.stats.files.Add(1)
+				results <- done{it, err, began}
+			}(items[0], time.Now())
+		}
+		if dry || started >= budget {
+			pace.starve()
+		}
+		if inflight == 0 {
+			break
+		}
+		x := <-results
+		inflight--
+		pace.finished(ctx, x.started, time.Now(), x.err)
 		var bad ixMLFileErr
-		switch err := errs[i]; {
+		switch err := x.err; {
 		case errors.As(err, &bad):
-			r.pending = append(r.pending, [2]string{it.Key, bad.msg})
+			r.pending = append(r.pending, [2]string{x.it.Key, bad.msg})
 			r.last = bad.msg
 		case err == nil:
 			r.ok = true
 		case first == nil:
 			first = err
+			var down ixMLUnreachable
+			if errors.Is(err, errIxMLOffline) || errors.As(err, &down) {
+				cancel() // the others would fail the same way
+			}
+		}
+		if first == nil && !r.ok && len(r.pending) >= ixMLStreak {
+			first = errIxMLStreak
+		}
+		if first == nil && r.ok {
+			a.ixMLFlush(ctx, t, r)
 		}
 	}
 	if first != nil {
 		return true, first
 	}
-	if !r.ok && len(r.pending) >= ixMLStreak {
-		return true, errIxMLStreak
-	}
-	if r.ok {
-		a.ixMLFlush(ctx, t, r)
-	}
-	return true, nil
+	return started > 0 && !dry, nil
 }
 
 // ixMLNext picks up to n files a task has still to do, walking the
@@ -935,6 +1016,9 @@ func (a *App) ixMLReadErr(ctx context.Context, err error) error {
 }
 
 func (a *App) ixMLEmbedItem(ctx context.Context, c *ixMLClient, it *ixMItem) error {
+	if it.Type == "video" {
+		return a.ixMLEmbedVideo(ctx, c, it) // frame by frame (ix_vframes.go)
+	}
 	pics, err := a.ixMLPictures(ctx, it)
 	if err != nil {
 		return a.ixMLReadErr(ctx, err)
@@ -961,9 +1045,7 @@ func (a *App) ixMLEmbedItem(ctx context.Context, c *ixMLClient, it *ixMItem) err
 	if err := a.ixMLSave(ctx, c.model, it.Key, sum); err != nil {
 		return err
 	}
-	if it.Type == "photo" {
-		a.ixMLLookAlikes(ctx, it.Key)
-	}
+	a.ixMLLookAlikes(ctx, it.Key)
 	return nil
 }
 
@@ -1006,7 +1088,8 @@ func (a *App) ixMLFail(ctx context.Context, t *ixMLTask, key, why string) error 
 const ixMLLookAlikeSim = 0.975
 
 // ixMLLookAlikes queues the closest other pictures of a newly looked-at
-// picture for review.
+// picture for review; for a video, the closest other videos (by the mean of
+// their frames).
 func (a *App) ixMLLookAlikes(ctx context.Context, key string) {
 	if !a.ixLoadSettings(ctx).MLDupes {
 		return
@@ -1019,7 +1102,15 @@ func (a *App) ixMLLookAlikes(ctx context.Context, key string) {
 	if !ok {
 		return
 	}
-	cluster := m.Items[ii].Cluster
+	cluster, typ := m.Items[ii].Cluster, m.Items[ii].Type
+	least := float32(ixMLLookAlikeSim)
+	switch typ {
+	case "photo":
+	case "video":
+		least = ixMLLookAlikeVideoSim
+	default:
+		return
+	}
 	box := a.ixMLBox()
 	v := box.store.vector(key)
 	if v == nil {
@@ -1027,10 +1118,10 @@ func (a *App) ixMLLookAlikes(ctx context.Context, key string) {
 	}
 	hits := box.store.nearest(v, 3, func(k string) bool {
 		j, ok := m.ByKey[k]
-		return ok && m.Items[j].Type == "photo" && m.Items[j].Cluster != cluster
+		return ok && m.Items[j].Type == typ && m.Items[j].Cluster != cluster
 	}, key)
 	for _, h := range hits {
-		if h.Sim < ixMLLookAlikeSim {
+		if h.Sim < least {
 			break
 		}
 		ka, kb := key, h.Key
@@ -1042,18 +1133,21 @@ func (a *App) ixMLLookAlikes(ctx context.Context, key string) {
 }
 
 // ixMLPictures is what is sent for a file: a photo's grid thumbnail (or the
-// file itself), or three frames of a video, at a fifth, half and four
-// fifths of its length.
-var ixMLPicturesHook = func(a *App, ctx context.Context, it *ixMItem) ([][]byte, error) {
-	return a.ixMLPicturesFromDisk(ctx, it)
-}
+// file itself), or frames of a video (ixMLFrameTimes).
+//
+// ixMLPicturesHook replaces it in tests (nil: read from disk).
+var ixMLPicturesHook func(a *App, ctx context.Context, it *ixMItem) ([][]byte, error)
 
 func (a *App) ixMLPictures(ctx context.Context, it *ixMItem) ([][]byte, error) {
-	return ixMLPicturesHook(a, ctx, it)
+	if ixMLPicturesHook != nil {
+		return ixMLPicturesHook(a, ctx, it)
+	}
+	return a.ixMLPicturesFromDisk(ctx, it)
 }
 
 func (a *App) ixMLPicturesFromDisk(ctx context.Context, it *ixMItem) ([][]byte, error) {
 	if it.Type == "photo" {
+		defer ixMLClock(ctx, ixStRead)()
 		if it.Thumb {
 			if data, err := os.ReadFile(filepath.Join(a.ixThumbDir(), filepath.FromSlash(ixThumbName(it.Key)))); err == nil && len(data) > 0 {
 				return [][]byte{data}, nil
@@ -1080,35 +1174,13 @@ func (a *App) ixMLPicturesFromDisk(ctx context.Context, it *ixMItem) ([][]byte, 
 		}
 		return [][]byte{data}, nil
 	}
-	if _, err := os.Stat(full); err != nil {
-		return nil, errors.New("file not found")
+	frames, err := a.ixMLVideoFrames(ctx, it)
+	if err != nil {
+		return nil, err
 	}
-	bin := seekbar.FFmpegPath()
-	if bin == "" {
-		return nil, ixErrNoFFmpeg
-	}
-	times := []float64{1}
-	if it.Dur > 3 {
-		times = []float64{it.Dur * 0.2, it.Dur * 0.5, it.Dur * 0.8}
-	}
-	var out [][]byte
-	for _, t := range times {
-		fctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-		cmd := exec.CommandContext(fctx, bin, "-hide_banner", "-nostdin", "-loglevel", "error", "-ss", fmt.Sprintf("%.2f", t), "-i", full,
-			"-frames:v", "1", "-an", "-sn", "-dn", "-vf", "scale='min(512,iw)':-2", "-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "3", "pipe:1")
-		var buf bytes.Buffer
-		cmd.Stdout = &buf
-		err := cmd.Run()
-		cancel()
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		if err == nil && buf.Len() > 0 {
-			out = append(out, buf.Bytes())
-		}
-	}
-	if len(out) == 0 {
-		return nil, errors.New("no frame could be read from the video")
+	out := make([][]byte, len(frames))
+	for i, f := range frames {
+		out[i] = f.Pic
 	}
 	return out, nil
 }
@@ -1121,11 +1193,11 @@ func (a *App) ixMLCount(ctx context.Context, m *ixModel) {
 	if c == nil {
 		c = &ixMLClient{model: ixMLModelOf(s)}
 	}
-	tasks := map[string]*ixMLTask{"clip": a.ixClipTask(c), "faces": a.ixFaceTask(ctx, c), "text": a.ixOCRTask(ctx, c)}
+	tasks := map[string]*ixMLTask{"clip": a.ixClipTask(c), "faces": a.ixFaceTask(ctx, c), "text": a.ixOCRTask(ctx, c), "frames": a.ixVideoFramesTask(ctx, c)}
 	if sc := a.ixSTTClientNow(ctx); sc != nil {
 		tasks["speech"] = a.ixSTTTask(ctx, sc)
 	}
-	on := map[string]bool{"clip": true, "faces": s.MLFaces, "text": s.MLText, "speech": s.STTURL != ""}
+	on := map[string]bool{"clip": true, "faces": s.MLFaces, "text": s.MLText, "speech": s.STTURL != "", "frames": s.MLURL != ""}
 	out := map[string]ixMLTaskStatus{}
 	for name, t := range tasks {
 		failed := a.ixMLFailedKeys(ctx, t)
@@ -1194,6 +1266,7 @@ func (a *App) ixMLStatusNow(ctx context.Context) ixMLStatus {
 		st.Tasks[k] = t
 	}
 	st.Speech.On = s.STTURL != ""
+	st.Par = a.ixMLPars()
 	return st
 }
 
@@ -1253,5 +1326,5 @@ func (a *App) ixMLSearch(ctx context.Context, m *ixModel, text, like string, lim
 		}
 		q = v
 	}
-	return box.store.nearest(q, limit, keep, like), nil
+	return ixNearestUnique(m, &box.store, q, limit, ixSkipCluster(m, like, keep)), nil // one hit per duplicate set (ix_search.go)
 }

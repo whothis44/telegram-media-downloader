@@ -2,6 +2,8 @@ package telegram
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -111,33 +113,62 @@ func (g *floodGuard) waitGate(ctx context.Context, files bool) error {
 }
 
 func (g *floodGuard) invoke(ctx context.Context, next tg.Invoker, input bin.Encoder, output bin.Decoder) error {
-	return g.invokeGate(ctx, next, input, output, false, nil)
+	return g.invokeGate(ctx, next, input, output, false, partHooks{})
 }
+
+// partHooks hear how Telegram answered a file part: every wait it asked
+// for (premium is true for FLOOD_PREMIUM_WAIT: Telegram's speed limit for
+// accounts without Premium, which it applies once an account has
+// downloaded tens of gigabytes; it is about volume, not about how many
+// requests are in flight), and how long an answered request took.
+type partHooks struct {
+	flood    func(d time.Duration, premium bool)
+	answered func(took time.Duration)
+}
+
+// filePartTimeout gives up on one file part that has not been answered in
+// this long (8 KB/s for a 1 MB part); the downloaders ask for it again, as
+// they do after Telegram's own timeouts. Without it, a part Telegram never
+// answers holds its file, and its room in the window, until the whole
+// download times out.
+var filePartTimeout = 2 * time.Minute
 
 // invokeFiles is invoke for file downloads: their own gate (which also
-// waits for the account's), and onFlood hears of every wait Telegram asks
-// for, so the pacer can slow down.
-//
-// premium is true for FLOOD_PREMIUM_WAIT: Telegram's speed limit for
-// accounts without Premium, which it applies once an account has
-// downloaded tens of gigabytes. It is about volume, not about how many
-// requests are in flight.
-func (g *floodGuard) invokeFiles(ctx context.Context, next tg.Invoker, input bin.Encoder, output bin.Decoder, onFlood func(d time.Duration, premium bool)) error {
-	return g.invokeGate(ctx, next, input, output, true, onFlood)
+// waits for the account's), a time limit per part, and hooks the pacer
+// learns from.
+func (g *floodGuard) invokeFiles(ctx context.Context, next tg.Invoker, input bin.Encoder, output bin.Decoder, hooks partHooks) error {
+	return g.invokeGate(ctx, next, input, output, true, hooks)
 }
 
-func (g *floodGuard) invokeGate(ctx context.Context, next tg.Invoker, input bin.Encoder, output bin.Decoder, files bool, onFlood func(time.Duration, bool)) error {
+func (g *floodGuard) invokeGate(ctx context.Context, next tg.Invoker, input bin.Encoder, output bin.Decoder, files bool, hooks partHooks) error {
 	for attempt := 0; ; attempt++ {
 		if err := g.waitGate(ctx, files); err != nil {
 			return err
 		}
-		err := next.Invoke(ctx, input, output)
+		var err error
+		if files {
+			reqCtx, cancel := context.WithTimeout(ctx, filePartTimeout)
+			started := time.Now()
+			err = next.Invoke(reqCtx, input, output)
+			timedOut := errors.Is(reqCtx.Err(), context.DeadlineExceeded)
+			cancel()
+			// A part not answered in time counts as answered that slowly:
+			// when every part times out, the window must still shrink.
+			if hooks.answered != nil && (err == nil || timedOut && ctx.Err() == nil) {
+				hooks.answered(time.Since(started))
+			}
+			if err != nil && ctx.Err() == nil && timedOut {
+				err = fmt.Errorf("Telegram did not answer a file part within %s: %w", filePartTimeout, context.DeadlineExceeded)
+			}
+		} else {
+			err = next.Invoke(ctx, input, output)
+		}
 		d, flood := tgerr.AsFloodWait(err)
 		if !flood {
 			return err
 		}
-		if onFlood != nil {
-			onFlood(d, tgerr.Is(err, tgerr.ErrPremiumFloodWait))
+		if hooks.flood != nil {
+			hooks.flood(d, tgerr.Is(err, tgerr.ErrPremiumFloodWait))
 		}
 		g.closeGate(d, files)
 		if d > floodSleepThreshold || attempt >= floodInlineRetries {

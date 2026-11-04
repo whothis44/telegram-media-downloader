@@ -26,7 +26,10 @@ func registerIxRoutes(mux *http.ServeMux, a *App) {
 	mux.Handle("POST /api/ix/groups/finished", a.requireAdmin(http.HandlerFunc(a.handleIxFinished)))
 	mux.Handle("GET /api/ix/dups", a.requireAdmin(http.HandlerFunc(a.handleIxDups)))
 	mux.Handle("POST /api/ix/dups/retry", a.requireAdmin(http.HandlerFunc(a.handleIxDupsRetry)))
+	registerIxDockerRoutes(mux, a)
 	registerIxBrowseRoutes(mux, a)
+	registerIxBackupRoutes(mux, a)
+	registerIxCopiesRoutes(mux, a)
 }
 
 type ixGroupStatus struct {
@@ -183,10 +186,16 @@ func (a *App) handleIxStatus(w http.ResponseWriter, r *http.Request) {
 		"downloads": a.ixDownloads(ctx),
 		"freeze":    a.ixFreeze(ctx),
 		"held":      a.ixHeldStatus(ctx),
+		"copies":    a.ixCopiesNow(),
 		"fixity":    a.ixFixityStatus(ctx),
 		"ml":        a.ixMLStatusNow(ctx),
+		"mlStart":   a.ixMLStartStatusNow(),
 		"deadline":  a.ixDeadlineEstimate(ctx, false),
 		"pictures":  a.ixMediaStatus(),
+		"backup":    a.ixBackupOverview(ctx),
+		"readonly":  a.ixGoneState(),
+		"lowq":      a.ixLowqStatus(ctx),
+		"staging":   a.ixStagingStatus(ctx),
 	}
 	if exportErr != nil {
 		out["exportDirError"] = exportErr.Error()
@@ -384,6 +393,10 @@ func (a *App) handleIxSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err = a.ixExportDir(s); err != nil && s.ExportDir != "" {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err = a.ixCheckStageDir(s.StageDir); err != nil && s.StageDir != old.StageDir {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}

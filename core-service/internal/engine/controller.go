@@ -319,6 +319,19 @@ func (c *Controller) queueRun() (*running, error) {
 	return c.run, nil
 }
 
+// Running reports the engine's run: the accounts it runs, and whether it
+// observes live updates (monitoring) or only works through the queue (a
+// manual run, whose workers take no live items). ok is false when no
+// engine runs.
+func (c *Controller) Running() (accounts []string, observing, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.run == nil || c.state != "running" {
+		return nil, false, false
+	}
+	return append([]string(nil), c.run.ids...), c.run.observing.Load(), true
+}
+
 func (c *Controller) RequireRunning() error {
 	_, err := c.queueRun()
 	return err
@@ -437,6 +450,18 @@ func (c *Controller) RetryAll(ctx context.Context) (int, error) {
 		c.wake(run)
 	}
 	return count, err
+}
+
+// RequeueLost: see WorkStore.RequeueLost. It works with the engine stopped
+// too; a running engine is woken.
+func (c *Controller) RequeueLost(ctx context.Context, accountID string, target Target, message *tg.Message, origin string) (bool, error) {
+	ok, err := c.work.RequeueLost(ctx, accountID, target, message, origin)
+	if err == nil {
+		if run, runErr := c.queueRun(); runErr == nil {
+			c.wake(run)
+		}
+	}
+	return ok, err
 }
 
 func (c *Controller) DismissJob(ctx context.Context, key string) (bool, error) {

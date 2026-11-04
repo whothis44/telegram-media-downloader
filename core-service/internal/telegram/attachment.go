@@ -395,7 +395,10 @@ func (i sharedInvoker) invokePart(ctx context.Context, input bin.Encoder, output
 			return err
 		}
 		received := 0
-		err := i.guard.invokeFiles(ctx, i.pool, input, output, func(_ time.Duration, premium bool) { i.pacer.flood(i.dc, premium) })
+		err := i.guard.invokeFiles(ctx, i.pool, input, output, partHooks{
+			flood:    func(_ time.Duration, premium bool) { i.pacer.flood(i.dc, premium) },
+			answered: func(took time.Duration) { i.pacer.answered(i.dc, took) },
+		})
 		if err == nil {
 			if box, ok := output.(*tg.UploadFileBox); ok {
 				if f, ok := box.File.(*tg.UploadFile); ok {

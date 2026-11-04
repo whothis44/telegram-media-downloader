@@ -15,9 +15,12 @@ import (
 // actually achieved, and, when it will not (or when asked to always), lets
 // smaller files go first: a large video waits until every smaller file of
 // the backfill is done, so the most files are saved before the account
-// goes. Nothing is skipped, only put back: the deferred files are queue
+// goes. Files of private chats go before those of public ones (see
+// ixPublicLane). Nothing is skipped, only put back: the deferred files are queue
 // items set aside (as held copies are) and let go band by band. Live
-// downloads, self-destructing media and held copies are not touched.
+// downloads, self-destructing media and held copies are not touched. Where
+// this stands among the other things that wait at the back of the queue
+// is set in ix_order.go: right after normal work.
 
 // ixDeadlineBands are the size limits of the bands, smallest first.
 var ixDeadlineBands = []int64{10 << 20, 100 << 20, 500 << 20}
@@ -31,8 +34,22 @@ func ixBandOf(size int64) int {
 	return len(ixDeadlineBands)
 }
 
-// ixBandSQL is the band of a queue item in SQL.
-const ixBandSQL = `CASE WHEN file_size<10485760 THEN 0 WHEN file_size<104857600 THEN 1 WHEN file_size<524288000 THEN 2 ELSE 3 END`
+// ixPublicLane is added to the band of a file from a public chat (one with
+// a username): every private chat's file goes before any public one's.
+// What only this account can read is lost with it; a public chat can be read
+// again from another account, and a public channel even without one
+// (t.me/s/...).
+const ixPublicLane = 4
+
+// ixBandSQL is the band of a queue item of table (or alias) t in SQL: its
+// size band, plus ixPublicLane for a public chat.
+func ixBandSQL(t string) string {
+	return `(CASE WHEN ` + t + `.file_size<10485760 THEN 0 WHEN ` + t + `.file_size<104857600 THEN 1 WHEN ` + t + `.file_size<524288000 THEN 2 ELSE 3 END
+		+ CASE WHEN EXISTS (SELECT 1 FROM ix_group_info g WHERE g.group_id=` + t + `.group_id AND g.username<>'') THEN ` + strconv.Itoa(ixPublicLane) + ` ELSE 0 END)`
+}
+
+// ixBandCount is how many bands there are, both lanes.
+const ixBandCount = 2 * ixPublicLane
 
 type ixDeadlineLoss struct {
 	GroupID string `json:"groupId"`
@@ -65,7 +82,7 @@ type ixDeadlineInfo struct {
 // ixDeadlineEstimate measures what is left and how fast it goes.
 func (a *App) ixDeadlineEstimate(ctx context.Context, withLoss bool) ixDeadlineInfo {
 	s := a.ixLoadSettings(ctx)
-	d := ixDeadlineInfo{Mode: s.DeadlineOrder, Until: a.ixFreeze(ctx).Until, Deferred: make([]int, len(ixDeadlineBands)+1), BandLimits: ixDeadlineBands}
+	d := ixDeadlineInfo{Mode: s.DeadlineOrder, Until: a.ixFreeze(ctx).Until, Deferred: make([]int, ixBandCount), BandLimits: ixDeadlineBands}
 	if d.Mode == "" {
 		d.Mode = "auto"
 	}
@@ -237,6 +254,9 @@ func (a *App) ixRunDeadline(ctx context.Context) {
 // ixDeadlineStep sets aside the backfill items larger than the smallest
 // band that still has work, and lets go those of that band.
 func (a *App) ixDeadlineStep(ctx context.Context) error {
+	if a.ixIsGone() {
+		return nil // read-only: nothing downloads any more, so there is no order to keep
+	}
 	d := a.ixDeadlineEstimate(ctx, false)
 	nowT := time.Now()
 	now := nowT.UnixMilli()
@@ -257,22 +277,25 @@ func (a *App) ixDeadlineStep(ctx context.Context) error {
 	if err := a.ixDeadlineLetGo(ctx, `(w.origin<>'history' OR w.ttl_seconds>0)`); err != nil {
 		return err
 	}
-	if _, err := a.db.Writer.ExecContext(ctx, `UPDATE ix_deferred SET band=(SELECT `+strings.ReplaceAll(ixBandSQL, "file_size", "w.file_size")+` FROM tgdl_work w WHERE w.id=ix_deferred.work_id)
+	if _, err := a.db.Writer.ExecContext(ctx, `UPDATE ix_deferred SET band=(SELECT `+ixBandSQL("w")+` FROM tgdl_work w WHERE w.id=ix_deferred.work_id)
 		WHERE released_at=0 AND EXISTS (SELECT 1 FROM tgdl_work w WHERE w.id=ix_deferred.work_id)`); err != nil {
 		return err
 	}
 	if !d.Active || a.ixDeadlineSuspended(ctx, nowT) {
 		return a.ixDeadlineRelease(ctx, -1)
 	}
-	// Nothing finished for half an hour while files are set aside: the
-	// order may be what holds things up. Let everything go and stand back
-	// for two hours.
-	if a.ixDeferredWaiting(ctx) > 0 {
+	// Downloads have not moved for half an hour (no file finished, no bytes
+	// arrived) while files are set aside: the order may be what holds
+	// things up. Let everything go and stand back for two hours. Big files
+	// that take hours each still move, by bytes.
+	if a.ixDeferredWaiting(ctx) > 0 && !a.ixQueuePaused(ctx) {
 		var lastDone, firstSet int64
-		_ = a.db.Reader.QueryRowContext(ctx, `SELECT COALESCE(MAX(updated_at),0) FROM tgdl_work WHERE status='completed'`).Scan(&lastDone)
+		if last := a.ixLastProgress(ctx); !last.IsZero() {
+			lastDone = last.UnixMilli()
+		}
 		_ = a.db.Reader.QueryRowContext(ctx, `SELECT COALESCE(MIN(deferred_at),0) FROM ix_deferred WHERE released_at=0`).Scan(&firstSet)
 		if stall := 30 * time.Minute.Milliseconds(); now-lastDone > stall && firstSet > 0 && now-firstSet > stall {
-			a.ixLog("deadline order: nothing finished for 30 minutes; letting every set-aside file go for 2 hours")
+			a.ixLog("deadline order: downloads have not moved for 30 minutes; letting every set-aside file go for 2 hours")
 			_, _ = a.db.Writer.ExecContext(ctx, `INSERT INTO kv(key,value,updated_at) VALUES('ix_deadline_suspend',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`,
 				strconv.FormatInt(nowT.Add(2*time.Hour).UnixMilli(), 10), now)
 			return a.ixDeadlineRelease(ctx, -1)
@@ -291,7 +314,7 @@ func (a *App) ixDeadlineStep(ctx context.Context) error {
 	}
 	var cur sql.NullInt64
 	if err := a.db.Reader.QueryRowContext(ctx, `SELECT MIN(b) FROM (
-			SELECT `+ixBandSQL+` AS b FROM tgdl_work WHERE status='pending' AND paused=0 AND origin='history' AND ttl_seconds=0 AND retry_at<=?`+acctClause+`
+			SELECT `+ixBandSQL("tgdl_work")+` AS b FROM tgdl_work WHERE status='pending' AND paused=0 AND origin='history' AND ttl_seconds=0 AND retry_at<=?`+acctClause+`
 			UNION ALL SELECT x.band FROM ix_deferred x JOIN tgdl_work w ON w.id=x.work_id WHERE x.released_at=0 AND w.status='pending')`, args...).Scan(&cur); err != nil {
 		return err
 	}
@@ -305,11 +328,11 @@ func (a *App) ixDeadlineStep(ctx context.Context) error {
 	}
 	defer tx.Rollback()
 	if _, err = tx.ExecContext(ctx, `INSERT OR REPLACE INTO ix_deferred(work_id,band,deferred_at,released_at)
-		SELECT id, `+ixBandSQL+`, ?, 0 FROM tgdl_work WHERE status='pending' AND paused=0 AND origin='history' AND ttl_seconds=0 AND `+ixBandSQL+`>?
+		SELECT id, `+ixBandSQL("tgdl_work")+`, ?, 0 FROM tgdl_work WHERE status='pending' AND paused=0 AND origin='history' AND ttl_seconds=0 AND `+ixBandSQL("tgdl_work")+`>?
 		AND id NOT IN (SELECT work_id FROM ix_deferred WHERE released_at=-1)`, now, band); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE tgdl_work SET paused=1 WHERE status='pending' AND paused=0 AND origin='history' AND ttl_seconds=0 AND `+ixBandSQL+`>?
+	if _, err = tx.ExecContext(ctx, `UPDATE tgdl_work SET paused=1 WHERE status='pending' AND paused=0 AND origin='history' AND ttl_seconds=0 AND `+ixBandSQL("tgdl_work")+`>?
 		AND id IN (SELECT work_id FROM ix_deferred WHERE released_at=0)`, band); err != nil {
 		return err
 	}
@@ -319,9 +342,23 @@ func (a *App) ixDeadlineStep(ctx context.Context) error {
 	return a.ixDeadlineRelease(ctx, band)
 }
 
-// ixWorkingAccounts are the accounts that downloaded something in the last
-// day or are downloading now (none known: no limit).
+// ixEngineRun is the engine's run (engine.Controller.Running); replaceable
+// in tests.
+var ixEngineRun = func(a *App) (accounts []string, observing, running bool) {
+	if a.monitor == nil {
+		return nil, false, false
+	}
+	return a.monitor.Running()
+}
+
+// ixWorkingAccounts are the accounts that can download now: those the
+// engine runs. With the engine stopped, a guess: the accounts that
+// downloaded something in the last day or are downloading now (none known:
+// no limit).
 func (a *App) ixWorkingAccounts(ctx context.Context, now time.Time) []string {
+	if ids, _, running := ixEngineRun(a); running && len(ids) > 0 {
+		return ids
+	}
 	var out []string
 	rows, err := a.db.Reader.QueryContext(ctx, `SELECT DISTINCT account_id FROM tgdl_work WHERE status='processing' OR (status='completed' AND updated_at>=?)`, now.Add(-24*time.Hour).UnixMilli())
 	if err != nil {
@@ -371,7 +408,7 @@ func (a *App) ixDeadlineLetGo(ctx context.Context, cond string) error {
 func (a *App) ixDeadlineRelease(ctx context.Context, band int) error {
 	limit := band
 	if band < 0 {
-		limit = len(ixDeadlineBands)
+		limit = ixBandCount - 1
 	}
 	tx, err := a.db.Writer.BeginTx(ctx, nil)
 	if err != nil {
@@ -415,7 +452,7 @@ func ixDeadlineAlerts(d ixDeadlineInfo, now time.Time) []ixAlert {
 	b.WriteString(strconv.FormatFloat(left, 'f', 1, 64))
 	b.WriteString(" days.")
 	if ixDeadlineActive(d) {
-		b.WriteString(" Smaller files are going first so that the most files are saved.")
+		b.WriteString(" Files of private chats are going first, smaller ones before larger, so that the most of what only this account can read is saved.")
 	}
 	b.WriteString(" See Archive → Overview for what would be lost.")
 	return []ixAlert{{Key: "deadline:" + now.In(ixTZ).Format("2006-01-02"), Once: true, Title: "The backup will not finish before deletion", Message: b.String()}}

@@ -27,7 +27,10 @@ type ixRedactor struct {
 var (
 	ixReGroupID = regexp.MustCompile(`-100\d{6,}|-\d{6,}`)
 	ixReURL     = regexp.MustCompile(`(?i)\b(?:https?|ftp)://\S+|\bt\.me/\S+|\bwww\.\S+`)
-	ixReWinPath = regexp.MustCompile(`(?i)\b[A-Z]:\\[^\s"'<>|]*|\\\\[^\s"'<>|]+`)
+	// A Windows path (drive letter or \\server\share, either slash) runs to
+	// ": " (how Windows errors go on), a quote, or the end: folder names
+	// may hold spaces.
+	ixReWinPath = regexp.MustCompile(`(?i)(?:\b[A-Z]:[\\/]|\\\\)[^"'<>|\r\n]*?(?:: |["'<>|\r\n]|$)`)
 	ixReUnix    = regexp.MustCompile(`(?:^|[\s"'(=])((?:[\w.\-()\[\] ]+/)+[\w.\-()\[\] ]*\.[A-Za-z0-9]{1,5})`)
 	ixReFile    = regexp.MustCompile(`[\w\-() ]+\.(?i:jpe?g|png|gif|webp|mp4|mkv|mov|avi|webm|mp3|ogg|oga|m4a|pdf|zip|rar|7z|docx?|xlsx?|txt|apk|exe|heic|tgs)\b`)
 	ixReAt      = regexp.MustCompile(`@[A-Za-z][A-Za-z0-9_]{3,}`)
@@ -54,7 +57,16 @@ func (r *ixRedactor) clean(s string) string {
 	}
 	s = ixReURL.ReplaceAllString(s, "<link>")
 	s = ixReEmailD.ReplaceAllString(s, "<email>")
-	s = ixReWinPath.ReplaceAllString(s, "<path>")
+	s = ixReWinPath.ReplaceAllStringFunc(s, func(m string) string {
+		end := ""
+		switch {
+		case strings.HasSuffix(m, ": "):
+			end = ": "
+		case len(m) > 0 && strings.ContainsRune("\"'<>|\r\n", rune(m[len(m)-1])):
+			end = m[len(m)-1:]
+		}
+		return "<path>" + end
+	})
 	s = ixReUnix.ReplaceAllStringFunc(s, func(m string) string {
 		lead := ""
 		if len(m) > 0 && strings.ContainsRune(" \"'(=", rune(m[0])) {
@@ -110,6 +122,7 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 	line("export %s at %s · pace %s · quiet %q–%q · pause on freeze %s · auto retry %s · download pacing %s", on(s.ExportEnabled), s.ExportTime, s.Pace, s.QuietStart, s.QuietEnd, on(s.PauseOnFreeze), on(s.AutoRetry), on(s.DownloadPacing))
 	line("duplicates %s (decoder %s, quiet %q–%q) · fixity %s · exact re-uploads %s · hold copies %s (forever %s)", on(s.DupEnabled), s.DupHWAccel, s.DupQuietStart, s.DupQuietEnd, on(s.FixityEnabled), on(s.SubstExact), on(s.HoldLikely), on(s.HoldForever))
 	line("alerts: web address %s (%s) · email %s · names in alerts %s", set(s.AlertWebhook), s.AlertWebhookKind, set(s.AlertEmailTo), on(s.AlertNames))
+	line("recognition services: auto start %s", on(s.MLAutoStart))
 	line("\n[account]")
 	acct := a.ixAccount()
 	line("frozen %v · deactivated %v · flood wait %v · last error %s", acct.Frozen, acct.Deactivated, acct.FloodWait, r.clean(acct.LastError))
@@ -120,6 +133,7 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 		line("freeze: none reported (checked %s)%s", ixAgo(fz.CheckedAt, now), map[bool]string{true: " · last check failed: " + r.clean(fz.Error), false: ""}[fz.Error != ""])
 	}
 	line("hold: %s", r.clean(a.ixHold(ctx)))
+	line("%s", r.clean(a.ixGoneDiag(now)))
 	line("\n[rescan queue]")
 	if st, err := a.ixLoadQueue(ctx); err == nil {
 		count := map[string]int{}
@@ -142,18 +156,28 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 	}
 	line("speed %.2f MB/s now, %.2f MB/s over 5 min · parts in flight allowed %d · Telegram waits: %d in the last hour, %d in the last day · speed-limit waits (no Premium): %d in the last hour, %d in the last day", mb(d.Pace.Speed), mb(d.Pace.Speed5m), d.Pace.Window, d.Pace.Floods1h, d.Pace.Floods24h, d.Pace.Premium1h, d.Pace.Premium24h)
 	for _, dc := range d.Pace.DCs {
-		line("  DC%d: window %d, in flight %d, waiting %d, %.2f MB/s (5 min %.2f), waits last hour %d (speed limit %d) · %s", dc.DC, dc.Window, dc.InFlight, dc.Waiting, mb(dc.Speed), mb(dc.Speed5m), dc.Floods1h, dc.Premium1h, dc.State)
+		line("  DC%d: window %d, in flight %d, waiting %d, %.2f MB/s (5 min %.2f), %.1f s a part, waits last hour %d (speed limit %d) · %s", dc.DC, dc.Window, dc.InFlight, dc.Waiting, mb(dc.Speed), mb(dc.Speed5m), dc.PartSecs, dc.Floods1h, dc.Premium1h, dc.State)
 	}
 	var days []string
 	for _, day := range d.Days {
 		days = append(days, fmt.Sprintf("%s %d files %d MB", day.Day[5:], day.Files, day.Bytes>>20))
 	}
 	line("per day: %s", strings.Join(days, " | "))
+	line("by hour:")
+	for _, l := range a.ixDiagHours(ctx, now) {
+		line("%s", l)
+	}
 	for _, e := range d.Errors {
 		line("  %d× %s", e.Count, r.clean(e.Error))
 	}
 	h := a.ixHeldStatus(ctx)
 	line("copies: %d exact re-uploads not downloaded (%d MB) · %d held · %d released", h.Subst, h.SavedMB, h.Held, h.Released)
+	for _, l := range a.ixCopiesDiag(ctx) {
+		line("%s", l)
+	}
+	for _, l := range a.ixTransferDiag(ctx, r.clean) {
+		line("%s", l)
+	}
 	line("\n[background work]")
 	pic := a.ixMediaStatus()
 	line("pictures %d/%d (errors %d, grouped %d, to review %d, running %v)", pic.Done, pic.Total, pic.Errors, pic.Grouped, pic.Suggested, pic.Running)
@@ -184,10 +208,13 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 	}
 	ml := a.ixMLStatusNow(ctx)
 	line("image recognition %s (model %s, Immich %s) · reachable %v · looked at %d · to go %d · unreadable %d · running %v · last error: %s", on(ml.Enabled), ml.Model, ml.Version, ml.Reachable, ml.Embedded, ml.Pending, ml.Failed, ml.Running, r.clean(ml.LastError))
-	for _, name := range []string{"faces", "text"} {
+	for _, name := range []string{"faces", "text", "frames"} {
 		t := ml.Tasks[name]
 		line("  %s %s · done %d · to go %d · unreadable %d · last error: %s", name, on(t.On), t.Done, t.Pending, t.Failed, r.clean(t.LastError))
 	}
+	atOnce, timing := a.ixMLPaceReport()
+	line("  files at once: %s", atOnce)
+	line("  ms per file: %s", timing)
 	line("speech to text %s · reachable %v · done %d · to go %d · unreadable %d · last error: %s", on(ml.Speech.On), ml.Speech.Reachable, ml.Speech.Done, ml.Speech.Pending, ml.Speech.Failed, r.clean(ml.Speech.LastError))
 	var people, faces, ungrouped int
 	_ = a.db.Reader.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM ix_people WHERE merged_into=0), COUNT(*), COALESCE(SUM(person=0),0) FROM ix_faces`).Scan(&people, &faces, &ungrouped)
@@ -221,6 +248,7 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 	box.mu.Unlock()
 	ex := a.ixExportStatus()
 	line("export: last %s · error: %s", ixAgo(ex.FinishedAt, now), r.clean(ex.Error))
+	line("%s", a.ixBackupDiag(ctx, now, r.clean))
 	line("\n[messages]")
 	var msgs, groups, gone int
 	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*), COUNT(DISTINCT group_id) FROM ix_messages`).Scan(&msgs, &groups)

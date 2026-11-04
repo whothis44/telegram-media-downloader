@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/botnick/telegram-media-downloader/core-service/internal/hash"
+	"github.com/botnick/telegram-media-downloader/core-service/internal/procutil"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/thumbs"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/ws"
 )
@@ -397,7 +398,9 @@ func (a *App) handleThumbHWAccel(w http.ResponseWriter, _ *http.Request) {
 		path = "ffmpeg"
 	}
 	compiled := []string{}
-	if out, runErr := exec.Command(path, "-hide_banner", "-hwaccels").Output(); runErr == nil {
+	cmd := exec.Command(path, "-hide_banner", "-hwaccels")
+	procutil.HideWindow(cmd)
+	if out, runErr := cmd.Output(); runErr == nil {
 		known := map[string]bool{"vaapi": true, "cuda": true, "qsv": true, "videotoolbox": true, "d3d11va": true, "dxva2": true, "opencl": true, "vulkan": true}
 		for _, line := range strings.Split(string(out), "\n") {
 			line = strings.ToLower(strings.TrimSpace(line))

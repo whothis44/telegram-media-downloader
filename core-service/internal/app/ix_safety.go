@@ -23,6 +23,9 @@ type ixSettings struct {
 	ExportEnabled bool   `json:"exportEnabled"` // write the static index every night
 	ExportTime    string `json:"exportTime"`    // HH:MM, local time of the server
 	ExportDir     string `json:"exportDir"`     // empty: next to the downloads folder
+	// BackupOff turns off the nightly backup of the Telegram session(s) and
+	// the database next to the index copy (ix_backup.go); on by default.
+	BackupOff     bool   `json:"backupOff"`
 	PauseOnFreeze bool   `json:"pauseOnFreeze"` // stop starting rescans when Telegram reports the account frozen
 	QuietStart    string `json:"quietStart"`    // HH:MM; no new rescans start between QuietStart and QuietEnd
 	QuietEnd      string `json:"quietEnd"`
@@ -45,10 +48,20 @@ type ixSettings struct {
 	MLThings      string `json:"mlThings"`      // subjects to tag, one per line; empty: ixDefaultThings
 	STTURL        string `json:"sttUrl"`        // speech to text (an OpenAI-compatible Whisper server); empty: off
 	STTModel      string `json:"sttModel"`      // its model; empty: ixSTTDefaultModel
+	// The Docker containers of the two services (see ix_docker.go), and
+	// whether the archive starts them when it starts.
+	MLContainer   string `json:"mlContainer"`
+	STTContainer  string `json:"sttContainer"`
+	MLAutoStart   bool   `json:"mlAutoStart"`
 	DeadlineOrder string `json:"deadlineOrder"` // auto (when the backup would not finish before deletion), on, off
 	// DownloadPacing lets the download pacer set how many file parts are in
 	// flight (ix.9); off goes back to how ix.8 downloaded.
 	DownloadPacing bool `json:"downloadPacing"`
+	// Big videos and the NAS (ix_lowq.go, ix_staging.go).
+	LowqFirst  bool   `json:"lowqFirst"`  // save a lower quality of very large videos first when time is short
+	LowqKeep   bool   `json:"lowqKeep"`   // keep that lower quality after the original arrives
+	StageDir   string `json:"stageDir"`   // local folder downloads go to before the library; empty: off
+	StageCapGB int    `json:"stageCapGb"` // space staged files may take
 	// Alerts (see ix_alerts.go). The SMTP password is never sent back to
 	// the dashboard; AlertSMTPPassSet says whether one is saved.
 	AlertWebhook     string `json:"alertWebhook"`
@@ -61,6 +74,9 @@ type ixSettings struct {
 	AlertEmailFrom   string `json:"alertEmailFrom"`
 	AlertEmailTo     string `json:"alertEmailTo"`
 	AlertNames       bool   `json:"alertNames"` // name the groups in alerts
+	// Copies (ix_copies.go). Both off by default means the recommended way.
+	ConfirmedGoEarly bool `json:"confirmedGoEarly"` // confirmed copies may go once the queue is empty, like other held copies
+	CopyThumbsOff    bool `json:"copyThumbsOff"`    // no Telegram previews fetched to compare by recognition
 }
 
 // public is the settings as the dashboard may see them.
@@ -71,7 +87,7 @@ func (s ixSettings) public() ixSettings {
 }
 
 func ixDefaultSettings() ixSettings {
-	return ixSettings{ExportEnabled: true, ExportTime: "03:30", Pace: "normal", DupEnabled: true, DupHWAccel: "cuda", AutoRetry: true, FixityEnabled: true, SubstExact: true, HoldLikely: true, MLText: true, MLDupes: true, DeadlineOrder: "auto", DownloadPacing: true, AlertWebhookKind: "ntfy", AlertSMTPPort: "587"}
+	return ixSettings{ExportEnabled: true, ExportTime: "03:30", Pace: "normal", DupEnabled: true, DupHWAccel: "cuda", AutoRetry: true, FixityEnabled: true, SubstExact: true, HoldLikely: true, MLText: true, MLDupes: true, MLContainer: ixMLDefaultContainer, STTContainer: ixSTTDefaultContainer, DeadlineOrder: "auto", DownloadPacing: true, LowqFirst: true, StageCapGB: 20, AlertWebhookKind: "ntfy", AlertSMTPPort: "587"}
 }
 
 func (a *App) ixLoadSettings(ctx context.Context) ixSettings {
@@ -232,7 +248,7 @@ func (a *App) ixRunSafety(ctx context.Context) {
 	for ctx.Err() == nil {
 		telegram.SetPacing(a.ixLoadSettings(ctx).DownloadPacing)
 		now := time.Now().UnixMilli()
-		st := ixClassify(a.ixRecentErrors(ctx, now-6*60*60*1000), now)
+		st := ixClassify(a.ixGoneFilter(ctx, a.ixRecentErrors(ctx, now-6*60*60*1000), now), now)
 		old := a.ixAccount()
 		ixAccountState.Store(a, st)
 		if (st.Frozen != old.Frozen || st.Deactivated != old.Deactivated) && a.hub != nil {
@@ -248,6 +264,9 @@ func (a *App) ixRunSafety(ctx context.Context) {
 
 // ixHold explains why no new rescan may start right now ("" = go ahead).
 func (a *App) ixHold(ctx context.Context) string {
+	if why := a.ixGoneHold(); why != "" {
+		return why
+	}
 	acct := a.ixAccount()
 	if acct.Deactivated {
 		return "Paused: Telegram reports this account is logged out or deactivated (" + acct.LastError + ")."
@@ -263,6 +282,7 @@ func (a *App) ixHold(ctx context.Context) string {
 }
 
 func ixParseSettings(body map[string]any, s ixSettings) (ixSettings, error) {
+	s = ixParseBackupSettings(body, s)
 	if v, ok := body["exportEnabled"].(bool); ok {
 		s.ExportEnabled = v
 	}
@@ -276,7 +296,7 @@ func ixParseSettings(body map[string]any, s ixSettings) (ixSettings, error) {
 		s.AutoRetry = v
 	}
 	for key, dst := range map[string]*bool{"fixityEnabled": &s.FixityEnabled, "substExact": &s.SubstExact, "holdLikely": &s.HoldLikely, "holdForever": &s.HoldForever,
-		"mlFaces": &s.MLFaces, "mlText": &s.MLText, "mlDupes": &s.MLDupes, "downloadPacing": &s.DownloadPacing} {
+		"mlFaces": &s.MLFaces, "mlText": &s.MLText, "mlDupes": &s.MLDupes, "downloadPacing": &s.DownloadPacing, "mlAutoStart": &s.MLAutoStart} {
 		if v, ok := body[key].(bool); ok {
 			*dst = v
 		}
@@ -339,6 +359,20 @@ func ixParseSettings(body map[string]any, s ixSettings) (ixSettings, error) {
 		}
 		s.STTModel = v
 	}
+	for _, c := range []struct {
+		key, def string
+		dst      *string
+	}{{"mlContainer", ixMLDefaultContainer, &s.MLContainer}, {"sttContainer", ixSTTDefaultContainer, &s.STTContainer}} {
+		if v, ok := body[c.key].(string); ok {
+			if v = strings.TrimSpace(v); v == "" {
+				v = c.def
+			}
+			if !ixContainerRe.MatchString(v) {
+				return s, errors.New("a Docker container name may hold letters, digits, dots, dashes and underscores only (up to 64), starting with a letter or digit")
+			}
+			*c.dst = v
+		}
+	}
 	if v, ok := body["deadlineOrder"].(string); ok {
 		if v != "auto" && v != "on" && v != "off" {
 			return s, errors.New("deadlineOrder must be auto, on or off")
@@ -389,6 +423,10 @@ func ixParseSettings(body map[string]any, s ixSettings) (ixSettings, error) {
 			return s, errors.New("pace must be normal or gentle")
 		}
 		s.Pace = v
+	}
+	ixParseCopySettings(body, &s)
+	if err := ixParseTransferSettings(body, &s); err != nil {
+		return s, err
 	}
 	return s, nil
 }

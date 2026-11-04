@@ -277,6 +277,14 @@ var ixFakeMLMode string // "422" or "500": every picture fails so
 
 var ixFakeMLMu sync.Mutex
 
+// ixSetFakeMLMode: the fake service may still be answering a request the
+// round gave up on.
+func ixSetFakeMLMode(m string) {
+	ixFakeMLMu.Lock()
+	ixFakeMLMode = m
+	ixFakeMLMu.Unlock()
+}
+
 // ixFakeML answers like Immich's machine-learning service: the embedding of
 // an image is ixSceneSim of the text the test put in it, of a text the same.
 func ixFakeML(t *testing.T, calls *int) *httptest.Server {
@@ -317,8 +325,11 @@ func ixFakeML(t *testing.T, calls *int) *httptest.Server {
 				return
 			}
 		}
-		if ixFakeMLMode != "" && r.FormValue("text") == "" {
-			code := map[string]int{"422": 422, "500": 500}[ixFakeMLMode]
+		ixFakeMLMu.Lock()
+		mode := ixFakeMLMode
+		ixFakeMLMu.Unlock()
+		if mode != "" && r.FormValue("text") == "" {
+			code := map[string]int{"422": 422, "500": 500}[mode]
 			http.Error(w, `{"detail":"model failed"}`, code)
 			return
 		}
@@ -488,7 +499,7 @@ func TestIxMLBlamesTheServiceNotTheFiles(t *testing.T) {
 	calls := 0
 	srv := ixFakeML(t, &calls)
 	defer srv.Close()
-	defer func() { ixFakeMLMode = "" }()
+	defer ixSetFakeMLMode("")
 	a, err := newConfiguredTestApp(ctx, Config{DataDir: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
@@ -513,7 +524,7 @@ func TestIxMLBlamesTheServiceNotTheFiles(t *testing.T) {
 	}
 	// The picture model fails for every picture: nothing is held against
 	// the files, and the round stops.
-	ixFakeMLMode = "422"
+	ixSetFakeMLMode("422")
 	ixFakeMLMu.Lock()
 	before := calls
 	ixFakeMLMu.Unlock()
@@ -530,7 +541,7 @@ func TestIxMLBlamesTheServiceNotTheFiles(t *testing.T) {
 		t.Fatalf("status: %+v", st)
 	}
 	// A server error is the service's fault too.
-	ixFakeMLMode = "500"
+	ixSetFakeMLMode("500")
 	if wait := a.ixMLRound(ctx, c, m, 500); wait < 5*time.Minute || errRows() != 0 {
 		t.Fatalf("500: wait %v, %d failures", wait, errRows())
 	}
@@ -538,7 +549,7 @@ func TestIxMLBlamesTheServiceNotTheFiles(t *testing.T) {
 		t.Fatalf("still reachable: %+v", st)
 	}
 	// Without ffmpeg, videos wait; pictures go ahead.
-	ixFakeMLMode = ""
+	ixSetFakeMLMode("")
 	a.ixMLRound(ctx, c, m, 500)
 	if errRows() != 0 {
 		t.Fatal("failures recorded")

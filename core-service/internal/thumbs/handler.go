@@ -20,6 +20,7 @@ import (
 	"sync"
 
 	"github.com/botnick/telegram-media-downloader/core-service/internal/hash"
+	"github.com/botnick/telegram-media-downloader/core-service/internal/procutil"
 )
 
 const (
@@ -282,6 +283,7 @@ func runFFmpeg(ctx context.Context, args []string, requested string) error {
 		}
 	}
 	cmd := exec.CommandContext(ctx, bin, args...)
+	procutil.HideWindow(cmd)
 	var stderr limitedBuffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

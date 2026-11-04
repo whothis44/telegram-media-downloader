@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/botnick/telegram-media-downloader/core-service/internal/download"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/ws"
 )
 
@@ -32,6 +33,7 @@ type purgeRecord struct {
 	DeletedRows    int64          `json:"deletedRows"`
 	DeletedQueue   int64          `json:"deletedQueue"`
 	AccessIDs      []string       `json:"accessIds"`
+	StagedFiles    []string       `json:"stagedFiles,omitempty"` // local staged copies to remove (download.PurgeStaged)
 	RestartMonitor bool           `json:"restartMonitor"`
 	Status         map[string]any `json:"status"`
 }
@@ -79,6 +81,7 @@ func clonePurge(p purgeRecord) purgeRecord {
 	copy.Paths = append([]string(nil), p.Paths...)
 	copy.ResetEntries = append([]string(nil), p.ResetEntries...)
 	copy.AccessIDs = append([]string(nil), p.AccessIDs...)
+	copy.StagedFiles = append([]string(nil), p.StagedFiles...)
 	if p.Status != nil {
 		copy.Status = cloneConfigValue(p.Status).(map[string]any)
 	}
@@ -551,6 +554,11 @@ func (a *App) commitPurge(ctx context.Context, p *purgeRecord) error {
 			p.DeletedQueue += n
 		}
 	}
+	// Downloads still waiting in the local staging folder go too: otherwise
+	// the mover would catalogue them, or queue them again when lost.
+	if p.StagedFiles, err = download.PurgeStaged(ctx, tx, p.GroupID, p.All); err != nil {
+		return err
+	}
 	if err := purgeQueueHistory(ctx, tx, p.GroupID, p.All); err != nil {
 		return err
 	}
@@ -688,6 +696,13 @@ func (a *App) planReset(p *purgeRecord) error {
 
 func (a *App) cleanPurge(ctx context.Context, p *purgeRecord) (int, error) {
 	progress := func(fields map[string]any) error { return a.purgeProgress(ctx, p, fields) }
+	if len(p.StagedFiles) > 0 && a.library != nil {
+		// Their journal rows are gone: a file that cannot be removed now is
+		// only space taken, so the purge does not wait for it.
+		if err := a.library.RemoveStagedFiles(p.StagedFiles); err != nil {
+			a.ixLog("purge: staged copies remain in the staging folder: %v", err)
+		}
+	}
 	if p.All {
 		groups := 0
 		for _, name := range p.ResetEntries {

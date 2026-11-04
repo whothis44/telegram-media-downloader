@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -53,16 +55,42 @@ func ix8FakeML(t *testing.T) *httptest.Server {
 		out := map[string]any{"imageWidth": 64, "imageHeight": 64}
 		switch {
 		case entries["facial-recognition"] != nil:
+			// A face is "who[*likeness[/other]][:score[:size]]": who is one
+			// letter; "A*0.45" is someone only 0.45 alike to A (and alike to
+			// other "A*..." faces); "A*0.45/x" is as alike to A, but alike
+			// only to other "A*.../x" faces; score is the detection score
+			// (0.95), size the box's short side in pixels (180) of a 640 px
+			// picture.
+			out["imageWidth"], out["imageHeight"] = 640, 640
 			faces := []any{}
-			for i, who := range strings.Split(parts["faces"], ",") {
-				if who == "" {
+			for i, spec := range strings.Split(parts["faces"], ",") {
+				if spec == "" {
 					continue
 				}
+				fields := strings.Split(spec, ":")
+				who, score, size, like := fields[0], 0.95, 180.0, 1.0
+				if len(fields) > 1 {
+					score, _ = strconv.ParseFloat(fields[1], 64)
+				}
+				if len(fields) > 2 {
+					size, _ = strconv.ParseFloat(fields[2], 64)
+				}
+				other := ""
+				if n, l, ok := strings.Cut(who, "*"); ok {
+					who = n
+					l, other, _ = strings.Cut(l, "/")
+					like, _ = strconv.ParseFloat(l, 64)
+				}
+				if other == "" {
+					other = who
+				}
 				v := make([]float32, 512)
-				v[int(who[0])%512] = 1
-				v[(int(who[0])*7+i)%512] = 0.2 // a little difference between photos of one person
+				v[int(who[0])%512] = float32(like)
+				v[(300+int(other[0]))%512] = float32(math.Sqrt(1 - like*like))
+				v[(int(who[0])*7+i)%512] += 0.2 // a little difference between photos of one person
 				raw, _ := json.Marshal(v)
-				faces = append(faces, map[string]any{"boundingBox": map[string]any{"x1": 8 + i*20, "y1": 8, "x2": 24 + i*20, "y2": 28}, "embedding": string(raw), "score": 0.95})
+				x1 := 8 + float64(i)*210
+				faces = append(faces, map[string]any{"boundingBox": map[string]any{"x1": x1, "y1": 40, "x2": x1 + size, "y2": 40 + size*1.2}, "embedding": string(raw), "score": score})
 			}
 			out["facial-recognition"] = faces
 		case entries["ocr"] != nil:
@@ -118,9 +146,9 @@ func TestIxFacesBecomePeopleAndCanBeCorrected(t *testing.T) {
 		if it.Key == "s01" {
 			seed += ";text=FREE PARKING|Sunday only"
 		}
-		frame := append(ixMLTestPicture(), []byte("#"+seed)...)
+		frame := append(ix10FacePicture(), []byte("#"+seed)...)
 		if it.Key == "s02" { // a video: three frames, the same two people in each, a caption in one
-			return [][]byte{frame, frame, append(ixMLTestPicture(), []byte("#faces=A,B;text=free parking|LIVE")...)}, nil
+			return [][]byte{frame, frame, append(ix10FacePicture(), []byte("#faces=A,B;text=free parking|LIVE")...)}, nil
 		}
 		return [][]byte{frame}, nil
 	}
@@ -162,8 +190,10 @@ func TestIxFacesBecomePeopleAndCanBeCorrected(t *testing.T) {
 	if err := a.ixPersonChange(ctx, pa, "rename", "Alice", 0, 0); err != nil {
 		t.Fatal(err)
 	}
+	// (B's face in s02, the video with both: files are looked at several
+	// at a time, so the order of the faces' numbers is not known.)
 	var faceOfB int64
-	_ = a.db.Reader.QueryRow(`SELECT id FROM ix_faces WHERE person=? ORDER BY id LIMIT 1`, pb).Scan(&faceOfB)
+	_ = a.db.Reader.QueryRow(`SELECT id FROM ix_faces WHERE person=? AND key='s02'`, pb).Scan(&faceOfB)
 	if err := a.ixPersonChange(ctx, pb, "remove-face", "", 0, faceOfB); err != nil {
 		t.Fatal(err)
 	}
@@ -177,15 +207,16 @@ func TestIxFacesBecomePeopleAndCanBeCorrected(t *testing.T) {
 	if len(people) != 1 || people[0].Name != "Alice" || people[0].Faces != 5 {
 		t.Fatalf("after merge: %+v", people)
 	}
-	// A face taken out is never put back by itself.
-	var person, manual int64
-	_ = a.db.Reader.QueryRow(`SELECT person, manual FROM ix_faces WHERE id=?`, faceOfB).Scan(&person, &manual)
-	if person != -1 || manual != 1 {
-		t.Fatalf("taken-out face: %d %d", person, manual)
+	// A face taken out is never put back with that person by itself, nor
+	// with the person they were merged into since.
+	var person int64
+	_ = a.db.Reader.QueryRow(`SELECT person FROM ix_faces WHERE id=?`, faceOfB).Scan(&person)
+	if person != 0 {
+		t.Fatalf("taken-out face: %d", person)
 	}
 	a.ixRegroupFaces(ctx, 100)
 	_ = a.db.Reader.QueryRow(`SELECT person FROM ix_faces WHERE id=?`, faceOfB).Scan(&person)
-	if person != -1 {
+	if person == pa || person == pb {
 		t.Fatal("regrouping put a taken-out face back")
 	}
 	// The browser finds the people's posts, and each file's faces.
@@ -193,7 +224,7 @@ func TestIxFacesBecomePeopleAndCanBeCorrected(t *testing.T) {
 	if len(m.PersonKeys[pa]) != 5 || !m.PersonKeys[pa]["s02"] {
 		t.Fatalf("person keys: %v", m.PersonKeys)
 	}
-	f := ixFeedQuery{Person: pa}
+	f := ixFeedQuery{Person: []int64{pa}}
 	n := 0
 	for pi := range m.Posts {
 		if m.postMatches(int32(pi), f, nil) {
@@ -548,6 +579,7 @@ func TestIxDeadlineRespectsPeopleAndOtherAccounts(t *testing.T) {
 	old := now.Add(-time.Hour).UnixMilli()
 	_, _ = a.db.Writer.Exec(`UPDATE tgdl_work SET updated_at=? WHERE status='completed'`, old)
 	_, _ = a.db.Writer.Exec(`UPDATE ix_deferred SET deferred_at=?`, old)
+	ixTestNoBytesFor(a, time.Hour)
 	_ = a.ixDeadlineStep(ctx)
 	if paused(other) || !a.ixDeadlineSuspended(ctx, now) {
 		t.Fatal("a stalled queue was not let go")

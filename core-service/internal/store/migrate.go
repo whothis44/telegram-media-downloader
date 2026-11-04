@@ -132,8 +132,19 @@ func RunMigrations(ctx context.Context, db *sql.DB) (int, error) {
 		return 0, err
 	}
 	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS tgdl_message_generations (
-      group_id TEXT NOT NULL,message_id INTEGER NOT NULL,generation INTEGER NOT NULL,PRIMARY KEY(group_id,message_id))`); err != nil {
+      group_id TEXT NOT NULL,message_id INTEGER NOT NULL,generation INTEGER NOT NULL,registered INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(group_id,message_id))`); err != nil {
 		return 0, err
+	}
+	// registered: the generation whose file is in the catalogue (0: unknown).
+	// No upgrade is needed for staged files journaled with registered=0: local staging was never released before this column.
+	var registeredColumn int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('tgdl_message_generations') WHERE name='registered'`).Scan(&registeredColumn); err != nil {
+		return 0, err
+	}
+	if registeredColumn == 0 {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE tgdl_message_generations ADD COLUMN registered INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return 0, err
+		}
 	}
 	engineSchema, err := schemaFS.ReadFile("engine_schema.sql")
 	if err != nil {

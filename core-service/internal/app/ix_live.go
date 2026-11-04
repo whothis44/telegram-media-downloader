@@ -75,6 +75,10 @@ func (a *App) ixRunFreeze(ctx context.Context) {
 		case <-time.After(wait):
 		}
 		wait = ixFreezeEvery
+		if a.ixIsGone() {
+			wait = 15 * time.Minute // read-only archive: nothing to ask Telegram
+			continue
+		}
 		if err := a.ixCheckFreeze(ctx); err != nil && ctx.Err() == nil {
 			old := a.ixFreeze(ctx)
 			if time.Since(time.UnixMilli(old.CheckedAt)) > ixFreezeEvery {

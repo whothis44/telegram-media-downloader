@@ -10,7 +10,7 @@ import (
 // The browser's media sets and its image-recognition search.
 
 func registerIxSetRoutes(mux *http.ServeMux, a *App) {
-	h := func(f http.HandlerFunc) http.Handler { return f }
+	h := func(f http.HandlerFunc) http.Handler { return a.requireAdmin(f) }
 	mux.Handle("GET /api/ix/browse/set", h(a.handleIxBrowseSet))
 	mux.Handle("POST /api/ix/browse/set/post", h(a.handleIxSetPost))
 	mux.Handle("POST /api/ix/browse/set/item", h(a.handleIxSetItem))
@@ -118,7 +118,7 @@ func (a *App) handleIxBrowseSet(w http.ResponseWriter, r *http.Request) {
 		}
 		fams = append(fams, f)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"set": card, "anchor": s.Anchor, "items": items, "families": fams, "from": from, "next": ixNextPage(to, len(s.Families)), "totalFamilies": len(s.Families), "compared": a.ixEmbSim() != nil})
+	writeJSON(w, http.StatusOK, map[string]any{"set": card, "anchor": s.Anchor, "items": items, "families": fams, "from": from, "next": ixNextPage(to, len(s.Families)), "totalFamilies": len(s.Families), "compared": a.ixEmbSim() != nil, "looseSim": m.LooseSim})
 }
 
 func (a *App) handleIxSetPost(w http.ResponseWriter, r *http.Request) {
@@ -159,6 +159,12 @@ func (a *App) handleIxSimilar(w http.ResponseWriter, r *http.Request) {
 	if len(text) > 500 {
 		text = text[:500]
 	}
+	if like != "" || thing != "" {
+		// Like a file, or showing a subject: pages of the feed, every view
+		// and filter (ix_search_rank.go).
+		a.ixSimilarFeed(w, r, m, like, thing)
+		return
+	}
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	if limit <= 0 || limit > 600 {
 		limit = 120
@@ -168,17 +174,16 @@ func (a *App) handleIxSimilar(w http.ResponseWriter, r *http.Request) {
 		typ = ""
 	}
 	keep := ixMLFilter(m, q.Get("group"), q.Get("category"), typ)
-	var hits []ixEmbHit
-	if thing != "" {
-		hits, err = a.ixThingHits(ctx, thing, limit, keep)
-	} else {
-		hits, err = a.ixMLSearch(ctx, m, text, like, limit, keep)
-	}
+	// A description: only pictures that stand out, or the closest few as
+	// weak matches when none do.
+	lk, err := a.ixLooksFor(ctx, m, text, limit, keep)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	hits, cutoff, strong := lk.hits, lk.cutoff, lk.strong
 	cards := []ixJCard{}
+	weak := 0
 	for _, h := range hits {
 		ii, ok := m.ByKey[h.Key]
 		if !ok {
@@ -186,9 +191,13 @@ func (a *App) handleIxSimilar(w http.ResponseWriter, r *http.Request) {
 		}
 		c := m.mediaCard(ii)
 		c.Items[0].Sim = h.Sim
+		if h.Sim < cutoff {
+			c.Weak = true
+			weak++
+		}
 		cards = append(cards, c)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"cards": cards, "total": len(cards), "next": 0, "built": m.Built.UnixMilli()})
+	writeJSON(w, http.StatusOK, map[string]any{"cards": cards, "total": strong, "weak": weak, "cutoff": cutoff, "next": 0, "built": m.Built.UnixMilli()})
 }
 
 func (a *App) handleIxMLCheck(w http.ResponseWriter, r *http.Request) {

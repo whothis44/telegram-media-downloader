@@ -50,7 +50,9 @@ func (c *GotdClient) DownloadPace() PaceStats {
 	if c == nil || c.pacer == nil {
 		return PaceStats{}
 	}
-	return c.pacer.stats()
+	s := c.pacer.stats()
+	s.Hours = c.pacer.hoursNewestFirst()
+	return s
 }
 
 // SuggestedWorkers is how many files at once keep the account's download
