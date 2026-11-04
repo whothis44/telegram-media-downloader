@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/botnick/telegram-media-downloader/core-service/internal/rescue"
@@ -133,25 +134,76 @@ func enqueueWork(ctx context.Context, db queueWriter, accountID string, target T
 // then history backfill. It matches idx_tgdl_work_priority exactly.
 const claimPriority = `CASE WHEN ttl_seconds>0 THEN 0 WHEN origin='history' THEN 2 ELSE 1 END`
 
+// The big-file lane. A file of BigFileSize or more can take hours under
+// Telegram's limits, and every file of the account shares the pacer's
+// window of parts in flight (telegram/pacer.go): with many of them at once,
+// all of them crawl and so do the small files behind them. So at most
+// BigFileLane() of them download at once and the other workers take smaller
+// files. When nothing smaller can be claimed, twice as many may go, so that
+// a queue holding only big files still keeps the window busy; never more,
+// so that small files arriving later still find free workers. Rows of old
+// versions are ordinary pending rows: the lane applies to them as to any.
+// Self-destructing media is never held back (it may vanish). 0 switches
+// the lane off.
+//
+// It is part of Claim's one statement (the writer is a single connection),
+// so two workers cannot both take the last place, and it leaves the claim
+// order (idx_tgdl_work_priority) as it is: a big file over the limit is
+// only skipped.
+const BigFileSize int64 = 1 << 30
+
+// DefaultBigFileLane is how many big files download at once unless set.
+const DefaultBigFileLane = 2
+
+var bigFileLane atomic.Int64
+
+func init() { bigFileLane.Store(DefaultBigFileLane) }
+
+// SetBigFileLane sets how many files of BigFileSize or more may download at
+// once (0: no limit).
+func SetBigFileLane(n int) { bigFileLane.Store(int64(max(0, n))) }
+
+// BigFileLane is how many files of BigFileSize or more may download at once
+// (0: no limit).
+func BigFileLane() int { return int(bigFileLane.Load()) }
+
+// claimFilter is Claim's condition on pending rows (unqualified columns),
+// with its arguments in order.
+func claimFilter(accounts []string, now time.Time, manualOnly bool) (string, []any) {
+	marks := strings.TrimSuffix(strings.Repeat("?,", len(accounts)), ",")
+	args := make([]any, 0, 2*len(accounts)+8)
+	for _, id := range accounts {
+		args = append(args, id)
+	}
+	args = append(args, now.UnixMilli())
+	origin, sOrigin := "", ""
+	if manualOnly {
+		origin, sOrigin = " AND origin<>'live'", " AND s.origin<>'live'"
+	}
+	where := `status='pending' AND paused=0 AND (SELECT paused FROM tgdl_queue_state WHERE id=1)=0 AND account_id IN (` + marks + `) AND retry_at<=?` + origin
+	if n := BigFileLane(); n > 0 {
+		where += ` AND (ttl_seconds>0 OR file_size<? OR (SELECT COUNT(*) FROM tgdl_work b WHERE b.status='processing' AND b.file_size>=? AND b.ttl_seconds=0)
+	 < CASE WHEN EXISTS (SELECT 1 FROM tgdl_work s WHERE s.status='pending' AND s.paused=0 AND s.account_id IN (` + marks + `) AND s.retry_at<=?` + sOrigin + `
+	 AND (s.file_size<? OR s.ttl_seconds>0)) THEN ? ELSE ? END)`
+		args = append(args, BigFileSize, BigFileSize)
+		for _, id := range accounts {
+			args = append(args, id)
+		}
+		args = append(args, now.UnixMilli(), BigFileSize, n, 2*n)
+	}
+	return where, args
+}
+
 // Claim changes pending -> processing in one SQLite statement. Only accounts
 // whose authenticated Run callback is active can claim their own work.
 func (s *WorkStore) Claim(ctx context.Context, accounts []string, now time.Time, manualOnly ...bool) (*Work, error) {
 	if len(accounts) == 0 {
 		return nil, nil
 	}
-	args := []any{now.UnixMilli()}
-	marks := make([]string, len(accounts))
-	for i, id := range accounts {
-		marks[i] = "?"
-		args = append(args, id)
-	}
-	args = append(args, now.UnixMilli())
-	originClause := ""
-	if len(manualOnly) > 0 && manualOnly[0] {
-		originClause = " AND origin<>'live'"
-	}
+	where, filterArgs := claimFilter(accounts, now, len(manualOnly) > 0 && manualOnly[0])
+	args := append([]any{now.UnixMilli()}, filterArgs...)
 	row := s.writer.QueryRowContext(ctx, `UPDATE tgdl_work SET status='processing',claim_generation=generation,attempts=attempts+1,updated_at=?
-	 WHERE id=(SELECT id FROM tgdl_work WHERE status='pending' AND paused=0 AND (SELECT paused FROM tgdl_queue_state WHERE id=1)=0 AND account_id IN (`+strings.Join(marks, ",")+`) AND retry_at<=?`+originClause+` ORDER BY `+claimPriority+`,id LIMIT 1)
+	 WHERE id=(SELECT id FROM tgdl_work WHERE `+where+` ORDER BY `+claimPriority+`,id LIMIT 1)
  RETURNING id,account_id,group_id,group_name,message_id,generation,media_type,file_name,file_size,body,attempts,created_at,refresh_required,origin`, args...)
 	w := new(Work)
 	if err := row.Scan(&w.ID, &w.AccountID, &w.GroupID, &w.GroupName, &w.MessageID, &w.Generation, &w.MediaType, &w.FileName, &w.FileSize, &w.body, &w.Attempts, &w.CreatedAt, &w.ForceRefresh, &w.Origin); err != nil {
