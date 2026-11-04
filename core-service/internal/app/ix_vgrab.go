@@ -36,10 +36,11 @@ import (
 // (-noaccurate_seek: one frame decoded), scaled by ffmpeg, written as small
 // JPEGs. Where that keyframe is too far before the time asked (more than
 // half the distance to the next frame; never less than a second), that time
-// is read again exactly, in a second run of all such times. On a generated
-// 60 s 1080p video with a keyframe every 8.3 s, 12 frames took 3.8 s one by
-// one and 0.3 s in one run plus 1.4 s for the 5 times read again; with a
-// keyframe a second, 1.4 s one by one and 0.3 s in one run.
+// is read again exactly, in a second run of all such times. For one
+// generated 60 s 1280×720 H.264 video, the 18 frames of clip, faces and
+// text (TestIxFramesOldAndNewOnALongVideo, two CPU cores): with a keyframe
+// every 10 s, 3.3 s one by one, 1.5 s now (6 times read again); with a
+// keyframe a second, 1.6 s one by one, 0.3 s now.
 //
 // The decoder is the duplicate finder's (Settings → duplicates: cuda by
 // default). A run the GPU fails is done again on the CPU; after a few such
@@ -48,7 +49,7 @@ import (
 // Faces and text read the same three frames of a video, a while apart (one
 // task after the other). The frames grabbed are kept in memory for a while
 // (ixVFCacheMax, oldest dropped first), and a task takes the videos whose
-// frames are held before others, so the second task usually reads none.
+// frames are held before others: the second task runs no ffmpeg for those.
 // When a video's pictures are looked at first (clip), the frames faces and
 // text still need are read in the same run.
 
@@ -156,7 +157,7 @@ func ixFFmpegFrames(ctx context.Context, full string, reqs []ixFrameReq, hw stri
 	if len(again) == 0 {
 		return keep, nil
 	}
-	ixVFStatsOf().accurate.Add(1)
+	ixVFUseOf(ctx).accurate.Add(1)
 	exact, err := ixFFmpegFramesRun(ctx, full, again, hw, true)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -244,7 +245,7 @@ func ixFFmpegFramesRun(ctx context.Context, full string, reqs []ixFrameReq, hw s
 	procutil.HideWindow(cmd)
 	var stderr ixTailBuffer
 	cmd.Stderr = &stderr
-	st := ixVFStatsOf()
+	st := ixVFUseOf(ctx)
 	st.runs.Add(1)
 	if hw != "" {
 		st.gpuRuns.Add(1)
@@ -311,20 +312,22 @@ func (t *ixTailBuffer) String() string { return t.b.String() }
 
 // ---------- the decoder ----------
 
-// ixVFStats counts ffmpeg runs for frames (all of the app's).
-type ixVFStats struct {
-	runs, gpuRuns, accurate, frames atomic.Int64
-}
-
-var ixVFStatsVar ixVFStats
-
-func ixVFStatsOf() *ixVFStats { return &ixVFStatsVar }
-
 // ixVFUse counts what one app did: videos read, and how.
 type ixVFUse struct {
 	videos, ns, gpuFailed, gpuInRow, oneByOne atomic.Int64
+	runs, gpuRuns, accurate, frames           atomic.Int64 // ffmpeg runs
 	hits, misses, prefetched                  atomic.Int64
 	gpuOff                                    atomic.Bool
+}
+
+type ixVFUseKey struct{}
+
+// ixVFUseOf is where ffmpeg runs are counted (a throwaway outside an app).
+func ixVFUseOf(ctx context.Context) *ixVFUse {
+	if u, ok := ctx.Value(ixVFUseKey{}).(*ixVFUse); ok {
+		return u
+	}
+	return &ixVFUse{}
 }
 
 // ixVFrameHW is the decoder for frames: the duplicate finder's, unless the
@@ -347,6 +350,7 @@ func (a *App) ixVFrameHW(ctx context.Context) string {
 // frame by frame (as before) when even one run of them all fails.
 func (a *App) ixGrabWithFallback(ctx context.Context, full string, reqs, own []ixFrameReq, hw string) ([]ixGrabbed, error) {
 	st := &a.ixVF().use
+	ctx = context.WithValue(ctx, ixVFUseKey{}, st)
 	start := time.Now()
 	st.videos.Add(1)
 	defer func() { st.ns.Add(int64(time.Since(start))) }()
@@ -709,7 +713,7 @@ func (a *App) ixVideoFramesOf(ctx context.Context, it *ixMItem, full string, set
 
 // ixVFrameReport is the diagnostics line of frames out of videos.
 func (a *App) ixVFrameReport() string {
-	st, use := ixVFStatsOf(), &a.ixVF().use
+	use := &a.ixVF().use
 	videos := use.videos.Load()
 	per := func(v int64) float64 {
 		if videos == 0 {
@@ -721,10 +725,10 @@ func (a *App) ixVFrameReport() string {
 	dec := "cpu"
 	if use.gpuOff.Load() {
 		dec = "cpu (gpu off after failures)"
-	} else if st.gpuRuns.Load() > 0 {
+	} else if use.gpuRuns.Load() > 0 {
 		dec = "gpu"
 	}
 	return fmt.Sprintf("videos read %d (%.0f ms, %.1f ffmpeg runs, %.1f frames each; decoder %s; gpu failed→cpu %d; exact re-reads %d; frame by frame %d) · frames kept: %d videos, %d MB; reused %d times (%d read with the frames of other tasks)",
-		videos, per(use.ns.Load())/1e6, per(st.runs.Load()), per(st.frames.Load()), dec, use.gpuFailed.Load(), st.accurate.Load(), use.oneByOne.Load(),
+		videos, per(use.ns.Load())/1e6, per(use.runs.Load()), per(use.frames.Load()), dec, use.gpuFailed.Load(), use.accurate.Load(), use.oneByOne.Load(),
 		n, b>>20, use.hits.Load(), use.prefetched.Load())
 }
