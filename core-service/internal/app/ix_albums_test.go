@@ -625,3 +625,78 @@ func TestIxChatOverlapNamesMirrorsRepostersAndVarietyChats(t *testing.T) {
 		}
 	}
 }
+
+// ---------- generic files ----------
+
+// Fifteen variety chats repost one popular album (whole, or six of its ten
+// files) four times each, among albums of their own; a logo is added to
+// one post of each of 60 unrelated albums; a small icon travels with the
+// same two files 60 times.
+func TestIxPopularAlbumsAreNotTakenForLogos(t *testing.T) {
+	x := newIxTestModel()
+	album := ixKeys("pop", 0, 10)
+	x.post("orig", 1, album...)
+	date := int64(10)
+	for c := 0; c < 15; c++ {
+		g := fmt.Sprint("variety", c)
+		for k := 0; k < 4; k++ {
+			date++
+			if k == 3 {
+				x.post(g, date, album[:6]...)
+			} else {
+				x.post(g, date, album...)
+			}
+			x.post(g, date, ixKeys(fmt.Sprintf("own%d-%d-", c, k), 0, 5)...)
+		}
+	}
+	for i := 0; i < 60; i++ {
+		x.post(fmt.Sprint("chat", i%15), date+int64(i), append(ixKeys(fmt.Sprintf("u%d-", i), 0, 4), "logo")...)
+		x.post(fmt.Sprint("chat", i%15), date+int64(i), "icon", "w0", "w1")
+	}
+	m := x.done()
+	icon := &m.Items[m.ByKey["icon"]]
+	icon.W, icon.H = 96, 96
+	ixMarkGeneric(m)
+	cl := func(k string) *ixMCluster { return &m.Clusters[m.Items[m.ByKey[k]].Cluster] }
+	if c := cl("pop0"); c.Posts != 61 || c.Chats != 16 {
+		t.Fatalf("the album is not over the old counts: %+v", c)
+	}
+	for _, k := range album {
+		if cl(k).Generic {
+			t.Fatalf("%s of the popular album was taken for a logo", k)
+		}
+	}
+	if !cl("logo").Generic || !cl("icon").Generic {
+		t.Fatalf("logo %v icon %v", cl("logo").Generic, cl("icon").Generic)
+	}
+	if cl("w0").Generic {
+		t.Fatal("a file always beside the icon is not a logo")
+	}
+	// So every repost of the album is one family; the logo joins nothing.
+	ixAssignFamilies(m)
+	f := m.Posts[0].Family
+	n := 0
+	for pi := range m.Posts {
+		if m.Posts[pi].Family == f {
+			n++
+		}
+	}
+	if n != 61 {
+		t.Fatalf("the album's family has %d posts, want 61", n)
+	}
+	logoFam := map[int32]bool{}
+	for _, ii := range cl("logo").Items {
+		logoFam[m.Posts[m.Items[ii].Post].Family] = true
+	}
+	if len(logoFam) != 60 {
+		t.Fatalf("the logo joined posts: %d families", len(logoFam))
+	}
+	// The old rule would have split the reposts apart.
+	for ci := range m.Clusters {
+		c := &m.Clusters[ci]
+		c.Generic = c.Posts > ixGenericPosts && c.Chats > ixGenericChats
+	}
+	if !cl("pop0").Generic {
+		t.Fatal("the scene no longer shows the old rule's mistake")
+	}
+}

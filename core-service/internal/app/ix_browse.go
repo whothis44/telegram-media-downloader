@@ -26,7 +26,8 @@ import (
 // family, so overlapping albums merge. Anything else starts a family.
 // Clusters seen in more than 50 posts across more than 10 chats (logos,
 // stickers, promo cards) are "generic" and ignored, so they cannot weld
-// unrelated posts together.
+// unrelated posts together; a popular album's files, which travel with
+// the same siblings each time, are not (ix_generic.go).
 
 const (
 	ixGenericPosts  = 50
@@ -530,8 +531,8 @@ func (a *App) ixBuildModel(ctx context.Context) (*ixModel, error) {
 			}
 		}
 		c.Posts, c.Chats = len(posts), len(chats)
-		c.Generic = c.Posts > ixGenericPosts && c.Chats > ixGenericChats
 	}
+	ixMarkGeneric(m) // logos and stickers, told from popular albums (ix_generic.go)
 	ixAssignFamilies(m)
 	m.Suggest = ixContentSuggestions(m)
 	m.Overlap = ixComputeOverlap(m)
