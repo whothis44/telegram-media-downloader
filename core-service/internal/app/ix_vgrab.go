@@ -155,10 +155,13 @@ func ixFFmpegFrames(ctx context.Context, full string, reqs []ixFrameReq, hw stri
 		}
 	}
 	if len(again) == 0 {
-		return keep, nil
+		return ixByTime(keep), nil
 	}
 	ixVFUseOf(ctx).accurate.Add(1)
 	exact, err := ixFFmpegFramesRun(ctx, full, again, hw, true)
+	if err != nil && hw != "" && ctx.Err() == nil {
+		exact, err = ixFFmpegFramesRun(ctx, full, again, "", true)
+	}
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -169,13 +172,19 @@ func ixFFmpegFrames(ctx context.Context, full string, reqs []ixFrameReq, hw stri
 				keep = append(keep, g)
 			}
 		}
-		return keep, nil
+		return ixByTime(keep), nil
 	}
-	return append(keep, exact...), nil
+	return ixByTime(append(keep, exact...)), nil
+}
+
+// ixByTime puts frames in the order they are in the video.
+func ixByTime(gs []ixGrabbed) []ixGrabbed {
+	sort.SliceStable(gs, func(i, j int) bool { return gs[i].AtMs < gs[j].AtMs })
+	return gs
 }
 
 var (
-	ixShowinfoRe = regexp.MustCompile(`showinfo@o(\d+) @ [^\]]*\]\s*n:\s*\d+\s+pts:\s*-?\d+\s+pts_time:\s*(-?\d+(?:\.\d+)?)`)
+	ixShowinfoRe = regexp.MustCompile(`showinfo@o(\d+)\b[^\n]*?\bn:\s*\d+\s+pts:\s*\S+\s+pts_time:\s*(-?\d+(?:\.\d+)?)`)
 	ixStartRe    = regexp.MustCompile(`Duration:[^,]*, start: (-?\d+(?:\.\d+)?)`)
 )
 
@@ -666,8 +675,9 @@ func (a *App) ixVideoFramesOf(ctx context.Context, it *ixMItem, full string, set
 				keep = true
 			}
 		}
+		hw := a.ixVFrameHW(ctx)
 		clock := ixMLClock(ctx, ixStFFmpeg)
-		gs, err := a.ixGrabWithFallback(ctx, full, reqs, own, a.ixVFrameHW(ctx))
+		gs, err := a.ixGrabWithFallback(ctx, full, reqs, own, hw)
 		clock()
 		if err != nil {
 			return nil, err
@@ -708,7 +718,7 @@ func (a *App) ixVideoFramesOf(ctx context.Context, it *ixMItem, full string, set
 	if len(gs) == 0 {
 		return nil, errors.New("no frame could be read from the video")
 	}
-	return frames(gs), nil
+	return frames(ixByTime(gs)), nil
 }
 
 // ixVFrameReport is the diagnostics line of frames out of videos.

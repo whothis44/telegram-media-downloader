@@ -131,7 +131,7 @@ func TestIxFFmpegFramesAtTheRightTimes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	check("exact", got, []int64{10000, 4000, 16000}, 20)
+	check("exact", got, []int64{4000, 10000, 16000}, 20)
 	if use.accurate.Load() != 1 || use.runs.Load() != 3 {
 		t.Fatal("not read again exactly")
 	}
@@ -401,5 +401,24 @@ func TestIxFramesOldAndNewOnALongVideo(t *testing.T) {
 			t.Errorf("not faster: %v vs %v", now, old)
 		}
 		_ = os.Remove(video)
+	}
+}
+
+// ffmpeg's messages as Linux and Windows builds print them.
+func TestIxShowinfoLines(t *testing.T) {
+	log := "  Duration: 00:01:00.00, start: 1.400000, bitrate: 15494 kb/s\n" +
+		"[showinfo@o0 @ 0x55d0c1a2b3c0] config in time_base: 1/12800, frame_rate: 25/1\n" +
+		"[showinfo@o0 @ 0x55d0c1a2b3c0] n:   0 pts:  38400 pts_time:4.4     duration:    512 duration_time:0.04\n" +
+		"[showinfo@o12 @ 000001f5c2d8a640] n:   0 pts:1280000 pts_time:101.4   duration:    512\n" +
+		"[showinfo@o3 @ 000001f5c2d8a640] n:   0 pts:NOPTS   pts_time:NOPTS\n"
+	got := map[string]string{}
+	for _, m := range ixShowinfoRe.FindAllStringSubmatch(log, -1) {
+		got[m[1]] = m[2]
+	}
+	if fmt.Sprint(got) != "map[0:4.4 12:101.4]" {
+		t.Fatalf("%v", got)
+	}
+	if m := ixStartRe.FindStringSubmatch(log); m == nil || m[1] != "1.400000" {
+		t.Fatalf("start %v", m)
 	}
 }
