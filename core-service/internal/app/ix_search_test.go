@@ -597,6 +597,27 @@ func TestIxPeopleFilterEveryView(t *testing.T) {
 	}
 }
 
+// The browser page offers the controls the feed takes.
+func TestIxBrowserPageOffersTheSearchControls(t *testing.T) {
+	page := string(ixBrowseHTML)
+	for _, want := range []string{
+		`id="match"`, `data-m="words"`, `data-m="looks"`, `data-m="both"`, // one search box
+		`value="best"`, `rank', 'relevance'`, // best match first
+		`id="side-people"`, `p.set('person', S.people`, // people in the sidebar
+		`data-like=`, `id="from"`, `id="to"`, ` shown of `, // more like this on tiles, dates, counts
+		`class="tab dis" data-tab="people"`, `class="tab dis" data-tab="things"`, // shown, greyed out until turned on
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("browse.html lacks %s", want)
+		}
+	}
+	for _, gone := range []string{`id="qml"`, `id="tab-people" hidden`, `id="tab-things" hidden`} {
+		if strings.Contains(page, gone) {
+			t.Errorf("browse.html still has %s", gone)
+		}
+	}
+}
+
 // ---------- the cut-off ----------
 
 // ix8CountingML is ix8FakeML, counting the requests it answers.

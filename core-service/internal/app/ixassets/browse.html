@@ -14,7 +14,7 @@ a{color:var(--accent)}button,input,select{font:inherit;color:inherit}
 header.top{position:sticky;top:0;z-index:20;background:var(--bg);border-bottom:1px solid var(--line);padding:8px 16px;display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center}
 header.top h1{font-size:18px;margin:0;white-space:nowrap}header.top .grow{flex:1}
 .tabs{display:flex;gap:4px;flex-wrap:wrap}.tab{border:1px solid var(--line);background:var(--soft);border-radius:8px;padding:5px 11px;cursor:pointer;font-size:13.5px}
-.tab.on{background:var(--accent);border-color:var(--accent);color:var(--accent-fg);font-weight:600}
+.tab.on{background:var(--accent);border-color:var(--accent);color:var(--accent-fg);font-weight:600}.tab.dis{opacity:.5;cursor:help}
 .tab .n{opacity:.8;margin-left:4px;font-size:12px}
 .layout{display:grid;grid-template-columns:250px minmax(0,1fr);min-height:calc(100vh - 50px)}
 aside{border-right:1px solid var(--line);padding:10px 8px 40px;overflow:auto;max-height:calc(100vh - 50px);position:sticky;top:50px}
@@ -55,6 +55,8 @@ button.b:disabled{opacity:.5;cursor:default}button.link{border:0;background:none
 .tile img{width:100%;height:100%;object-fit:cover;display:block}
 .tile .lab{position:absolute;left:5px;bottom:5px;font-size:11px;font-weight:600;padding:1px 6px;border-radius:6px;background:rgba(0,0,0,.6);color:#fff}
 .tile .lab.r{left:auto;right:5px}.tile .lab.t{bottom:auto;top:5px}
+.tile .lab.like{left:auto;right:5px;bottom:27px;cursor:pointer;display:none;font-size:13px;padding:0 7px}.tile:hover .lab.like,.tile:focus .lab.like{display:block}
+@media (hover:none){.tile .lab.like{display:block}}
 .tile .lab.new{background:var(--new)}.tile .lab.held{background:#9a6700}.tile .lab.miss{background:#a4262c}
 .tile.held img,.tile.missing img{filter:blur(1.5px) grayscale(.3);opacity:.75}
 .tile .doc{display:flex;align-items:center;justify-content:center;height:100%;padding:8px;text-align:center;font-size:12px;color:var(--muted);word-break:break-all}
@@ -101,8 +103,8 @@ mark{background:#fff1a8;color:#111}
     <button class="tab" data-tab="chat">Read a chat</button>
     <button class="tab" data-tab="review">Review look-alikes<span class="n" id="n-review"></span></button>
     <button class="tab" data-tab="organise">Collections &amp; files</button>
-    <button class="tab" data-tab="people" id="tab-people" hidden>People</button>
-    <button class="tab" data-tab="things" id="tab-things" hidden>Things</button>
+    <button class="tab dis" data-tab="people" id="tab-people" aria-disabled="true" title="Faces are off: turn them on in Archive → Settings → Image recognition">People</button>
+    <button class="tab dis" data-tab="things" id="tab-things" aria-disabled="true" title="Image recognition is off: turn it on in Archive → Settings → Image recognition">Things</button>
     <button class="tab" data-tab="entities">Links &amp; wallets</button>
   </nav>
   <span class="grow"></span>
@@ -130,6 +132,7 @@ mark{background:#fff1a8;color:#111}
         <select class="t" id="status"><option value="">Any state</option><option value="held">Held back (likely copies)</option><option value="missing">Not downloaded</option><option value="subst">Same file as another upload</option></select>
         <select class="t" id="sort"><option value="best" hidden>Best match first</option><option value="new">Newest first</option><option value="old">Oldest first</option></select>
         <label class="chk"><input type="checkbox" id="dups"> Only reposted</label>
+        <span class="chk" title="Posted on or after the first day, and on or before the last (either can be left empty)">From <input class="t" type="date" id="from"> to <input class="t" type="date" id="to"></span>
       </div>
       <div id="feed-note" class="muted" style="margin-bottom:8px"></div>
       <div id="feed" class="grid"></div>
@@ -203,7 +206,7 @@ const fmtDur = (s) => { if (!s) return ''; s = Math.round(s); const h = Math.flo
 const roleText = { original: 'original', repost: 'repost', adds: 'adds new files' };
 const statusText = { held: 'waiting – likely a copy', missing: 'not downloaded', subst: 'same file as another upload' };
 
-const S = { info: null, view: 'families', group: '', category: '', people: [], q: '', match: 'both', type: '', status: '', sort: 'new', dups: false, collection: 0, cursor: 0, loading: false, done: false, tab: 'browse', cards: [], like: '', likeName: '', tieFrom: '' };
+const S = { info: null, view: 'families', group: '', category: '', people: [], from: 0, to: 0, q: '', match: 'both', type: '', status: '', sort: 'new', dups: false, collection: 0, cursor: 0, loading: false, done: false, tab: 'browse', cards: [], like: '', likeName: '', tieFrom: '' };
 const roleName = { core: 'Shared', member: 'Belongs', loose: 'Probably not part of it', elsewhere: 'Belongs to another set' };
 
 // ---------- info, sidebar ----------
@@ -237,8 +240,8 @@ function renderSide() {
   const mlLine = !ml.enabled ? '' : `<br>Image recognition: ${ml.reachable ? (ml.embedded || 0).toLocaleString() + ' looked at' + (ml.pending ? ', ' + ml.pending.toLocaleString() + ' to go' : '') + (ml.failed ? ', ' + ml.failed + ' unreadable' : '') : '<span class="bad">' + esc(ml.lastError || 'not reachable') + '</span>'}`;
   $('#match').hidden = !ml.enabled;
   $('#q').placeholder = ml.enabled ? 'Search words, and what pictures and videos show' : 'Search captions, messages, file names, text in pictures and speech';
-  $('#tab-things').hidden = !ml.enabled;
-  $('#tab-people').hidden = !(ml.tasks && ml.tasks.faces && ml.tasks.faces.on);
+  tabOn('#tab-things', ml.enabled, 'What the pictures show, from a list of subjects', 'Image recognition is off: turn it on in Archive → Settings → Image recognition');
+  tabOn('#tab-people', facesOn, 'Faces found in the pictures and videos, grouped by person', 'Faces are off: turn them on in Archive → Settings → Image recognition');
   h += `<h3>Index</h3><div class="muted" style="padding:0 8px">${(info.sets || 0).toLocaleString()} sets · ${info.families.toLocaleString()} originals · ${info.repostPosts.toLocaleString()} reposts folded in · ${info.mergedAlbums.toLocaleString()} merged albums · ${info.held} held back · ${info.missing.toLocaleString()} not downloaded<br>Pictures indexed: ${info.media.done.toLocaleString()} / ${info.media.total.toLocaleString()} · videos: ${info.videos.done.toLocaleString()} / ${info.videos.total.toLocaleString()}${mlLine}<br><button class="link" id="rebuild">Rebuild now</button></div>`;
   $('#side').innerHTML = h;
   $$('#side .side-item').forEach((el) => el.addEventListener('click', () => {
@@ -254,6 +257,11 @@ function renderSide() {
   }
   const rb = $('#rebuild'); if (rb) rb.addEventListener('click', async () => { rb.disabled = true; const r = await api('POST', '/api/ix/browse/rebuild'); if (!r.ok) toast(errText(r)); await loadInfo(); resetFeed(); });
 }
+// A tab that needs a setting: greyed out, saying where to turn it on.
+function tabOn(sel, on, title, off) {
+  const t = $(sel); t.classList.toggle('dis', !on); t.setAttribute('aria-disabled', String(!on)); t.title = on ? title : off;
+}
+
 // ---------- people in the sidebar ----------
 // Click a person to see only posts with them; a second one: posts with both.
 async function loadSidePeople() {
@@ -305,6 +313,7 @@ function tileHTML(it, i, cardKey) {
   if (it.status === 'held') labs.push(`<span class="lab t held">waiting · likely copy</span>`);
   if (it.status === 'missing') labs.push(`<span class="lab t miss">not downloaded</span>`);
   if (it.sim && S.showSim) labs.push(`<span class="lab sim" title="Likeness (image recognition)">${Math.round(it.sim * 100)}%</span>`);
+  if (it.key && (it.type === 'photo' || it.type === 'video') && S.info && S.info.ml && S.info.ml.enabled) labs.push(`<span class="lab like" role="button" data-like="${esc(it.key)}" data-like-type="${esc(it.type)}" title="More like this">≈</span>`);
   const inner = (it.type === 'photo' || it.type === 'video' || it.status !== 'ok')
     ? `<img loading="lazy" alt="" src="${esc(it.thumb)}" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'doc',textContent:${esc(JSON.stringify(String(it.name || it.type)))}}))">`
     : `<div class="doc">📄 ${esc(it.name || it.type)}<br>${esc(fmtSize(it.size))}</div>`;
@@ -366,6 +375,8 @@ function feedURL() {
   const p = new URLSearchParams({ view: S.view, sort: S.sort === 'best' ? 'new' : S.sort, cursor: String(S.cursor), limit: S.view === 'media' ? '120' : '48' });
   for (const k of ['group', 'category', 'type', 'status']) if (S[k]) p.set(k, S[k]);
   if (S.dups) p.set('dups', '1');
+  if (S.from) p.set('from', String(S.from));
+  if (S.to) p.set('to', String(S.to));
   if (S.collection) p.set('collection', String(S.collection));
   if (S.people.length) p.set('person', S.people.map((x) => x.id).join(','));
   if (S.like || S.thing) {
@@ -387,7 +398,7 @@ async function loadMore() {
   feed.insertAdjacentHTML('beforeend', r.data.cards.map((c, i) => cardHTML(c, start + i)).join(''));
   S.cursor = r.data.next; S.done = !r.data.next;
   const what = { families: 'originals', sets: 'sets', posts: 'posts', media: 'pictures and videos' }[S.view];
-  const count = esc(r.data.total.toLocaleString() + ' ' + what);
+  const count = esc((S.cards.length < r.data.total ? S.cards.length.toLocaleString() + ' shown of ' : '') + r.data.total.toLocaleString() + ' ' + what);
   let note;
   if (S.like || S.thing) note = count + (S.like ? ' with pictures most like the chosen ' + esc(S.likeName) : ' with pictures showing “' + esc(S.thing) + '”') + ', best first' + searchNote(r.data.search || {}) + ' · <button class="link" id="like-clear">back to browsing</button>';
   else if (S.q) note = count + ' match “' + esc(S.q) + '”' + searchNote(r.data.search || {});
@@ -396,6 +407,15 @@ async function loadMore() {
   if ($('#like-clear')) $('#like-clear').onclick = () => { S.like = ''; S.thing = ''; resetFeed(); };
   if ($('#people-clear')) $('#people-clear').onclick = () => { S.people = []; renderSidePeople(); resetFeed(); };
   $('#sentinel').textContent = S.done ? (S.cards.length ? 'End' : 'Nothing here') : '';
+  // A short page leaves the end in sight: the observer would not fire again.
+  if (!S.done && S.tab === 'browse' && $('#sentinel').getBoundingClientRect().top < window.innerHeight + 800) setTimeout(loadMore, 0);
+}
+// More like this file, in the current view and filters (a search is set aside).
+function moreLike(key, type) {
+  if (S.q) { $('#q').value = ''; setQuery(''); }
+  S.like = key; S.likeName = type === 'video' ? 'video' : 'picture'; S.thing = '';
+  if (dlg.open) dlg.close();
+  switchTab('browse'); window.scrollTo(0, 0); resetFeed();
 }
 // What a search found, after the count.
 function searchNote(s) {
@@ -428,6 +448,9 @@ function setQuery(q) {
 let qTimer; $('#q').addEventListener('input', () => { clearTimeout(qTimer); qTimer = setTimeout(() => { setQuery($('#q').value.trim()); resetFeed(); }, 350); });
 for (const id of ['type', 'status', 'sort']) $('#' + id).addEventListener('change', () => { S[id] = $('#' + id).value; resetFeed(); });
 $('#dups').addEventListener('change', () => { S.dups = $('#dups').checked; resetFeed(); });
+// Dates: from the start of the first day to the end of the last, in this computer's time.
+const daySecs = (v, end) => v ? Math.floor(new Date(v + (end ? 'T23:59:59' : 'T00:00:00')).getTime() / 1000) : 0;
+for (const id of ['from', 'to']) $('#' + id).addEventListener('change', () => { S.from = daySecs($('#from').value, false); S.to = daySecs($('#to').value, true); resetFeed(); });
 $('#match').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; S.match = b.dataset.m; $$('#match button').forEach((x) => x.classList.toggle('on', x === b)); S.like = ''; S.thing = ''; if (S.q) resetFeed(); });
 
 // A card's menu is placed over the page (cards clip what overflows them),
@@ -461,6 +484,8 @@ document.addEventListener('click', async (e) => {
   if (setB) { openSet(Number(setB.dataset.set)); return; }
   const fam = e.target.closest('[data-fam]');
   if (fam) { openFamily(Number(fam.dataset.fam)); return; }
+  const lk = e.target.closest('[data-like]');
+  if (lk) { moreLike(lk.dataset.like, lk.dataset.likeType); return; }
   const tile = e.target.closest('.tile[data-card]');
   if (tile && tile.closest('.fixmode')) { fixTile(tile); return; }
   if (tile) {
@@ -513,7 +538,7 @@ async function openItem(items, i) {
     <div class="row" style="margin-top:8px"><button class="b" id="lb-prev" ${i ? '' : 'disabled'}>← Previous</button><button class="b" id="lb-next" ${i < items.length - 1 ? '' : 'disabled'}>Next →</button>
     ${it.key ? `<button class="b" id="lb-collect">Add to a collection…</button>` : ''}
     ${it.key && S.info && S.info.ml && S.info.ml.enabled && (it.type === 'photo' || it.type === 'video') ? `<button class="b" id="lb-like">More like this</button>` : ''}</div>`);
-  if ($('#lb-like')) $('#lb-like').onclick = () => { S.like = it.key; S.likeName = it.type === 'video' ? 'video' : 'picture'; dlg.close(); switchTab('browse'); window.scrollTo(0, 0); resetFeed(); };
+  if ($('#lb-like')) $('#lb-like').onclick = () => moreLike(it.key, it.type);
   $('#lb-prev').onclick = () => openItem(items, i - 1);
   $('#lb-next').onclick = () => openItem(items, i + 1);
   if (it.key) $('#lb-collect').onclick = () => collectDialog(['file:' + it.key]);
@@ -691,7 +716,7 @@ function switchTab(tab) {
   if (tab === 'entities') loadEntities();
   if (tab === 'chat' && !$('#chat-group').value && S.group) { $('#chat-group').value = S.group; openChat(S.group); }
 }
-$('#tabs').addEventListener('click', (e) => { const t = e.target.closest('.tab'); if (t) switchTab(t.dataset.tab); });
+$('#tabs').addEventListener('click', (e) => { const t = e.target.closest('.tab'); if (!t) return; if (t.classList.contains('dis')) { toast(t.title); return; } switchTab(t.dataset.tab); });
 
 // ---------- chat reader ----------
 const C = { group: '', msgs: [], names: {}, topics: {}, topic: '', highlight: 0 };
