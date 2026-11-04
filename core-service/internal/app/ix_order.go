@@ -193,13 +193,23 @@ func (a *App) ixLastProgress(ctx context.Context) time.Time {
 // the backfills cannot queue big files without end.
 const ixBigApartTimes = 2
 
+//
+// The two counts are kept for ixApartCacheTTL: a backfill at its limit asks
+// every 250 ms.
 func (a *App) ixWaitingApart(ctx context.Context, cap int) int {
+	n := a.ixCaches().apart.get(ixApartCacheTTL, func() ([2]int, bool) { return a.ixWaitingApartNow(ctx) })
+	return n[0] + min(n[1], ixBigApartTimes*max(0, cap))
+}
+
+// ixWaitingApartNow counts the paused items waiting apart, and the big
+// files waiting for their lane.
+func (a *App) ixWaitingApartNow(ctx context.Context) ([2]int, bool) {
 	var apart, big int
-	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COALESCE(SUM(w.paused=1),0), COALESCE(SUM(w.paused=0),0) FROM tgdl_work w WHERE w.status='pending' AND w.origin<>'live' AND (
+	err := a.db.Reader.QueryRowContext(ctx, `SELECT COALESCE(SUM(w.paused=1),0), COALESCE(SUM(w.paused=0),0) FROM tgdl_work w WHERE w.status='pending' AND w.origin<>'live' AND (
 		w.paused=1 AND (
 		EXISTS (SELECT 1 FROM ix_held h WHERE h.work_id=w.id AND h.released_at=0 AND h.reason<>'')
 		OR EXISTS (SELECT 1 FROM ix_deferred x WHERE x.work_id=w.id AND x.released_at=0)
 		OR EXISTS (SELECT 1 FROM ix_lowq q WHERE q.work_id=w.id AND q.state='saved'))
 		OR ? > 0 AND w.paused=0 AND w.ttl_seconds=0 AND w.file_size>=?)`, engine.BigFileLane(), engine.BigFileSize).Scan(&apart, &big)
-	return apart + min(big, ixBigApartTimes*max(0, cap))
+	return [2]int{apart, big}, err == nil
 }

@@ -71,7 +71,13 @@ type ixBigFiles struct {
 	CapPaused  bool `json:"capPaused"`
 }
 
+// ixBigFilesNow is kept for ixStatusCacheTTL (the Downloads card asks
+// every few seconds).
 func (a *App) ixBigFilesNow(ctx context.Context) ixBigFiles {
+	return a.ixCaches().bigFiles.get(ixStatusCacheTTL, func() (ixBigFiles, bool) { return a.ixBigFilesMeasure(ctx), ctx.Err() == nil })
+}
+
+func (a *App) ixBigFilesMeasure(ctx context.Context) ixBigFiles {
 	b := ixBigFiles{MinBytes: engine.BigFileSize, Limit: engine.BigFileLane()}
 	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COALESCE(SUM(st='run'),0), COALESCE(SUM(st='wait'),0), COALESCE(SUM(st='aside'),0), COALESCE(SUM(st='held'),0) FROM (
 		SELECT CASE WHEN w.status='processing' THEN 'run'

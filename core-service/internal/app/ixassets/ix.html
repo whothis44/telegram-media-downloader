@@ -320,10 +320,14 @@ function viewRescan() {
       const when = (it.state === 'waiting' && it.nextAt > Date.now() ? ` · retry ${esc(fmtTime(it.nextAt))}` : '') + (it.resumeFrom && it.state !== 'done' ? ` · continues below message #${it.resumeFrom}` : '');
       const files = it.phase === 'files';
       const lq = (state.status.queueLeft || {})[it.groupId] || {};
-      // "done" only once the files it queued have downloaded.
+      // "done" only once the files it queued have downloaded. Files that
+      // wait for a person (paused by one, or copies held for ever) do not
+      // keep it "downloading": "done · N held back".
       const pending = it.state === 'done' && ((lq.left || 0) + (lq.apart || 0)) > 0;
-      const label = pending ? `downloading: ${fmtNum((lq.left || 0) + (lq.apart || 0))} left` : { waiting: files ? 'files: waiting' : 'messages: waiting', running: files ? 'fetching files' : 'saving messages', done: 'done', failed: 'failed' }[it.state] || it.state;
-      const leftNote = pending && lq.apart ? ` · ${fmtNum(lq.apart)} of them held back for now (likely copies, or larger files while time is short)` : '';
+      const heldBack = it.state === 'done' ? (lq.held || 0) : 0;
+      const label = pending ? `downloading: ${fmtNum((lq.left || 0) + (lq.apart || 0))} left` : heldBack ? `done · ${fmtNum(heldBack)} held back` : { waiting: files ? 'files: waiting' : 'messages: waiting', running: files ? 'fetching files' : 'saving messages', done: 'done', failed: 'failed' }[it.state] || it.state;
+      const leftNote = (pending && lq.apart ? ` · ${fmtNum(lq.apart)} of them held back for now (likely copies, or larger files while time is short)` : '')
+        + (heldBack ? ` · ${fmtNum(heldBack)} ${pending ? 'more ' : ''}wait for you (paused, or likely copies held until you decide)` : '');
       const msgs = it.messagesAt ? it.messages : (it.state === 'running' && !files) || (it.state === 'done' && !it.phase) ? (it.carried || 0) + it.processed : it.carried ? it.carried : null;
       const missing = it.messagesAt ? it.missing : null;
       h += `<tr><td class="n">${i + 1}</td><td>${it.priority ? '<b title="Goes first, files included">★</b> ' : ''}${esc(it.name)}${it.error ? `<div class="muted bad">${esc(it.error)}</div>` : ''}</td><td><span class="pill ${esc(pending ? 'running' : it.state)}" ${pending ? 'title="Every message is read and every missing file is queued; these files are still in the download queue"' : ''}>${esc(label)}</span><span class="muted">${when}${leftNote}</span></td><td class="n">${msgs === null ? '<span class="muted">–</span>' : fmtNum(msgs)}</td><td class="n">${missing === null ? '<span class="muted">–</span>' : fmtNum(missing)}</td><td class="n">${(files && it.state !== 'waiting') || !it.phase ? fmtNum(it.downloaded) : '<span class="muted">–</span>'}</td><td class="n">${it.attempts || 0}</td>
