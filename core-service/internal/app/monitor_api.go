@@ -225,7 +225,7 @@ func (a *App) ingestWork(ctx context.Context, work *engine.Work, message *tg.Mes
 			return engine.ErrFiltered
 		}
 	}
-	return a.ixIngestWork(ctx, work, message, transport)
+	return a.ixIngestWork(ixWithRequeue(ctx, work, message), work, message, transport)
 }
 func (a *App) monitorEvent(state string, err error) {
 	a.ixNoteEngine(err)

@@ -279,6 +279,7 @@ func TestStagingRoomWaitsForMoves(t *testing.T) {
 	dir, stage := t.TempDir(), t.TempDir()
 	l, _, _ := stagedLibrary(t, dir, stage)
 	l.Staging = func(context.Context) Staging { return Staging{Dir: stage, Cap: 30} }
+	noFreeSpaceKnown(t)
 	var calls atomic.Int64
 	if _, err := l.Ingest(context.Background(), stagedItem(1, "1", 20), bytesClient(&calls, bytes.Repeat([]byte("a"), 20))); err != nil {
 		t.Fatal(err)

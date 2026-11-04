@@ -439,6 +439,18 @@ func (c *Controller) RetryAll(ctx context.Context) (int, error) {
 	return count, err
 }
 
+// RequeueLost: see WorkStore.RequeueLost. It works with the engine stopped
+// too; a running engine is woken.
+func (c *Controller) RequeueLost(ctx context.Context, accountID string, target Target, message *tg.Message, origin string) (bool, error) {
+	ok, err := c.work.RequeueLost(ctx, accountID, target, message, origin)
+	if err == nil {
+		if run, runErr := c.queueRun(); runErr == nil {
+			c.wake(run)
+		}
+	}
+	return ok, err
+}
+
 func (c *Controller) DismissJob(ctx context.Context, key string) (bool, error) {
 	run, err := c.queueRun()
 	if err != nil {

@@ -338,6 +338,48 @@ func (s *WorkStore) RetryAll(ctx context.Context) (int, error) {
 	return int(n), err
 }
 
+// RequeueLost puts a message back in the queue whose download had counted
+// as done but whose file was lost before it reached the library (a staged
+// copy removed from the staging folder). The finished item gets message's
+// body back and goes again; an item still waiting or running is left as it
+// is; a removed one is queued anew. queued is false only when the item was
+// skipped (filtered out or cancelled since) and stays so.
+func (s *WorkStore) RequeueLost(ctx context.Context, accountID string, target Target, message *tg.Message, origin string) (queued bool, err error) {
+	media, err := telegram.MessageAttachment(message)
+	if err != nil {
+		return false, err
+	}
+	if target.ID == "" {
+		target.ID = media.GroupID
+	}
+	if origin == "stories" {
+		if media.MessageID, err = telegram.StoryKey(message.ID); err != nil {
+			return false, err
+		}
+	}
+	buffer := bin.Buffer{}
+	if err = message.Encode(&buffer); err != nil {
+		return false, err
+	}
+	var status string
+	err = s.writer.QueryRowContext(ctx, `UPDATE tgdl_work SET status=CASE WHEN status IN ('completed','failed') THEN 'pending' ELSE status END,
+ body=CASE WHEN status IN ('completed','failed') THEN ? ELSE body END,
+ generation=CASE WHEN status IN ('completed','failed') THEN generation+1 ELSE generation END,
+ attempts=CASE WHEN status IN ('completed','failed') THEN 0 ELSE attempts END,
+ retry_at=CASE WHEN status IN ('completed','failed') THEN 0 ELSE retry_at END,
+ error=CASE WHEN status IN ('completed','failed') THEN NULL ELSE error END,
+ paused=CASE WHEN status IN ('completed','failed') THEN 0 ELSE paused END,
+ updated_at=? WHERE group_id=? AND message_id=? RETURNING status`, buffer.Buf, time.Now().UnixMilli(), target.ID, media.MessageID).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		if accountID == "" {
+			return false, errors.New("the queue item is gone and its account is unknown")
+		}
+		_, _, err = enqueueWork(ctx, s.writer, accountID, target, message, 0, origin)
+		return err == nil, err
+	}
+	return err == nil && status != "skipped", err
+}
+
 func (s *WorkStore) DismissJob(ctx context.Context, key string) (bool, error) {
 	result, err := s.writer.ExecContext(ctx, `DELETE FROM tgdl_work WHERE group_id||'_'||message_id=? AND status IN ('completed','failed','skipped')`, key)
 	if err != nil {

@@ -122,6 +122,10 @@ function banner() {
   else if (acct.frozen) h += `<div class="status warn"><b>Telegram reports this account is frozen</b> (${esc(acct.lastError)}). Rescans keep going for as long as Telegram still lets the account read history${s.settings && s.settings.pauseOnFreeze ? ' — except that you chose to pause them on a freeze (Settings)' : ''}. Messages saved here stay saved even if the account is later deleted.</div>`;
   else if (acct.floodWait) h += `<div class="status"><b>Telegram asked the app to slow down</b> (${esc(acct.lastError)}, seen on a download in the last 6 hours). The app waits as asked; nothing to do. The Downloads card shows how often it happened in the last hour.</div>`;
   if (s.hold && (!acct.deactivated)) h += `<div class="status warn">${esc(s.hold)}</div>`;
+  // The local staging folder (ix_staging.go).
+  const g = s.staging || {};
+  if (g.full && g.fullSince && Date.now() - g.fullSince > 10 * 60000) h += `<div class="status bad"><b>Downloads are waiting for room in the local staging folder</b> (since ${esc(fmtTime(g.fullSince))}): ${fmtNum(g.waiting || 0)} file(s), ${fmtSize(g.bytes || 0)}, wait to be copied to the downloads folder${g.failing ? ', and copying them fails' : ''}. Check that the downloads folder (the NAS) can be reached; raising the staging space in Settings also lets downloads go on.</div>`;
+  if (g.stuck) h += `<div class="status warn"><b>${fmtNum(g.stuck)} file(s) in the local staging folder need you</b> (${fmtSize(g.stuckBytes || 0)}): they could not be copied to the downloads folder. Their local copies are kept and do not hold up downloads; the diagnostics report says why.</div>`;
   return h;
 }
 
@@ -136,7 +140,7 @@ function viewBackup() {
   else if (st.ok) line = `<span class="ok">OK</span> — last backup ${esc(fmtTime(st.finishedAt))}, ${fmtSize(st.bytes)} (database ${fmtSize(st.dbBytes)}, ${fmtNum(st.sessions)} session file(s)); ${fmtNum(st.kept)} nightly cop${st.kept === 1 ? 'y' : 'ies'} kept.${st.sessions ? '' : ' <span class="warn">No Telegram session file was found to copy.</span>'}`;
   else line = `<span class="bad">Failed</span> ${esc(fmtTime(st.finishedAt))}: ${esc(st.error)}.${st.lastOkAt ? ` The last good backup is from ${esc(fmtTime(st.lastOkAt))} (${fmtSize(st.lastOkBytes)}).` : ' There is no good backup yet.'}`;
   return `<div class="card"><h2>Backup of the session and database</h2><div>${line}</div>
-<div class="muted">${b.enabled ? `Made every night after the index copy, into <code>${esc(b.dir || '?')}</code>; the last ${fmtNum(b.keep)} nights are kept.` : 'The nightly backup is turned off (Settings).'} Each copy is checked (sizes, checksums, and SQLite's integrity check on the database copy). The session files stay encrypted: restoring them also needs the app's secret key, <code>secret.key</code> in the data folder <code>${esc(b.dataDir || '?')}</code>, which is never copied there. Keep a copy of that folder somewhere safe too.</div>${b.dirError ? `<div class="bad">${esc(b.dirError)}</div>` : ''}
+<div class="muted">${b.enabled ? `Made every night after the index copy, into <code>${esc(b.dir || '?')}</code>; the last ${fmtNum(b.keep)} nights are kept.` : 'The nightly backup is turned off (Settings).'} Each copy is checked (SQLite's integrity check on the database snapshot on this computer, then sizes and checksums of everything copied). The session files stay encrypted: restoring them also needs the app's secret key, <code>secret.key</code> in the data folder <code>${esc(b.dataDir || '?')}</code>, which is never copied there. Keep a copy of that folder somewhere safe too.</div>${b.dirError ? `<div class="bad">${esc(b.dirError)}</div>` : ''}
 <div class="btns"><button class="b" data-act="backup-now" ${st.running ? 'disabled' : ''}>Back up now</button></div></div>`;
 }
 

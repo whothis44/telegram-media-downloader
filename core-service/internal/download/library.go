@@ -39,7 +39,10 @@ type Item struct {
 	// otherwise each became an entry pointing at the same file.
 	SkipDuplicates bool
 	// NoStage: write straight to the library even when a staging folder is set.
-	NoStage    bool `json:"-"`
+	NoStage bool `json:"-"`
+	// Requeue (optional) is what the caller needs to queue the message again
+	// (StageLost). It is kept with a staged file only.
+	Requeue    []byte `json:",omitempty"`
 	generation int64
 }
 
@@ -68,9 +71,12 @@ type Library struct {
 	// Staging (optional) names a local folder downloads are written to
 	// first, then copied to the library (staging.go). OnStaged is told when
 	// such a file is in the library; StageHold is held while it is added.
+	// StageLost puts a message back in the download queue when its staged
+	// file disappeared before it reached the library.
 	Staging   func(context.Context) Staging
 	OnStaged  func(context.Context, Item, Record)
 	StageHold func(context.Context) (func(), error)
+	StageLost func(context.Context, Item) error
 	stage     stageState
 
 	writer, reader *sql.DB
@@ -137,6 +143,22 @@ func (l *Library) enter(ctx context.Context, key string) (func(), error) {
 	}
 }
 
+// tryEnter is enter without waiting: ok is false while someone else holds key.
+func (l *Library) tryEnter(key string) (func(), bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if _, busy := l.flights[key]; busy {
+		return nil, false
+	}
+	done := make(chan struct{})
+	l.flights[key] = done
+	return func() { l.mu.Lock(); delete(l.flights, key); close(done); l.mu.Unlock() }, true
+}
+
+func messageKey(item Item) string {
+	return "message:" + item.GroupID + ":" + strconv.FormatInt(item.MessageID, 10)
+}
+
 func (l *Library) Ingest(ctx context.Context, item Item, client Client) (Record, error) {
 	item.GroupID = strings.TrimSpace(item.GroupID)
 	item.Identity.Kind = strings.ToLower(strings.TrimSpace(item.Identity.Kind))
@@ -150,7 +172,7 @@ func (l *Library) Ingest(ctx context.Context, item Item, client Client) (Record,
 	case <-ctx.Done():
 		return Record{}, ctx.Err()
 	}
-	messageRelease, err := l.enter(ctx, "message:"+item.GroupID+":"+strconv.FormatInt(item.MessageID, 10))
+	messageRelease, err := l.enter(ctx, messageKey(item))
 	if err != nil {
 		return Record{}, err
 	}
@@ -535,6 +557,11 @@ func (l *Library) register(ctx context.Context, item Item, media candidate, reus
 	}
 	if generation != item.generation {
 		return Record{}, ErrSuperseded
+	}
+	// Which version is in the catalogue: a staged file of an older one is
+	// dropped only once a newer one is (staging.go).
+	if _, err := tx.ExecContext(ctx, `UPDATE tgdl_message_generations SET registered=? WHERE group_id=? AND message_id=?`, item.generation, item.GroupID, item.MessageID); err != nil {
+		return Record{}, err
 	}
 	f, info, err := l.open(media.path)
 	if err != nil {
