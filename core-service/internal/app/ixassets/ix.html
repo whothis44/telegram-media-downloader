@@ -226,6 +226,13 @@ function viewDownloads() {
   let h = `<div class="card"><h2>Downloads</h2><div>${state1}</div>
 <div class="muted" style="margin-top:6px">${fmtNum(d.downloading)} downloading · ${fmtNum(d.waiting)} waiting · <span class="${d.failed ? 'bad' : ''}">${fmtNum(d.failed)} failed</span>${d.givenUp ? ` (${fmtNum(d.givenUp)} no longer retried automatically)` : ''}</div>
 ${(() => {
+  const b = d.big || {};
+  let x = '';
+  if (b.downloading || b.waiting || b.setAside || b.held) x += `<div class="muted">Files of 1 GB or more: ${fmtNum(b.downloading || 0)} downloading${b.limit ? ` (at most ${fmtNum(b.limit)} at once, ${fmtNum(b.limit * 2)} when nothing smaller is waiting, so the other workers take smaller files)` : ' (no limit set)'} · ${fmtNum(b.waiting || 0)} waiting their turn · ${fmtNum(b.setAside || 0)} set aside until smaller files are done${b.held ? ` · ${fmtNum(b.held)} held as copies or upgrades` : ''}. Settings → Big videos and the NAS.</div>`;
+  if (b.capPaused) x += `<div class="warn" style="margin-top:4px">A rescan's file pass is waiting for room in the download queue: ${fmtNum(b.queueCount)} queued file(s) count towards its limit of ${fmtNum(b.queueCap)}, so it queues no more until some finish.</div>`;
+  return x;
+})()}
+${(() => {
   const p = d.pace || {}; const mbs = (b) => (b / 1e6).toFixed(b >= 1e7 ? 0 : 1) + ' MB/s';
   let x = '';
   if (p.off) x += `<div style="margin-top:6px">Download pacing is <b>off</b> (Settings → Account safety): files download as they did in ix.8, and the speed isn't measured here. The per-day totals below still compare the two.</div>`;
@@ -499,6 +506,7 @@ ${state.diag ? `<textarea id="diag" readonly style="width:100%;min-height:260px;
 <div class="card"><h2>Big videos and the NAS</h2>
 <label><input type="checkbox" data-set="lowqFirst" ${s.lowqFirst ? 'checked' : ''}> Save a lower quality of very large videos first when time is short: when a deletion date is set and a video of 200 MB or more would not be reached in time, a smaller copy Telegram keeps of it (at least 480p, at most 40% of the size) is saved first; the original follows after everything else and then replaces it. Not done for likely copies.</label>
 <label style="margin-left:22px"><input type="checkbox" data-set="lowqKeep" ${s.lowqKeep ? 'checked' : ''}> …and keep the lower quality after the original arrives</label>
+<div class="btns">Files of 1 GB or more downloading at once: <input class="t" data-set-text="bigAtOnce" value="${esc(String(s.bigAtOnce == null ? 2 : s.bigAtOnce))}" style="width:60px"> <span class="muted">(recommended: 2; 0 = no limit). A file that big can take hours, and all downloads share how many parts Telegram allows in flight, so with many of them at once everything crawls. The other workers take smaller files; with nothing smaller waiting, twice as many go.</span></div>
 <div class="btns">Download first to this folder on this computer: <input class="t" data-set-text="stageDir" value="${esc(s.stageDir || '')}" placeholder="empty = off; for example ${esc((state.status.staging || {}).suggest || '')}" style="flex:1;min-width:240px"></div>
 <div class="btns">Space it may use: <input class="t" data-set-text="stageCapGb" value="${esc(String(s.stageCapGb || 20))}" style="width:70px"> GB</div>
 <div class="muted">Downloads are written to this local folder, checked, then copied to the downloads folder (your NAS) and checked again before the local copy is removed, so a network hiccup on the share doesn't fail a download. A copy that fails is retried for as long as it takes; nothing on the NAS is ever replaced. The folder must exist and must not be inside the downloads folder. When it is full, new downloads wait for copies to finish.</div>
