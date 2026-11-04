@@ -319,6 +319,19 @@ func (c *Controller) queueRun() (*running, error) {
 	return c.run, nil
 }
 
+// Running reports the engine's run: the accounts it runs, and whether it
+// observes live updates (monitoring) or only works through the queue (a
+// manual run, whose workers take no live items). ok is false when no
+// engine runs.
+func (c *Controller) Running() (accounts []string, observing, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.run == nil || c.state != "running" {
+		return nil, false, false
+	}
+	return append([]string(nil), c.run.ids...), c.run.observing.Load(), true
+}
+
 func (c *Controller) RequireRunning() error {
 	_, err := c.queueRun()
 	return err

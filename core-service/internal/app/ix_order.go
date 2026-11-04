@@ -24,8 +24,9 @@ import (
 //
 // A stage goes once every stage before it is done. "Done" leaves out what
 // could not go anyway: items a person paused, items of accounts that are
-// not downloading, and items waiting to retry later. Otherwise one of those
-// would hold every later stage back for ever.
+// not downloading, items waiting to retry later, and live items while the
+// engine runs without monitoring (a manual run takes none). Otherwise one
+// of those would hold every later stage back for ever.
 //
 // An item belongs to one stage: a held copy that is also set aside counts
 // as held (once let go it is set aside, and the deadline order lets it go).
@@ -82,6 +83,9 @@ func (a *App) ixOrderNow(ctx context.Context) (ixOrder, error) {
 		for _, id := range accounts {
 			args = append(args, id)
 		}
+	}
+	if _, observing, running := ixEngineRun(a); running && !observing {
+		acct += " AND w.origin<>'live'" // a manual run does not take live items
 	}
 	rows, err := a.db.Reader.QueryContext(ctx, `SELECT stage, COUNT(*) FROM (SELECT CASE
 			WHEN h.work_id IS NOT NULL AND COALESCE(c.confirm,'')='confirmed' THEN `+confirmed+`

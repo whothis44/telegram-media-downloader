@@ -471,3 +471,33 @@ func TestIxSizeLookupsUseAnIndex(t *testing.T) {
 		}
 	}
 }
+
+func ixTestEngine(t *testing.T, accounts []string, observing, running bool) {
+	t.Helper()
+	old := ixEngineRun
+	ixEngineRun = func(*App) ([]string, bool, bool) { return accounts, observing, running }
+	t.Cleanup(func() { ixEngineRun = old })
+}
+
+// A manual run (the engine works through the queue, monitoring off) takes
+// no live items: they do not hold the later stages back meanwhile.
+func TestIxOrderLeavesLiveItemsOutOfAManualRun(t *testing.T) {
+	a, ctx := ix8App(t, nil)
+	live := ixTestWork(t, a, "acc", "-1001", 1, "photo", 1<<20, 0)
+	if _, err := a.db.Writer.Exec(`UPDATE tgdl_work SET origin='live' WHERE id=?`, live); err != nil {
+		t.Fatal(err)
+	}
+	held := ixTestWork(t, a, "acc", "-1001", 2, "video", 20<<20, 1)
+	ixTestHold(t, a, held, "", 0)
+	for _, tc := range []struct {
+		name               string
+		observing, running bool
+		work               int
+	}{{"monitoring", true, true, 1}, {"manual run", false, true, 0}, {"engine stopped", false, false, 1}} {
+		ixTestEngine(t, []string{"acc"}, tc.observing, tc.running)
+		o, err := a.ixOrderNow(ctx)
+		if err != nil || o.Waiting[ixStageWork] != tc.work || o.Waiting[ixStageHeld] != 1 || o.clearBefore(ixStageHeld) != (tc.work == 0) {
+			t.Fatalf("%s: %+v %v", tc.name, o, err)
+		}
+	}
+}

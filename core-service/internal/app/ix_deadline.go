@@ -342,6 +342,15 @@ func (a *App) ixDeadlineStep(ctx context.Context) error {
 	return a.ixDeadlineRelease(ctx, band)
 }
 
+// ixEngineRun is the engine's run (engine.Controller.Running); replaceable
+// in tests.
+var ixEngineRun = func(a *App) (accounts []string, observing, running bool) {
+	if a.monitor == nil {
+		return nil, false, false
+	}
+	return a.monitor.Running()
+}
+
 // ixWorkingAccounts are the accounts that downloaded something in the last
 // day or are downloading now (none known: no limit).
 func (a *App) ixWorkingAccounts(ctx context.Context, now time.Time) []string {
