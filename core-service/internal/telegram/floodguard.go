@@ -41,6 +41,12 @@ type floodGuard struct {
 	// downloads back but not the account's other requests (rescans, gap
 	// checks), and the reverse.
 	filesUntil time.Time
+	// untilSpeedOnly and filesSpeedOnly: the gate closed now was closed
+	// only by FLOOD_PREMIUM_WAITs, Telegram's speed limit for accounts
+	// without Premium. It is about volume: fewer files at once do not help
+	// against it. A plain FLOOD_WAIT while the gate is closed makes it a
+	// real gate until it reopens.
+	untilSpeedOnly, filesSpeedOnly bool
 	// floods counts the FLOOD_WAITs Telegram has answered this account with.
 	floods atomic.Uint64
 }
@@ -60,21 +66,43 @@ func (g *floodGuard) FloodWaitUntil() time.Time {
 }
 
 func (g *floodGuard) close(d time.Duration) time.Time {
-	return g.closeGate(d, false)
+	return g.closeGate(d, false, false)
 }
 
-func (g *floodGuard) closeGate(d time.Duration, files bool) time.Time {
+// closeGate closes the account's gate (or the files' one) for d; premium:
+// the wait was a FLOOD_PREMIUM_WAIT.
+func (g *floodGuard) closeGate(d time.Duration, files, premium bool) time.Time {
 	g.floods.Add(1)
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	gate := &g.until
+	gate, speedOnly := &g.until, &g.untilSpeedOnly
 	if files {
-		gate = &g.filesUntil
+		gate, speedOnly = &g.filesUntil, &g.filesSpeedOnly
 	}
-	if until := time.Now().Add(d + floodGateMargin); until.After(*gate) {
+	now := time.Now()
+	if now.After(*gate) {
+		*speedOnly = premium // the gate was open: a new wait starts
+	} else {
+		*speedOnly = *speedOnly && premium
+	}
+	if until := now.Add(d + floodGateMargin); until.After(*gate) {
 		*gate = until
 	}
 	return *gate
+}
+
+// SpeedLimitedOnly: a gate is closed now, and every gate closed was
+// closed only by Telegram's speed limit for accounts without Premium
+// (FLOOD_PREMIUM_WAIT), not by a plain FLOOD_WAIT.
+func (g *floodGuard) SpeedLimitedOnly() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	now := time.Now()
+	account, files := !now.After(g.until), !now.After(g.filesUntil)
+	if !account && !files {
+		return false
+	}
+	return (!account || g.untilSpeedOnly) && (!files || g.filesSpeedOnly)
 }
 
 // FilesWaitUntil reports when file downloads may go on (zero when open).
@@ -170,7 +198,7 @@ func (g *floodGuard) invokeGate(ctx context.Context, next tg.Invoker, input bin.
 		if hooks.flood != nil {
 			hooks.flood(d, tgerr.Is(err, tgerr.ErrPremiumFloodWait))
 		}
-		g.closeGate(d, files)
+		g.closeGate(d, files, tgerr.Is(err, tgerr.ErrPremiumFloodWait))
 		if d > floodSleepThreshold || attempt >= floodInlineRetries {
 			return err
 		}

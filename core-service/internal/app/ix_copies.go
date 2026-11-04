@@ -76,13 +76,18 @@ CREATE TABLE IF NOT EXISTS ix_copy_sample ( -- big queued videos checked by fram
 	parts      INTEGER NOT NULL DEFAULT 0,  -- 1 MiB parts read from Telegram, all tries
 	samples    INTEGER NOT NULL DEFAULT 0,
 	tries      INTEGER NOT NULL DEFAULT 0,
-	at         INTEGER NOT NULL DEFAULT 0
+	at         INTEGER NOT NULL DEFAULT 0,
+	reason     TEXT    NOT NULL DEFAULT '', -- failed: why, a category (ix_copies_sample.go)
+	final      INTEGER NOT NULL DEFAULT 0   -- failed for a reason in the file itself: not tried again
 );
 `
 
 func ixEnsureCopiesSchema(ctx context.Context, db *sql.DB) error {
-	_, err := db.ExecContext(ctx, ixCopiesSchema)
-	return err
+	if _, err := db.ExecContext(ctx, ixCopiesSchema); err != nil {
+		return err
+	}
+	// Checks made before the reasons were recorded are tried again.
+	return ixAddColumns(ctx, db, "ix_copy_sample", [][2]string{{"reason", "TEXT NOT NULL DEFAULT ''"}, {"final", "INTEGER NOT NULL DEFAULT 0"}})
 }
 
 // ixParseCopySettings reads the copy settings sent by the dashboard.
@@ -92,6 +97,9 @@ func ixParseCopySettings(body map[string]any, s *ixSettings) {
 	}
 	if v, ok := body["copyThumbs"].(bool); ok {
 		s.CopyThumbsOff = !v
+	}
+	if v, ok := body["previewsAll"].(string); ok && (v == "auto" || v == "on" || v == "off") {
+		s.PreviewsAll = v
 	}
 }
 
@@ -582,7 +590,12 @@ func (a *App) ixCopiesDiag(ctx context.Context) []string {
 		out = append(out, "  seen in messages, not downloaded: not measured yet")
 	}
 	s := c.Sampled
-	out = append(out, fmt.Sprintf("  big videos sampled: checked %d big videos using %d MB instead of %.1f GB; %d confirmed copies; %d could not be checked · previews kept %d · likeness threshold %.3f",
-		s.Checked, s.PartsMB, float64(s.SizeBytes)/(1<<30), s.Confirmed, s.Failed, c.Previews, c.Threshold))
+	failed := ""
+	if s.Failed > 0 {
+		failed = fmt.Sprintf(" (%s; %d to try again later)", s.failedText(), s.Retry)
+	}
+	out = append(out, fmt.Sprintf("  big videos sampled: checked %d big videos using %d MB instead of %.1f GB; %d confirmed copies; %d could not be checked%s · previews kept %d · likeness threshold %.3f",
+		s.Checked, s.PartsMB, float64(s.SizeBytes)/(1<<30), s.Confirmed, s.Failed, failed, c.Previews, c.Threshold))
+	out = append(out, a.ixPreviewAllDiag(ctx))
 	return out
 }

@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/botnick/telegram-media-downloader/core-service/internal/engine"
 )
 
 // Racing the deletion date. When Telegram has set one, the archive
@@ -70,8 +72,12 @@ type ixDeadlineInfo struct {
 	ToGetBytes int64            `json:"toGetBytes"`
 	Copies     int              `json:"copies"`   // not downloaded, but the same Telegram file is saved or queued elsewhere
 	Rate24h    float64          `json:"rate24h"`  // bytes a second over the last day
+	Rate3h     float64          `json:"rate3h"`   // over the last 3 hours
 	Rate1h     float64          `json:"rate1h"`   // over the last hour
-	EtaSec     int64            `json:"etaSec"`   // at the day's rate; 0: unknown
+	Rate       float64          `json:"rate"`     // the one the estimate uses (ixDeadlineRate)
+	RateUsed   string           `json:"rateUsed"` // which: "day" or "3h"
+	Premium1h  int              `json:"premium1h"`
+	EtaSec     int64            `json:"etaSec"`   // at Rate; 0: unknown
 	Finishes   string           `json:"finishes"` // yes, no, unknown
 	Deferred   []int            `json:"deferred"` // items set aside, by band
 	Unscanned  int              `json:"unscanned"`
@@ -97,7 +103,9 @@ func (a *App) ixDeadlineEstimate(ctx context.Context, withLoss bool) ixDeadlineI
 			AND NOT EXISTS (SELECT 1 FROM ix_subst s WHERE s.group_id=w.group_id AND s.message_id=w.message_id)`, now.Add(-since).UnixMilli()).Scan(&bytes)
 		return float64(bytes) / since.Seconds()
 	}
-	d.Rate24h, d.Rate1h = rate(24*time.Hour), rate(time.Hour)
+	d.Rate24h, d.Rate3h, d.Rate1h = rate(24*time.Hour), rate(3*time.Hour), rate(time.Hour)
+	d.Premium1h = ixDeadlinePremium(a)
+	d.Rate, d.RateUsed = ixDeadlineRate(d.Rate24h, d.Rate3h, d.Premium1h > 0)
 	// The queue holds only what rescans have reached so far: what is left
 	// is every file seen in messages and not downloaded, a copy counted
 	// once (the browser's model knows which are copies).
@@ -130,8 +138,8 @@ func (a *App) ixDeadlineEstimate(ctx context.Context, withLoss bool) ixDeadlineI
 		need = max(need, d.ToGetBytes)
 	}
 	d.Finishes = "unknown"
-	if d.Rate24h > 0 {
-		d.EtaSec = int64(float64(need) / d.Rate24h)
+	if d.Rate > 0 {
+		d.EtaSec = int64(float64(need) / d.Rate)
 		if d.Until > 0 {
 			d.Finishes = map[bool]string{true: "yes", false: "no"}[now.Unix()+d.EtaSec < d.Until]
 		}
@@ -221,6 +229,24 @@ func (a *App) ixDeadlineEstimate(ctx context.Context, withLoss bool) ixDeadlineI
 		d.Loss = d.Loss[:300]
 	}
 	return d
+}
+
+// ixDeadlinePremium is how many of Telegram's speed-limit waits for
+// accounts without Premium (FLOOD_PREMIUM_WAIT) the running accounts'
+// downloads met in the last hour (replaceable in tests).
+var ixDeadlinePremium = func(a *App) int { return a.ixPaceNow().Premium1h }
+
+// ixDeadlineRate is the speed the estimate goes by: the slower of the last
+// day's and the last 3 hours'. Telegram's speed limit for accounts without
+// Premium is about volume: once it starts, the day's figure still holds the
+// hours before it and promises far more than the downloads now get. While
+// the limit is on (a FLOOD_PREMIUM_WAIT in the last hour) the last 3 hours
+// alone count, never the day.
+func ixDeadlineRate(day, last3h float64, throttled bool) (float64, string) {
+	if throttled || last3h < day {
+		return last3h, "3h"
+	}
+	return day, "day"
 }
 
 // ixDeadlineActive: on always; auto when a deletion date is set and the
@@ -318,6 +344,14 @@ func (a *App) ixDeadlineStep(ctx context.Context) error {
 			UNION ALL SELECT x.band FROM ix_deferred x JOIN tgdl_work w ON w.id=x.work_id WHERE x.released_at=0 AND w.status='pending')`, args...).Scan(&cur); err != nil {
 		return err
 	}
+	// Files the rescans have not queued yet count too (ixUnqueuedBand):
+	// otherwise a queue holding only big files sees the big band as the
+	// smallest with work, sets nothing aside, the backfill finds its queue
+	// limit full of them and stops, and the smaller files never arrive.
+	unqueued, reading := false, false
+	if ub, ok, running := a.ixUnqueued(ctx); ok && (!cur.Valid || int64(ub) < cur.Int64) {
+		cur, unqueued, reading = sql.NullInt64{Int64: int64(ub), Valid: true}, true, running
+	}
 	if !cur.Valid {
 		return nil
 	}
@@ -339,7 +373,195 @@ func (a *App) ixDeadlineStep(ctx context.Context) error {
 	if err = tx.Commit(); err != nil {
 		return err
 	}
-	return a.ixDeadlineRelease(ctx, band)
+	if err = a.ixDeadlineRelease(ctx, band); err != nil {
+		return err
+	}
+	if unqueued {
+		return a.ixDeadlineKeepBusy(ctx, acctClause, args, reading)
+	}
+	return nil
+}
+
+// ixUnqueuedBand is the band of the files the backfills still have to
+// queue: 0 while a chat without a public username still has its files
+// pass to come (waiting or running in the rescan queue) or a backfill that
+// queues files is running for one, ixPublicLane when only public chats
+// have; ok is false when nothing is left to queue. A rescan queue that a
+// person stopped, or that is held for good (the pause on freeze, a logged
+// out or deleted account), counts only for the pass already running: the
+// others may not start for a long time, and the files set aside meanwhile
+// would only wait. Quiet hours end within the day: they do not count.
+//
+// A files pass waiting to try again counts only while it is likely to
+// bring files soon: fewer than ixUnqueuedTries failed attempts, and its
+// next try at most ixUnqueuedSoon away. The rescan queue keeps trying for
+// ever (no retry limit by default), and a group that keeps failing (the
+// account frozen, a flood wait, a backfill that found the download queue
+// full) would otherwise keep the files set aside for good while nothing
+// comes; without it the deadline order goes by the files queued.
+func (a *App) ixUnqueuedBand(ctx context.Context) (band int, ok bool) {
+	band, ok, _ = a.ixUnqueued(ctx)
+	return band, ok
+}
+
+const (
+	ixUnqueuedTries = 3               // a files pass that failed this often no longer counts
+	ixUnqueuedSoon  = 5 * time.Minute // nor one whose next try is further away
+)
+
+// ixUnqueued is ixUnqueuedBand, and whether a pass that queues files is
+// running now (not only waiting to start or to try again).
+func (a *App) ixUnqueued(ctx context.Context) (band int, ok, running bool) {
+	groups := map[string]bool{}
+	soon := time.Now().Add(ixUnqueuedSoon).UnixMilli()
+	if q, err := a.ixLoadQueue(ctx); err == nil && q.Running {
+		acct := a.ixAccount()
+		held := a.ixGoneHold() != "" || acct.Deactivated || acct.Frozen && a.ixLoadSettings(ctx).PauseOnFreeze
+		for _, it := range q.Items {
+			if it.Phase != ixPhaseFiles {
+				continue
+			}
+			switch {
+			case it.State == "running":
+				groups[it.GroupID], running = true, true
+			case it.State == "waiting" && !held && it.Attempts < ixUnqueuedTries && it.NextAt <= soon:
+				groups[it.GroupID] = true
+			}
+		}
+	}
+	a.historyMu.Lock()
+	for _, j := range a.historyJobs {
+		if j.State == "running" && !j.MessagesOnly && !j.Cancelled {
+			groups[j.GroupID], running = true, true
+		}
+	}
+	a.historyMu.Unlock()
+	if len(groups) == 0 {
+		return 0, false, false
+	}
+	public := map[string]bool{}
+	if rows, err := a.db.Reader.QueryContext(ctx, `SELECT group_id FROM ix_group_info WHERE username<>''`); err == nil {
+		for rows.Next() {
+			var id string
+			if rows.Scan(&id) == nil {
+				public[id] = true
+			}
+		}
+		rows.Close()
+	}
+	for id := range groups {
+		if !public[id] {
+			return 0, true, running
+		}
+	}
+	return ixPublicLane, true, running
+}
+
+// ixEngineWorkers is how many files the engine downloads at once now
+// (replaceable in tests).
+var ixEngineWorkers = func(a *App, ctx context.Context) int {
+	if a.monitor == nil {
+		return 0
+	}
+	g, err := a.monitor.Gauges(ctx)
+	if err != nil {
+		return 0
+	}
+	return g.Workers
+}
+
+// ixDeadlineKeepBusy: while files are set aside for files not queued yet,
+// workers that would have nothing to do take set-aside files after all,
+// smallest first, so that downloads never stop while the rescans read
+// chats holding only big files. They go only while fewer than half of the
+// workers have a file (busy, or one they could take now: ixClaimableNow),
+// and only up to that half, so that the smaller files the rescans bring
+// find workers free: a set-aside file can take an hour. The half holds
+// only while a pass that queues files is running (reading): when the
+// passes only wait to start or to try again, nothing arrives meanwhile and
+// every worker may take a file. Those not taken by the next step are set
+// aside again (they are pending and unpaused); the big-file lane
+// (engine.BigFileLane) still limits the biggest. acctClause and args are
+// ixDeadlineStep's: now, then the working accounts.
+func (a *App) ixDeadlineKeepBusy(ctx context.Context, acctClause string, args []any, reading bool) error {
+	workers := ixEngineWorkers(a, ctx)
+	if workers <= 0 {
+		workers = 25
+	}
+	ready, busy, err := a.ixClaimableNow(ctx, acctClause, args)
+	if err != nil {
+		return err
+	}
+	limit := workers
+	if reading {
+		limit = (workers + 1) / 2
+	}
+	need := limit - ready - busy
+	if need <= 0 {
+		return nil
+	}
+	q := `SELECT w.id FROM ix_deferred x JOIN tgdl_work w ON w.id=x.work_id
+		WHERE x.released_at=0 AND w.status='pending' AND w.paused=1 AND w.retry_at<=?` + strings.ReplaceAll(acctClause, "account_id", "w.account_id") + `
+		AND w.id NOT IN (SELECT work_id FROM ix_held WHERE released_at=0 AND reason<>'')
+		ORDER BY x.band, w.file_size, w.id LIMIT ` + strconv.Itoa(need)
+	rows, err := a.db.Reader.QueryContext(ctx, q, args...)
+	if err != nil {
+		return err
+	}
+	var ids []any
+	for rows.Next() {
+		var id int64
+		if rows.Scan(&id) == nil {
+			ids = append(ids, id)
+		}
+	}
+	rows.Close()
+	if len(ids) == 0 {
+		return rows.Err()
+	}
+	in := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	tx, err := a.db.Writer.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `UPDATE tgdl_work SET paused=0 WHERE status='pending' AND paused=1 AND id IN (`+in+`)`, ids...); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE ix_deferred SET released_at=? WHERE released_at=0 AND work_id IN (`+in+`)`, append([]any{time.Now().UnixMilli()}, ids...)...); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ixClaimableNow counts the files a worker could take now (ready) and the
+// files downloading (busy), of the accounts in acctClause (args: now, then
+// the accounts, as ixDeadlineStep's). A big file (engine.BigFileSize or
+// more) counts as ready only while the big-file lane has a free place: the
+// others wait for it whatever the number of idle workers, so counting them
+// (an explicit request for a dozen big files, which the deadline order
+// never sets aside) would leave the workers idle with files set aside.
+// The lane's places are those it has while smaller files are claimable
+// (engine.BigFileLane), the ones it keeps once set-aside files go.
+func (a *App) ixClaimableNow(ctx context.Context, acctClause string, args []any) (ready, busy int, err error) {
+	var small, big int
+	q := `SELECT COALESCE(SUM(status='pending' AND paused=0 AND retry_at<=? AND (file_size<? OR ttl_seconds>0)),0),
+		COALESCE(SUM(status='pending' AND paused=0 AND retry_at<=? AND file_size>=? AND ttl_seconds=0),0),
+		COALESCE(SUM(status='processing'),0)
+		FROM tgdl_work WHERE status IN ('pending','processing')` + acctClause
+	qargs := append([]any{args[0], engine.BigFileSize, args[0], engine.BigFileSize}, args[1:]...)
+	if err = a.db.Reader.QueryRowContext(ctx, q, qargs...).Scan(&small, &big, &busy); err != nil {
+		return 0, 0, err
+	}
+	if lane := engine.BigFileLane(); lane > 0 {
+		// The lane counts every account's big files (engine.claimFilter).
+		var running int
+		if err = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM tgdl_work WHERE status='processing' AND file_size>=? AND ttl_seconds=0`, engine.BigFileSize).Scan(&running); err != nil {
+			return 0, 0, err
+		}
+		big = min(big, max(0, lane-running))
+	}
+	return small + big, busy, nil
 }
 
 // ixEngineRun is the engine's run (engine.Controller.Running); replaceable

@@ -1,11 +1,12 @@
 //go:build windows
 
-package download
+package diskfree
 
 import "golang.org/x/sys/windows"
 
-// diskFree is the space free to this user on the disk holding dir.
-func diskFree(dir string) (int64, bool) {
+// Free is the space free to this user on the disk holding dir; ok is false
+// when it cannot be known.
+func Free(dir string) (int64, bool) {
 	p, err := windows.UTF16PtrFromString(dir)
 	if err != nil {
 		return 0, false

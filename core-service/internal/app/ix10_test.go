@@ -103,3 +103,69 @@ func TestIxReportHidesWindowsPathsWithSpaces(t *testing.T) {
 		t.Fatalf("the error text after the path should stay: %q", out)
 	}
 }
+
+func TestIxRescanListCountsFilesStillToDownload(t *testing.T) {
+	a, ctx := ix8App(t, nil)
+	now := time.Now().UnixMilli()
+	for i, row := range []struct {
+		group, status string
+		paused        int
+	}{{"-1001", "pending", 0}, {"-1001", "processing", 0}, {"-1001", "pending", 1}, {"-1001", "completed", 0}, {"-1002", "completed", 0}} {
+		if _, err := a.db.Writer.Exec(`INSERT INTO tgdl_work(account_id,group_id,group_name,message_id,version,identity,media_type,file_name,file_size,body,status,origin,created_at,updated_at,paused)
+			VALUES('acc',?,'G',?,1,?,'video','f',1,X'',?,'history',?,?,?)`, row.group, i+1, fmt.Sprint(i), row.status, now, now, row.paused); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Set aside by the deadline order (goes by itself), live downloads (not
+	// a rescan's), and a group with only files a person paused.
+	setAside := ixTestWork(t, a, "acc", "-1001", 20, "video", 900<<20, 1)
+	_, _ = a.db.Writer.Exec(`INSERT INTO ix_deferred(work_id,band,deferred_at,released_at) VALUES(?,3,1,0)`, setAside)
+	live := ixTestWork(t, a, "acc", "-1001", 21, "video", 1, 0)
+	_, _ = a.db.Writer.Exec(`UPDATE tgdl_work SET origin='live' WHERE id=?`, live)
+	ixTestWork(t, a, "acc", "-1003", 1, "video", 1, 1)
+	got := a.ixQueueLeft(ctx)
+	if g := got["-1001"]; g.Left != 2 || g.Apart != 1 || g.Held != 1 {
+		t.Fatalf("-1001: %+v", g)
+	}
+	if g, ok := got["-1002"]; ok {
+		t.Fatalf("a group with nothing left: %+v", g)
+	}
+	if g := got["-1003"]; g.Left != 0 || g.Apart != 0 || g.Held != 1 {
+		t.Fatalf("-1003: %+v", g)
+	}
+	// Likely copies: going by themselves, unless held for ever.
+	copyID := ixTestWork(t, a, "acc", "-1004", 1, "video", 1, 1)
+	ixTestHold(t, a, copyID, "", 0)
+	if g := a.ixQueueLeft(ctx)["-1004"]; g.Apart != 1 || g.Held != 0 {
+		t.Fatalf("a held copy: %+v", g)
+	}
+	s := a.ixLoadSettings(ctx)
+	s.HoldLikely, s.HoldForever = true, true
+	if err := a.ixSaveSettings(ctx, s); err != nil {
+		t.Fatal(err)
+	}
+	if g := a.ixQueueLeft(ctx)["-1004"]; g.Apart != 0 || g.Held != 1 {
+		t.Fatalf("a copy held for ever: %+v", g)
+	}
+}
+
+// The figures the pages ask for every few seconds are kept a little while.
+func TestIxStatusFiguresAreCached(t *testing.T) {
+	ixTestLane(t, 2)
+	a, ctx := ix8App(t, nil)
+	oldStatus, oldApart := ixStatusCacheTTL, ixApartCacheTTL
+	ixStatusCacheTTL, ixApartCacheTTL = time.Hour, time.Hour
+	t.Cleanup(func() { ixStatusCacheTTL, ixApartCacheTTL = oldStatus, oldApart })
+	ixOldQueueRow(t, a, "-1001", 1, 2<<30)
+	if a.ixQueueLeft(ctx)["-1001"].Left != 1 || a.ixBigFilesNow(ctx).Waiting != 1 || a.ixWaitingApart(ctx, 500) != 1 {
+		t.Fatal("first look")
+	}
+	ixOldQueueRow(t, a, "-1001", 2, 2<<30)
+	if a.ixQueueLeft(ctx)["-1001"].Left != 1 || a.ixBigFilesNow(ctx).Waiting != 1 || a.ixWaitingApart(ctx, 500) != 1 {
+		t.Fatal("not kept")
+	}
+	ixStatusCacheTTL, ixApartCacheTTL = 0, 0
+	if a.ixQueueLeft(ctx)["-1001"].Left != 2 || a.ixBigFilesNow(ctx).Waiting != 2 || a.ixWaitingApart(ctx, 500) != 2 {
+		t.Fatal("not measured again")
+	}
+}

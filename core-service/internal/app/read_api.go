@@ -66,7 +66,22 @@ func (a *App) handleAPIMonitorStatus(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, 500, err.Error())
 		return
 	}
+	if sess, ok := auth.SessionFromContext(r.Context()); ok && sess.Role != "admin" {
+		status = monitorStatusForGuests(status)
+	}
 	writeJSON(w, 200, status)
+}
+
+// monitorStatusForGuests is the monitor status a guest sees: without the
+// download throughput (speed and recent totals are the operator's).
+func monitorStatusForGuests(status map[string]any) map[string]any {
+	out := make(map[string]any, len(status))
+	for k, v := range status {
+		if k != "throughput" {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 func (a *App) monitorStatusPayload(ctx context.Context) (map[string]any, error) {
@@ -103,6 +118,7 @@ func (a *App) monitorStatusPayload(ctx context.Context) (map[string]any, error) 
 	if status["accounts"] == 0 {
 		status["accounts"] = accounts
 	}
+	status["throughput"] = a.throughputPayload(ctx) // throughput.go
 	return status, nil
 }
 

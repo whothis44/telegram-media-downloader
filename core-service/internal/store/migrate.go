@@ -186,6 +186,13 @@ func RunMigrations(ctx context.Context, db *sql.DB) (int, error) {
 	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_tgdl_work_priority ON tgdl_work(status,paused,CASE WHEN ttl_seconds>0 THEN 0 WHEN origin='history' THEN 2 ELSE 1 END,id)`); err != nil {
 		return 0, err
 	}
+	// The claim with the big-file lane (engine.claimSelect): pending rows
+	// split into files of 1 GiB or more (engine.BigFileSize) and the
+	// others, each in claim order. The size is written out: SQLite uses an
+	// index on an expression only for the very same expression.
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_tgdl_work_claim ON tgdl_work(paused,(ttl_seconds=0 AND file_size>=1073741824),CASE WHEN ttl_seconds>0 THEN 0 WHEN origin='history' THEN 2 ELSE 1 END,id) WHERE status='pending'`); err != nil {
+		return 0, err
+	}
 	var refreshColumn int
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('tgdl_work') WHERE name='refresh_required'`).Scan(&refreshColumn); err != nil {
 		return 0, err

@@ -144,6 +144,7 @@ type ixDownloadStats struct {
 	RetryAfterMin int               `json:"retryAfterMin"`
 	Pace          ixPace            `json:"pace"`
 	Days          []ixDownloadDay   `json:"days"` // the last 7 days, newest first
+	Big           ixBigFiles        `json:"big"`  // files of 1 GB or more, and whether the backfill waits for room
 }
 
 // ixPace is the download pacing of all running accounts together.
@@ -234,6 +235,7 @@ func (a *App) ixDownloads(ctx context.Context) ixDownloadStats {
 	st.EngineRunning = a.monitor != nil && a.monitor.RequireRunning() == nil
 	st.Pace = a.ixPaceNow()
 	st.Days = a.ixDownloadDays(ctx)
+	st.Big = a.ixBigFilesNow(ctx)
 	var paused sql.NullInt64
 	_ = a.db.Reader.QueryRowContext(ctx, `SELECT paused FROM tgdl_queue_state WHERE id=1`).Scan(&paused)
 	st.QueuePaused = paused.Int64 != 0

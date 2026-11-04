@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -45,6 +46,17 @@ import (
 // probable copy (or an ordinary download): "could not check without
 // downloading".
 //
+// The minute does not count the time spent waiting for Telegram's parts:
+// under its speed limit for accounts without Premium (FLOOD_PREMIUM_WAIT)
+// one part can take most of a minute, and a check timed on the clock alone
+// failed on every file. A check still stops after ixSampleHardTimeout in
+// all. Each failure records why (ix_copy_sample.reason, a category, never
+// a name): a passing one (a flood wait, the time, a file reference, a
+// Telegram or connection error) is tried again later, after 1 hour, then
+// twice as long each time up to a day; only one in the file itself (no
+// index ffmpeg can find, no seeking, unreadable data, too few frames, more
+// parts than its share) is final.
+//
 // Downloads already under way are never checked or stopped: the engine
 // cannot resume a part-downloaded file, so stopping one would throw away
 // what it has fetched.
@@ -59,10 +71,82 @@ const (
 
 // Limits of one check (variables for tests).
 var (
-	ixSampleMaxParts = 32
-	ixSampleTimeout  = 60 * time.Second
-	ixSamplesPerRun  = 3
+	ixSampleMaxParts     = 32
+	ixSampleTimeout      = 60 * time.Second // not counting the waits for parts
+	ixSampleHardTimeout  = 4 * time.Minute  // in all
+	ixSampleClockTick    = 250 * time.Millisecond
+	ixSamplesPerRun      = 3
+	errIxSampleTimeout   = errors.New("the check took too long")
+	errIxSampleHardLimit = errors.New("the check took too long, waits for Telegram included")
 )
+
+// Why a check failed (ix_copy_sample.reason). The final ones are in the
+// file itself: trying again would fail the same way.
+const (
+	ixSampleWhyFlood     = "flood"       // Telegram asked to wait
+	ixSampleWhyTimeout   = "timeout"     // the check's time ran out
+	ixSampleWhyReference = "reference"   // the file reference could not be renewed
+	ixSampleWhyTelegram  = "telegram"    // another error reading a part
+	ixSampleWhyIO        = "ffmpeg-io"   // ffmpeg lost the connection
+	ixSampleWhyFFmpeg    = "ffmpeg"      // another ffmpeg error
+	ixSampleWhyNoFFmpeg  = "no-ffmpeg"   // ffmpeg is not installed
+	ixSampleWhyNoIndex   = "no-index"    // final: no index ffmpeg can find (moov, cues)
+	ixSampleWhyNoSeek    = "cannot-seek" // final
+	ixSampleWhyBadData   = "bad-data"    // final: ffmpeg cannot read the data
+	ixSampleWhyFrames    = "few-frames"  // final: too few frames could be read
+	ixSampleWhyParts     = "parts-cap"   // final: needs more parts than its share
+	ixSampleWhyMessage   = "message"     // final: the queued message cannot be read
+)
+
+func ixSampleFinal(why string) bool {
+	switch why {
+	case ixSampleWhyNoIndex, ixSampleWhyNoSeek, ixSampleWhyBadData, ixSampleWhyFrames, ixSampleWhyParts, ixSampleWhyMessage:
+		return true
+	}
+	return false
+}
+
+// ixSampleWhyOf is the category of a failed check: a part that could not
+// be read first (when a part fails, ffmpeg's own error only follows from
+// it), then the time, then ffmpeg's last error.
+func ixSampleWhyOf(part, timeCause, ffmpegErr error, samples int) string {
+	if part != nil {
+		s := part.Error()
+		switch {
+		case errors.Is(part, errIxSampleCap):
+			return ixSampleWhyParts
+		case ixSlowDown(part):
+			return ixSampleWhyFlood
+		case strings.Contains(s, "FILE_REFERENCE"):
+			return ixSampleWhyReference
+		case errors.Is(part, context.DeadlineExceeded) || errors.Is(part, context.Canceled) || timeCause != nil:
+			return ixSampleWhyTimeout
+		}
+		return ixSampleWhyTelegram
+	}
+	if timeCause != nil {
+		return ixSampleWhyTimeout
+	}
+	if ffmpegErr != nil {
+		s := strings.ToLower(ffmpegErr.Error())
+		switch {
+		case errors.Is(ffmpegErr, ixErrNoFFmpeg):
+			return ixSampleWhyNoFFmpeg
+		case strings.Contains(s, "moov atom not found") || strings.Contains(s, "no index") || strings.Contains(s, "cues"):
+			return ixSampleWhyNoIndex
+		case strings.Contains(s, "seek"):
+			return ixSampleWhyNoSeek
+		case strings.Contains(s, "connection") || strings.Contains(s, "input/output error") || strings.Contains(s, "end of file") || strings.Contains(s, "timed out") || strings.Contains(s, "server returned"):
+			return ixSampleWhyIO
+		case strings.Contains(s, "invalid data") || strings.Contains(s, "no frame"):
+			return ixSampleWhyBadData
+		}
+		if samples < ixSampleMinHit {
+			return ixSampleWhyFFmpeg
+		}
+	}
+	return ixSampleWhyFrames
+}
 
 var errIxSampleCap = errors.New("could not check without downloading: the file needs more than its share of parts")
 
@@ -77,6 +161,36 @@ type ixRangeFile struct {
 	parts   map[int64][]byte
 	fetched int
 	failed  error
+
+	clock    sync.Mutex
+	waited   time.Duration // spent waiting for Telegram's parts
+	fetching time.Time     // a part asked for since then (zero: none)
+}
+
+// waitedNow is the time spent waiting for parts, the one asked for now
+// included.
+func (f *ixRangeFile) waitedNow(now time.Time) time.Duration {
+	f.clock.Lock()
+	defer f.clock.Unlock()
+	w := f.waited
+	if !f.fetching.IsZero() {
+		w += now.Sub(f.fetching)
+	}
+	return w
+}
+
+// fetch reads a part from Telegram, timing the wait.
+func (f *ixRangeFile) fetch(off int64) ([]byte, error) {
+	f.clock.Lock()
+	f.fetching = time.Now()
+	f.clock.Unlock()
+	defer func() {
+		f.clock.Lock()
+		f.waited += time.Since(f.fetching)
+		f.fetching = time.Time{}
+		f.clock.Unlock()
+	}()
+	return f.get(off)
 }
 
 func (f *ixRangeFile) part(index int64) ([]byte, error) {
@@ -93,7 +207,7 @@ func (f *ixRangeFile) part(index int64) ([]byte, error) {
 		return nil, f.failed
 	}
 	off := index * telegram.PartSize
-	data, err := f.get(off)
+	data, err := f.fetch(off)
 	if err != nil {
 		f.failed = err
 		return nil, err
@@ -220,7 +334,11 @@ var ixSampleFrame = func(ctx context.Context, address string, t float64) (ixSamp
 	}
 	// Fixed arguments, no shell. -noaccurate_seek takes the key frame
 	// itself (fewer bytes); -copyts and showinfo say which moment it is.
+	// ffmpeg's reads never give up before the check does (-rw_timeout; by
+	// default it has none, and the little server answers as slowly as
+	// Telegram sends the parts).
 	cmd := exec.CommandContext(ctx, bin, "-hide_banner", "-nostdin", "-loglevel", "info", "-reconnect", "0",
+		"-rw_timeout", strconv.FormatInt(ixSampleHardTimeout.Microseconds(), 10),
 		"-noaccurate_seek", "-copyts", "-ss", strconv.FormatFloat(t, 'f', 2, 64), "-i", address,
 		"-frames:v", "1", "-an", "-sn", "-dn", "-vf", fmt.Sprintf("scale=%d:%d:flags=area,format=gray,showinfo", ixVSide, ixVSide),
 		"-f", "rawvideo", "-pix_fmt", "gray", "pipe:1")
@@ -308,6 +426,7 @@ func ixSampleMatch(samples []ixSampledFrame, saved []ixVFrame) (hit int, offset 
 // ixSampleResult is what a check found.
 type ixSampleResult struct {
 	Result  string // confirmed, nomatch, failed
+	Why     string // failed: ixSampleWhy*
 	Note    string
 	Of      string  // confirmed: the saved file's key
 	Offset  float64 // seconds to add to the queued video's time
@@ -319,14 +438,14 @@ type ixSampleResult struct {
 func (a *App) ixSampleCheck(ctx context.Context, r ixCopyReader, msg *tg.Message, f ixCopyFacts, likeKey string) ixSampleResult {
 	att, err := telegram.MessageAttachment(msg)
 	if err != nil || f.Dur <= 0 {
-		return ixSampleResult{Result: "failed", Note: "the queued message cannot be read"}
+		return ixSampleResult{Result: "failed", Why: ixSampleWhyMessage, Note: "the queued message cannot be read"}
 	}
 	cands := a.ixSampleCandidates(ctx, f, likeKey)
 	if len(cands) == 0 {
 		return ixSampleResult{Result: "nomatch", Note: "no saved video of a similar length has a fingerprint yet"}
 	}
-	ctx, cancel := context.WithTimeout(ctx, ixSampleTimeout)
-	defer cancel()
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
 	var refreshed bool
 	file := &ixRangeFile{size: att.Identity.Size, mime: att.Facts.Mime, get: func(off int64) ([]byte, error) {
 		data, err := r.FilePart(att, off)
@@ -346,9 +465,37 @@ func (a *App) ixSampleCheck(ctx context.Context, r ixCopyReader, msg *tg.Message
 	}
 	address, stop, err := ixServeRemote(file)
 	if err != nil {
-		return ixSampleResult{Result: "failed", Note: err.Error()}
+		return ixSampleResult{Result: "failed", Why: ixSampleWhyFFmpeg, Note: err.Error()}
 	}
 	defer stop()
+	// The check's clock: its own time (not the waits for parts) and the
+	// time in all.
+	started := time.Now()
+	tick, own, all := ixSampleClockTick, ixSampleTimeout, ixSampleHardTimeout
+	clockDone, clockGone := make(chan struct{}), make(chan struct{})
+	defer func() { close(clockDone); <-clockGone }()
+	go func() {
+		defer close(clockGone)
+		t := time.NewTicker(tick)
+		defer t.Stop()
+		for {
+			select {
+			case <-clockDone:
+				return
+			case <-ctx.Done():
+				return
+			case now := <-t.C:
+				switch spent := now.Sub(started); {
+				case spent > all:
+					cancel(errIxSampleHardLimit)
+					return
+				case spent-file.waitedNow(now) > own:
+					cancel(errIxSampleTimeout)
+					return
+				}
+			}
+		}
+	}()
 	dur := float64(f.Dur) / 1000
 	var samples []ixSampledFrame
 	var lastErr error
@@ -369,11 +516,17 @@ func (a *App) ixSampleCheck(ctx context.Context, r ixCopyReader, msg *tg.Message
 	res := ixSampleResult{Parts: file.fetchedNow(), Samples: len(samples)}
 	if why := file.failedNow(); why != nil || ctx.Err() != nil || len(samples) < ixSampleMinHit {
 		res.Result = "failed"
+		res.Why = ixSampleWhyOf(why, context.Cause(ctx), lastErr, len(samples))
 		switch {
-		case why != nil && ixSlowDown(why):
+		case res.Why == ixSampleWhyFlood:
 			res.Note = "Telegram asked to wait: " + why.Error()
-		case why != nil || ctx.Err() != nil:
-			res.Note = "could not check without downloading"
+		case res.Why == ixSampleWhyTimeout:
+			res.Note = "could not check without downloading: " + context.Cause(ctx).Error()
+			if why != nil && context.Cause(ctx) == nil {
+				res.Note = "could not check without downloading: " + why.Error()
+			}
+		case why != nil:
+			res.Note = "could not check without downloading: " + why.Error()
 		case lastErr != nil:
 			res.Note = "could not check without downloading: " + lastErr.Error()
 		default:
@@ -456,7 +609,8 @@ type ixSampleJob struct {
 }
 
 // ixSampleJobs: queued videos of 200 MB or more not checked yet (or whose
-// check failed for a reason that may pass), largest first. Originals of
+// check failed for a reason that may pass, once its wait is over: 1 hour
+// after the first failure, doubling up to a day), largest first. Originals of
 // videos saved in a lower quality first are not copies (ix_lowq.go): they
 // are left out.
 func (a *App) ixSampleJobs(ctx context.Context, heldOnly bool, n int) ([]ixSampleJob, error) {
@@ -468,9 +622,9 @@ func (a *App) ixSampleJobs(ctx context.Context, heldOnly bool, n int) ([]ixSampl
 		FROM tgdl_work w LEFT JOIN ix_held h ON h.work_id=w.id AND h.released_at=0 AND h.reason<>''
 		LEFT JOIN ix_copy_sample s ON s.work_id=w.id
 		WHERE w.status='pending' AND w.media_type='video' AND w.file_size>=? AND w.ttl_seconds=0 AND length(w.body)>0
-		AND (s.work_id IS NULL OR (s.result='failed' AND s.tries<3 AND s.at<? AND s.note NOT LIKE 'could not check without downloading%'))
+		AND (s.work_id IS NULL OR (s.result='failed' AND s.final=0 AND s.at < ? - MIN(86400000, 3600000*(1<<(MIN(MAX(s.tries,1),6)-1)))))
 		AND w.id NOT IN (SELECT work_id FROM ix_lowq WHERE state IN ('saved','released'))`+cond+`
-		ORDER BY w.file_size DESC, w.id LIMIT ?`, ixSampleMinSize, time.Now().Add(-time.Hour).UnixMilli(), n)
+		ORDER BY w.file_size DESC, w.id LIMIT ?`, ixSampleMinSize, time.Now().UnixMilli(), n)
 	if err != nil {
 		return nil, err
 	}
@@ -529,8 +683,8 @@ func (a *App) ixSampleRound(ctx context.Context, heldOnly bool) error {
 		if err := a.ixSampleRecord(ctx, j, f, res); err != nil {
 			return err
 		}
-		if res.Result == "failed" && strings.HasPrefix(res.Note, "Telegram asked to wait") {
-			return nil
+		if res.Result == "failed" && res.Why == ixSampleWhyFlood {
+			return nil // Telegram wants the account to wait: the next round
 		}
 	}
 	return nil
@@ -540,13 +694,18 @@ func (a *App) ixSampleRound(ctx context.Context, heldOnly bool) error {
 var ixSampleFake = false
 
 func (a *App) ixSampleRecord(ctx context.Context, j ixSampleJob, f ixCopyFacts, res ixSampleResult) error {
-	if _, err := a.db.Writer.ExecContext(ctx, `INSERT INTO ix_copy_sample(work_id,ident,size,result,note,of_key,offset_s,parts,samples,tries,at) VALUES(?,?,?,?,?,?,?,?,?,1,?)
+	final := res.Result == "failed" && ixSampleFinal(res.Why)
+	if _, err := a.db.Writer.ExecContext(ctx, `INSERT INTO ix_copy_sample(work_id,ident,size,result,note,of_key,offset_s,parts,samples,tries,at,reason,final) VALUES(?,?,?,?,?,?,?,?,?,1,?,?,?)
 		ON CONFLICT(work_id) DO UPDATE SET ident=excluded.ident, size=excluded.size, result=excluded.result, note=excluded.note, of_key=excluded.of_key, offset_s=excluded.offset_s,
-		parts=ix_copy_sample.parts+excluded.parts, samples=excluded.samples, tries=ix_copy_sample.tries+1, at=excluded.at`,
-		j.work, f.Ident, j.size, res.Result, res.Note, res.Of, res.Offset, res.Parts, res.Samples, ixNowMs()); err != nil {
+		parts=ix_copy_sample.parts+excluded.parts, samples=excluded.samples, tries=ix_copy_sample.tries+1, at=excluded.at, reason=excluded.reason, final=excluded.final`,
+		j.work, f.Ident, j.size, res.Result, res.Note, res.Of, res.Offset, res.Parts, res.Samples, ixNowMs(), res.Why, final); err != nil {
 		return err
 	}
-	a.ixLog("checked %s #%d (%d MB) from %d MB of parts: %s (%s)", f.Group, f.Msg, j.size>>20, res.Parts, res.Result, res.Note)
+	how := res.Result
+	if res.Result == "failed" {
+		how += " [" + res.Why + map[bool]string{true: ", final", false: ", tried again later"}[final] + "]"
+	}
+	a.ixLog("checked %s #%d (%d MB) from %d MB of parts: %s (%s)", f.Group, f.Msg, j.size>>20, res.Parts, how, res.Note)
 	if j.held {
 		switch res.Result {
 		case "confirmed", "nomatch":
@@ -579,13 +738,47 @@ type ixSampleTotals struct {
 	SizeBytes int64 `json:"sizeBytes"`
 	Confirmed int64 `json:"confirmed"`
 	Failed    int64 `json:"failed"`
+	Retry     int64 `json:"retry"` // of the failed, those tried again later
+	// FailedBy counts the failed by why (ixSampleWhy*; "" for checks made
+	// before the reasons were recorded).
+	FailedBy map[string]int64 `json:"failedBy"`
 }
 
 func (a *App) ixSampleTotalsNow(ctx context.Context) ixSampleTotals {
-	var t ixSampleTotals
-	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(parts),0), COALESCE(SUM(size),0), COALESCE(SUM(result='confirmed'),0), COALESCE(SUM(result='failed'),0) FROM ix_copy_sample`).
-		Scan(&t.Checked, &t.PartsMB, &t.SizeBytes, &t.Confirmed, &t.Failed)
+	t := ixSampleTotals{FailedBy: map[string]int64{}}
+	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(parts),0), COALESCE(SUM(size),0), COALESCE(SUM(result='confirmed'),0), COALESCE(SUM(result='failed'),0),
+		COALESCE(SUM(result='failed' AND final=0),0) FROM ix_copy_sample`).
+		Scan(&t.Checked, &t.PartsMB, &t.SizeBytes, &t.Confirmed, &t.Failed, &t.Retry)
+	if rows, err := a.db.Reader.QueryContext(ctx, `SELECT reason, COUNT(*) FROM ix_copy_sample WHERE result='failed' GROUP BY reason`); err == nil {
+		for rows.Next() {
+			var why string
+			var n int64
+			if rows.Scan(&why, &n) == nil {
+				t.FailedBy[why] = n
+			}
+		}
+		rows.Close()
+	}
 	return t
+}
+
+// ixSampleFailedText is FailedBy for the diagnostics report: "timeout 5,
+// flood 3" (categories only).
+func (t ixSampleTotals) failedText() string {
+	var keys []string
+	for k := range t.FailedBy {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var parts []string
+	for _, k := range keys {
+		name := k
+		if name == "" {
+			name = "unrecorded"
+		}
+		parts = append(parts, fmt.Sprintf("%s %d", name, t.FailedBy[k]))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // ixStoredPathOfKey is the catalogue's path of a saved file key.

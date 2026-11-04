@@ -1,11 +1,12 @@
 //go:build linux || darwin
 
-package download
+package diskfree
 
 import "golang.org/x/sys/unix"
 
-// diskFree is the space free to this user on the disk holding dir.
-func diskFree(dir string) (int64, bool) {
+// Free is the space free to this user on the disk holding dir; ok is false
+// when it cannot be known.
+func Free(dir string) (int64, bool) {
 	var st unix.Statfs_t
 	if err := unix.Statfs(dir, &st); err != nil {
 		return 0, false

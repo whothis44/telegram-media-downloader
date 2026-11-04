@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/botnick/telegram-media-downloader/core-service/internal/telegram"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/version"
 )
 
@@ -59,7 +58,11 @@ type ixGroupStatus struct {
 	MaxID    int64  `json:"maxId,omitempty"`
 	Gone     int64  `json:"gone,omitempty"`
 	Username string `json:"username,omitempty"`
-	Invite   string `json:"invite,omitempty"`
+	// Files of its saved messages not saved yet (ix_files_togo.go); nil
+	// before the browser index is first built.
+	FilesToGo *int   `json:"filesToGo,omitempty"`
+	FilesHeld int    `json:"filesHeld,omitempty"` // waiting as probable copies
+	Invite    string `json:"invite,omitempty"`
 	// A category suggested from what the group posts (from the media
 	// browser's index, once it has been built).
 	ContentSuggest string  `json:"contentSuggest,omitempty"`
@@ -126,6 +129,7 @@ func (a *App) handleIxStatus(w http.ResponseWriter, r *http.Request) {
 		rows.Close()
 	}
 	cover := a.ixIDCoverage(ctx)
+	toGo, toGoKnown := a.ixFilesToGo()
 	var suggest map[string]ixCatSuggest
 	if box := a.ixModelBox(); box != nil {
 		box.mu.Lock()
@@ -143,6 +147,10 @@ func (a *App) handleIxStatus(w http.ResponseWriter, r *http.Request) {
 		g.FinishedAt = v.finished
 		g.Username, g.Invite = v.username, v.invite
 		g.MaxID, g.Gone = cover[g.ID].MaxID, cover[g.ID].Gone
+		if toGoKnown {
+			n := toGo[g.ID].ToGo
+			g.FilesToGo, g.FilesHeld = &n, toGo[g.ID].Held
+		}
 		return g
 	}
 	var groups []ixGroupStatus
@@ -176,6 +184,7 @@ func (a *App) handleIxStatus(w http.ResponseWriter, r *http.Request) {
 		"version":   version.AppVersion,
 		"groups":    groups,
 		"queue":     queue,
+		"queueLeft": a.ixQueueLeft(ctx),
 		"settings":  settings.public(),
 		"account":   a.ixAccount(),
 		"export":    a.ixExportStatus(),
@@ -187,6 +196,7 @@ func (a *App) handleIxStatus(w http.ResponseWriter, r *http.Request) {
 		"freeze":    a.ixFreeze(ctx),
 		"held":      a.ixHeldStatus(ctx),
 		"copies":    a.ixCopiesNow(),
+		"previews":  a.ixPreviewAllNow(),
 		"fixity":    a.ixFixityStatus(ctx),
 		"ml":        a.ixMLStatusNow(ctx),
 		"mlStart":   a.ixMLStartStatusNow(),
@@ -404,7 +414,7 @@ func (a *App) handleIxSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	telegram.SetPacing(s.DownloadPacing)
+	ixApplyEngineSettings(s)
 	if s.Pace != old.Pace {
 		if err = a.ixApplyPace(ctx, s.Pace); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())

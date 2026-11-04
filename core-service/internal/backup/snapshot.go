@@ -80,8 +80,14 @@ func sanitizeLabel(label string) string {
 	return b.String()
 }
 
+// openForSync is os.OpenFile (tests watch the flags).
+var openForSync = os.OpenFile
+
+// syncFile flushes the file to disk. It is opened for writing: Windows
+// refuses to flush a file opened read-only ("Access is denied"), which made
+// every backup fail there.
 func syncFile(path string) error {
-	f, err := os.OpenFile(path, os.O_RDONLY, 0)
+	f, err := openForSync(path, os.O_RDWR, 0)
 	if err != nil {
 		return fmt.Errorf("open backup for sync: %w", err)
 	}

@@ -973,9 +973,24 @@ func (c *Controller) accept(ctx context.Context, run *running, accountID string,
 	}
 	return nil
 }
+
+// An idle worker (its last claim found nothing) looks again after
+// workerIdlePoll, then after twice as long each time it again finds
+// nothing, up to workerIdlePollMax. A queue whose files all wait (for the
+// big-file lane, a retry, a pause) costs the single writer a claim per
+// worker every few seconds rather than every second. A wake (new work, a
+// resumed item) brings one idle worker back at once and resets its wait;
+// a worker that then finds work passes the wake on, so a burst of new
+// files reaches every idle worker without waiting for their timers.
+var (
+	workerIdlePoll    = time.Second
+	workerIdlePollMax = 5 * time.Second
+)
+
 func (c *Controller) worker(run *running, index int) {
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
+	poll, woken := workerIdlePoll, false
 	for run.ctx.Err() == nil {
 		if index >= int(run.target.Load()) {
 			// Parked by the scaler: claim nothing until the target grows.
@@ -994,13 +1009,23 @@ func (c *Controller) worker(run *running, index int) {
 			return
 		}
 		if work == nil {
+			idle := time.NewTimer(poll)
 			select {
 			case <-run.ctx.Done():
+				idle.Stop()
 				return
 			case <-run.wake:
-			case <-tick.C:
+				idle.Stop()
+				poll, woken = workerIdlePoll, true
+			case <-idle.C:
+				poll, woken = min(2*poll, workerIdlePollMax), false
 			}
 			continue
+		}
+		poll = workerIdlePoll
+		if woken {
+			woken = false
+			c.wake(run) // there may be more: let the next idle worker look
 		}
 		ctx, cancel := context.WithCancel(run.ctx)
 		ctx = WithOrigin(ctx, work.Origin)
@@ -1102,6 +1127,25 @@ func attemptTimeout(size int64) time.Duration {
 	return min(2*time.Minute+time.Duration(seconds)*time.Second, 24*time.Hour)
 }
 
+// speedLimitedOnly: every account waiting now waits only because of
+// Telegram's speed limit for accounts without Premium (see
+// telegram.GotdClient.SpeedLimitedOnly).
+func (r *running) speedLimitedOnly() bool {
+	some := false
+	for _, id := range r.ids {
+		gated, ok := r.accounts[id].(interface{ FloodWaitUntil() time.Time })
+		if !ok || gated.FloodWaitUntil().IsZero() {
+			continue
+		}
+		limited, ok := r.accounts[id].(interface{ SpeedLimitedOnly() bool })
+		if !ok || !limited.SpeedLimitedOnly() {
+			return false
+		}
+		some = true
+	}
+	return some
+}
+
 // unthrottled lists the run's accounts that Telegram is not currently
 // flood-limiting, so workers leave a waiting account's queue alone.
 func (r *running) unthrottled() []string {
@@ -1144,6 +1188,13 @@ func (c *Controller) scale(run *running, s Scaling) {
 		}
 		target := int(run.target.Load())
 		if len(run.unthrottled()) < len(run.ids) {
+			// Only Telegram's speed limit for accounts without Premium
+			// (FLOOD_PREMIUM_WAIT, about volume): fewer files at once do
+			// not help against it, and its waits come every few seconds, so
+			// halving at each one would end at the fewest files. Hold.
+			if run.speedLimitedOnly() {
+				continue
+			}
 			// Telegram asked an account to wait. Without pacing, drop to the
 			// fewest files at once. With it, halve once for the whole wait:
 			// the accounts' pacers already cut how many parts are in flight,

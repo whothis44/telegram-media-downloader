@@ -55,6 +55,10 @@ const suggestName = (name) => { const m = String(name || '').trim().match(/^(.*?
 // A suggestion from the name (sports-3 → sports), or else from what the group posts.
 const suggestG = (g) => suggestName(g.name) || g.contentSuggest || '';
 const suggestWhy = (g) => suggestName(g.name) ? 'from its name' : g.contentSuggest ? `shares ${Math.round((g.contentShare || 0) * 100)}% of its pictures and videos with ${g.contentSuggest}` : '';
+// Complete: every message Telegram counts is saved (checked by a full
+// rescan) and no file of them is still to come (likely copies held aside do
+// not count). Unknown file counts are not complete.
+const groupComplete = (g) => !!(g.tgCount && g.lastWalk && g.tgCount - (g.messages - g.deleted) <= 0 && g.filesToGo === 0);
 const natural = (a, b) => String(a).localeCompare(String(b), undefined, { sensitivity: 'base', numeric: true });
 
 async function api(method, url, body) {
@@ -150,13 +154,16 @@ function viewDeadline() {
   const left = d.until ? (d.until - Date.now() / 1000) : 0;
   const rate = (b) => b > 0 ? fmtSize(b * 86400) + '/day' : '—';
   let verdict = '';
+  // The estimate goes by the slower of the last day and the last 3 hours
+  // (the last 3 hours alone while Telegram's speed limit is on).
+  const used = d.rateUsed === '3h' ? `the last 3 hours' speed${d.premium1h ? " (Telegram's speed limit is on)" : ''}` : "the last day's speed";
   if (!d.leftFiles && !d.toGetFiles) verdict = '<span class="ok">Nothing left to download.</span>';
-  else if (!d.etaSec) verdict = '<span class="muted">Speed not known yet (no download finished in the last day).</span>';
-  else verdict = `At the last day's speed that takes about <b>${days(d.etaSec)} days</b>.` + (d.until ? (d.finishes === 'yes' ? ' <span class="ok">That is before the deletion date.</span>' : ' <span class="bad">That is after the deletion date.</span>') : '');
+  else if (!d.etaSec) verdict = d.rate24h > 0 ? '<span class="muted">Speed not known (no download finished in the last 3 hours).</span>' : '<span class="muted">Speed not known yet (no download finished in the last day).</span>';
+  else verdict = `At ${used} that takes about <b>${days(d.etaSec)} days</b>.` + (d.until ? (d.finishes === 'yes' ? ' <span class="ok">That is before the deletion date.</span>' : ' <span class="bad">That is after the deletion date.</span>') : '');
   const deferred = (d.deferred || []).reduce((a, b) => a + b, 0);
   let h = `<div class="card"><h2>Before the deadline</h2>
 <div>${d.until ? `Telegram deletes this account in <b>${days(Math.max(0, left))} days</b>. ` : 'Telegram has not set a deletion date. '}<b>${fmtNum(d.toGetFiles || d.leftFiles)}</b> distinct file(s), <b>${fmtSize(d.toGetBytes || d.leftBytes)}</b>, still to download${d.copies ? ` (${fmtNum(d.copies)} more are copies of these or of saved files: they come free)` : ''}; ${fmtNum(d.leftFiles)} of them are in the download queue now${d.unscanned ? `, the rest come as the ${fmtNum(d.unscanned)} group(s) still waiting for their rescan are reached` : ''}. ${verdict}</div>
-<div class="muted">Speed: ${rate(d.rate24h)} over the last day, ${rate(d.rate1h)} over the last hour (files covered by a saved copy not counted).${d.active ? ` <b>Private chats go first, smaller files before larger ones</b>${deferred ? ` (${fmtNum(deferred)} file(s) set aside for now: public chats' files and larger files)` : ''}. Public chats can still be read from another account after the deletion; private ones can't.` : d.mode === 'off' ? ' Order: normal (Settings).' : ''}</div>
+<div class="muted">Speed: ${rate(d.rate24h)} over the last day, ${rate(d.rate3h)} over the last 3 hours, ${rate(d.rate1h)} over the last hour (files covered by a saved copy not counted).${d.active ? ` <b>Private chats go first, smaller files before larger ones</b>${deferred ? ` (${fmtNum(deferred)} file(s) set aside for now: public chats' files and larger files)` : ''}. Public chats can still be read from another account after the deletion; private ones can't.` : d.mode === 'off' ? ' Order: normal (Settings).' : ''}</div>
 <div class="btns"><button class="b" data-act="dl-loss">${state.loss ? 'Refresh' : 'Show'} what would be lost today</button></div>`;
   const L = state.loss;
   if (L && L.error) h += `<div class="bad">${esc(L.error)}</div>`;
@@ -185,14 +192,17 @@ ${ex.finishedAt && !ex.running ? `<div class="muted">Last written ${esc(fmtTime(
   h += viewDownloads();
   h += viewKeeping();
   h += `<div class="card"><h2>Messages captured</h2><div class="muted">${fmtNum(total)} messages saved across ${gs.length} group(s). ${notYet ? `<b>${notYet} group(s) have not had a full rescan yet</b> — use the Rescan tab to capture their history.` : 'Every group has had a full rescan.'} New posts are saved as the monitor sees them.</div>
-<div class="btns"><button class="b" data-act="g-finish-complete" ${gs.some((g) => !g.finishedAt && g.tgCount && g.lastWalk && g.tgCount - (g.messages - g.deleted) <= 0) ? '' : 'disabled'} title="Every group marked ✓ complete is set to finished; rescans then leave it alone">✓ Finish all complete groups</button><span class="muted">Finished groups are skipped by every rescan. To finish or reopen several at once, tick them in Rescan → Choose groups.</span></div>
-<div class="muted">Complete: every message Telegram says the group holds has been saved, checked at each rescan. Groups rescanned before version ix.5 may show a few short: system notices (pins, renames) are only saved from ix.5 on; a new rescan fills them in.</div>
+<div class="btns"><button class="b" data-act="g-finish-complete" ${gs.some((g) => !g.finishedAt && groupComplete(g)) ? '' : 'disabled'} title="Every group marked ✓ complete (all messages and all files saved) is set to finished; rescans then leave it alone">✓ Finish all complete groups</button><span class="muted">Finished groups are skipped by every rescan. To finish or reopen several at once, tick them in Rescan → Choose groups.</span></div>
+<div class="muted">Complete: every message Telegram says the group holds has been saved (checked at each rescan) <b>and</b> every file of those messages is saved. Files waiting as likely copies of saved files do not count against it. “Messages ✓ · N files to go” means the messages are all in but files are still queued or not queued yet. Groups rescanned before version ix.5 may show a few short: system notices (pins, renames) are only saved from ix.5 on; a new rescan fills them in.</div>
 <div class="list"><table><tr><th>Group</th><th>Category</th><th>Messages saved</th><th>Telegram says</th><th>Complete?</th><th>Finished</th><th>Deleted on Telegram</th><th>Files</th><th>Dates</th><th>Last full rescan</th></tr>`;
   for (const g of gs) {
     const saved = g.messages - g.deleted;
     const short = g.tgCount ? g.tgCount - saved : null;
     const complete = short === null ? '<span class="muted" title="Telegram\'s count is read at the next rescan">not checked yet</span>'
-      : short <= 0 ? (g.lastWalk ? '<span class="ok">✓ complete</span>' : '<span class="muted">all seen so far</span>')
+      : short <= 0 ? (!g.lastWalk ? '<span class="muted">all seen so far</span>'
+        : g.filesToGo === undefined ? '<span class="muted" title="The file count appears once the media browser\'s index is built (about a minute after start)">messages ✓ · files not counted yet</span>'
+        : g.filesToGo > 0 ? `<span class="warn" title="Every message is saved, but files of those messages are not: queued, set aside, or not queued yet">messages ✓ · ${fmtNum(g.filesToGo)} file(s) to go</span>`
+        : `<span class="ok">✓ complete</span>${g.filesHeld ? `<div class="muted" title="Not downloaded: each is most likely a copy of a file already saved">${fmtNum(g.filesHeld)} likely copies held</div>` : ''}`)
       : `<span class="warn">${fmtNum(short)} short</span>`;
     const ids = g.maxId ? `<div class="muted" title="Every message number from 1 to the newest is either saved here or confirmed gone on Telegram (checked at the end of each messages pass)">IDs 1–${fmtNum(g.maxId)}: ${fmtNum(Math.min(g.maxId, g.messages + g.gone))} accounted for${g.maxId - g.messages - g.gone > 0 ? `, <span class="warn">${fmtNum(g.maxId - g.messages - g.gone)} unchecked</span>` : ''}</div>` : '';
     const link = g.username ? `<div class="muted"><a href="https://t.me/${esc(g.username)}" target="_blank" rel="noopener">t.me/${esc(g.username)}</a></div>` : g.invite ? `<div class="muted" title="Invite link">${esc(g.invite)}</div>` : '';
@@ -226,6 +236,13 @@ function viewDownloads() {
   let h = `<div class="card"><h2>Downloads</h2><div>${state1}</div>
 <div class="muted" style="margin-top:6px">${fmtNum(d.downloading)} downloading · ${fmtNum(d.waiting)} waiting · <span class="${d.failed ? 'bad' : ''}">${fmtNum(d.failed)} failed</span>${d.givenUp ? ` (${fmtNum(d.givenUp)} no longer retried automatically)` : ''}</div>
 ${(() => {
+  const b = d.big || {};
+  let x = '';
+  if (b.downloading || b.waiting || b.setAside || b.held) x += `<div class="muted">Files of 1 GB or more: ${fmtNum(b.downloading || 0)} downloading${b.limit ? ` (at most ${fmtNum(b.limit)} at once, ${fmtNum(b.limit * 2)} when nothing smaller is waiting, so the other workers take smaller files)` : ' (no limit set)'} · ${fmtNum(b.waiting || 0)} waiting their turn · ${fmtNum(b.setAside || 0)} set aside until smaller files are done${b.held ? ` · ${fmtNum(b.held)} held as copies or upgrades` : ''}. Settings → Big videos and the NAS.</div>`;
+  if (b.capPaused) x += `<div class="warn" style="margin-top:4px">A rescan's file pass is waiting for room in the download queue: ${fmtNum(b.queueCount)} queued file(s) count towards its limit of ${fmtNum(b.queueCap)}, so it queues no more until some finish.</div>`;
+  return x;
+})()}
+${(() => {
   const p = d.pace || {}; const mbs = (b) => (b / 1e6).toFixed(b >= 1e7 ? 0 : 1) + ' MB/s';
   let x = '';
   if (p.off) x += `<div style="margin-top:6px">Download pacing is <b>off</b> (Settings → Account safety): files download as they did in ix.8, and the speed isn't measured here. The per-day totals below still compare the two.</div>`;
@@ -254,19 +271,22 @@ function viewCopySettings(s) {
 <div class="muted">Held copies only wait: nothing is skipped for good, and every message is archived in full. Now: ${n(q.held)} held (${n(q.vsSaved)} copies of saved videos, ${n(q.vsQueued)} lesser copies of queued ones, ${n(q.recog)} by image recognition), ${n(q.confirmed)} confirmed. Big videos checked by sampling: ${fmtNum(sm.checked || 0)}, using ${fmtNum(sm.partsMb || 0)} MB instead of ${fmtSize(sm.sizeBytes || 0)}; ${fmtNum(sm.confirmed || 0)} confirmed copies.</div>
 <label><input type="checkbox" data-set="skipConfirmed" ${s.confirmedGoEarly ? '' : 'checked'}> Skip confirmed copies until everything else is done (recommended). A confirmed copy is a held video whose frames, sampled across the file without downloading it, match a saved video. “Download the held files now” (Overview) still fetches them.</label>
 <label><input type="checkbox" data-set="copyThumbs" ${s.copyThumbsOff ? '' : 'checked'}> Compare Telegram's small previews of queued videos and large pictures with saved files (needs image recognition; one small request per file, a few seconds apart). The previews are kept and shown in the browser for files not downloaded.</label>
+<label>Sharper previews of everything not downloaded: <select class="t" data-set-select="previewsAll">${[['auto', 'while Telegram has set a deletion date (recommended)'], ['on', 'always'], ['off', 'never']].map(([v, l]) => `<option value="${v}" ${(s.previewsAll || 'auto') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+<div class="muted">Fetches Telegram's 320 px preview (about 20 KB) of every photo and video not downloaded, queued or not, private chats first, so the browser shows it instead of the tiny blurry one. No image recognition needed. One request every 1.5 seconds or slower, paused whenever Telegram asks the account to wait, so it never holds up downloads.</div>
 <div class="muted">Likeness that makes a probable copy: ${((c.threshold || 0.95) * 100).toFixed(1)}%${cal ? ` (calibrated on ${fmtNum(cal.pictures)} of your pictures: a picture and its 320 px preview ${(cal.sameMin * 100).toFixed(1)}% or more alike, different pictures at most ${(cal.diffMax * 100).toFixed(1)}%)` : ' (not calibrated)'}.</div>
 <div class="btns"><button class="b primary" data-act="set-save">Save settings</button><button class="b" data-act="copy-calib" ${state.status.ml && state.status.ml.enabled ? '' : 'disabled'}>Calibrate on my pictures</button>${state.copyMsg ? `<span class="muted">${esc(state.copyMsg)}</span>` : ''}</div></div>`;
 }
 
 // Copies among what is left to download (ix_copies.go).
 function viewCopies() {
-  const c = state.status.copies;
-  if (!c || !c.queue) return '';
+  const c = state.status.copies, p = state.status.previews;
+  const pv = p && p.measured && (p.on || p.fetched) ? `<div class="muted">Sharper previews of photos and videos not downloaded: <b>${fmtNum(p.fetched || 0)}</b> of ${fmtNum(p.known || 0)} fetched, ${fmtNum(p.remaining || 0)} to go${p.unavailable ? `, ${fmtNum(p.unavailable)} not available` : ''}${p.on ? '' : ' (off: Settings → Copies)'}${p.why ? ' · ' + esc(p.why) : ''}.</div>` : '';
+  if (!c || !c.queue) return pv;
   const q = c.queue, k = c.known || {};
   const n = (x) => `<b>${fmtNum((x || {}).files || 0)}</b> (${fmtSize((x || {}).bytes || 0)})`;
   let x = `<div style="margin-top:6px"><b>Copies in the queue:</b> of ${n(q.all)} queued, ${n(q.same)} are the same Telegram file as one saved or queued before (never downloaded twice) and ${n(q.held)} are probable copies held at the back: ${fmtNum((q.vsSaved || {}).files || 0)} of saved videos, ${fmtNum((q.vsQueued || {}).files || 0)} lesser copies of queued ones, ${fmtNum((q.recog || {}).files || 0)} found by image recognition; ${n(q.confirmed)} confirmed by their first frames.</div>`;
   if (k.measured) x += `<div class="muted">Everything seen in messages and not downloaded: ${n(k.missing)}; ${n(k.same)} are the same Telegram file as another, ${n(k.held)} are held, and ${n(k.likely)} more videos look like copies (they will be held when queued).${c.previews ? ` ${fmtNum(c.previews)} Telegram preview(s) kept for files not downloaded.` : ''}</div>`;
-  return x;
+  return x + pv;
 }
 
 // Big videos saved in a lower quality first, and the local staging folder.
@@ -309,10 +329,18 @@ function viewRescan() {
     shownItems.forEach((it, i) => {
       const when = (it.state === 'waiting' && it.nextAt > Date.now() ? ` · retry ${esc(fmtTime(it.nextAt))}` : '') + (it.resumeFrom && it.state !== 'done' ? ` · continues below message #${it.resumeFrom}` : '');
       const files = it.phase === 'files';
-      const label = { waiting: files ? 'files: waiting' : 'messages: waiting', running: files ? 'fetching files' : 'saving messages', done: 'done', failed: 'failed' }[it.state] || it.state;
+      const lq = (state.status.queueLeft || {})[it.groupId] || {};
+      // "done" only once the files it queued have downloaded. Files that
+      // wait for a person (paused by one, or copies held for ever) do not
+      // keep it "downloading": "done · N held back".
+      const pending = it.state === 'done' && ((lq.left || 0) + (lq.apart || 0)) > 0;
+      const heldBack = it.state === 'done' ? (lq.held || 0) : 0;
+      const label = pending ? `downloading: ${fmtNum((lq.left || 0) + (lq.apart || 0))} left` : heldBack ? `done · ${fmtNum(heldBack)} held back` : { waiting: files ? 'files: waiting' : 'messages: waiting', running: files ? 'fetching files' : 'saving messages', done: 'done', failed: 'failed' }[it.state] || it.state;
+      const leftNote = (pending && lq.apart ? ` · ${fmtNum(lq.apart)} of them held back for now (likely copies, or larger files while time is short)` : '')
+        + (heldBack ? ` · ${fmtNum(heldBack)} ${pending ? 'more ' : ''}wait for you (paused, or likely copies held until you decide)` : '');
       const msgs = it.messagesAt ? it.messages : (it.state === 'running' && !files) || (it.state === 'done' && !it.phase) ? (it.carried || 0) + it.processed : it.carried ? it.carried : null;
       const missing = it.messagesAt ? it.missing : null;
-      h += `<tr><td class="n">${i + 1}</td><td>${it.priority ? '<b title="Goes first, files included">★</b> ' : ''}${esc(it.name)}${it.error ? `<div class="muted bad">${esc(it.error)}</div>` : ''}</td><td><span class="pill ${esc(it.state)}">${esc(label)}</span><span class="muted">${when}</span></td><td class="n">${msgs === null ? '<span class="muted">–</span>' : fmtNum(msgs)}</td><td class="n">${missing === null ? '<span class="muted">–</span>' : fmtNum(missing)}</td><td class="n">${(files && it.state !== 'waiting') || !it.phase ? fmtNum(it.downloaded) : '<span class="muted">–</span>'}</td><td class="n">${it.attempts || 0}</td>
+      h += `<tr><td class="n">${i + 1}</td><td>${it.priority ? '<b title="Goes first, files included">★</b> ' : ''}${esc(it.name)}${it.error ? `<div class="muted bad">${esc(it.error)}</div>` : ''}</td><td><span class="pill ${esc(pending ? 'running' : it.state)}" ${pending ? 'title="Every message is read and every missing file is queued; these files are still in the download queue"' : ''}>${esc(label)}</span><span class="muted">${when}${leftNote}</span></td><td class="n">${msgs === null ? '<span class="muted">–</span>' : fmtNum(msgs)}</td><td class="n">${missing === null ? '<span class="muted">–</span>' : fmtNum(missing)}</td><td class="n">${(files && it.state !== 'waiting') || !it.phase ? fmtNum(it.downloaded) : '<span class="muted">–</span>'}</td><td class="n">${it.attempts || 0}</td>
 <td>${it.state === 'running' || it.state === 'waiting' ? `<button class="mini" data-act="q-priority" data-id="${esc(it.groupId)}" data-on="${it.priority ? '' : '1'}">${it.priority ? 'Remove ★' : '★ First'}</button>` : `<button class="mini" data-act="q-retry" data-id="${esc(it.groupId)}">Run again</button>`}<button class="mini" data-act="q-remove" data-id="${esc(it.groupId)}">${it.state === 'running' ? 'Stop' : 'Remove'}</button></td></tr>`;
     });
     h += `</table></div>`;
@@ -499,6 +527,7 @@ ${state.diag ? `<textarea id="diag" readonly style="width:100%;min-height:260px;
 <div class="card"><h2>Big videos and the NAS</h2>
 <label><input type="checkbox" data-set="lowqFirst" ${s.lowqFirst ? 'checked' : ''}> Save a lower quality of very large videos first when time is short: when a deletion date is set and a video of 200 MB or more would not be reached in time, a smaller copy Telegram keeps of it (at least 480p, at most 40% of the size) is saved first; the original follows after everything else and then replaces it. Not done for likely copies.</label>
 <label style="margin-left:22px"><input type="checkbox" data-set="lowqKeep" ${s.lowqKeep ? 'checked' : ''}> …and keep the lower quality after the original arrives</label>
+<div class="btns">Files of 1 GB or more downloading at once: <input class="t" data-set-text="bigAtOnce" value="${esc(String(s.bigAtOnce == null ? 2 : s.bigAtOnce))}" style="width:60px"> <span class="muted">(recommended: 2; 0 = no limit). A file that big can take hours, and all downloads share how many parts Telegram allows in flight, so with many of them at once everything crawls. The other workers take smaller files; with nothing smaller waiting, twice as many go.</span></div>
 <div class="btns">Download first to this folder on this computer: <input class="t" data-set-text="stageDir" value="${esc(s.stageDir || '')}" placeholder="empty = off; for example ${esc((state.status.staging || {}).suggest || '')}" style="flex:1;min-width:240px"></div>
 <div class="btns">Space it may use: <input class="t" data-set-text="stageCapGb" value="${esc(String(s.stageCapGb || 20))}" style="width:70px"> GB</div>
 <div class="muted">Downloads are written to this local folder, checked, then copied to the downloads folder (your NAS) and checked again before the local copy is removed, so a network hiccup on the share doesn't fail a download. A copy that fails is retried for as long as it takes; nothing on the NAS is ever replaced. The folder must exist and must not be inside the downloads folder. When it is full, new downloads wait for copies to finish.</div>
@@ -518,7 +547,8 @@ ${state.diag ? `<textarea id="diag" readonly style="width:100%;min-height:260px;
 <div class="btns"><button class="b primary" data-act="set-save">Save settings</button></div>
 ${state.setMsg ? `<div class="muted">${esc(state.setMsg)}</div>` : ''}</div>
 ${viewCopySettings(s)}
-<div class="card"><h2>Image recognition (optional)</h2>
+<div class="card"><h2>Image recognition (recommended)</h2>
+<div class="muted"><b>Without it, these stop working:</b> copy checks by how alike the previews look (and their calibration), search by what pictures show, “more like this”, Things, look-alikes, faces and people, text in pictures, and album suggestions by likeness. <b>These keep working:</b> downloads, the forward, exact re-upload and likely video copy checks, sampling of big videos, the deadline order, backups and browsing.</div>
 <div class="muted">Lets the archive browser find pictures and videos by what they show (“bikes in the snow”, in any language), show “more like this”, set apart files in a set that don't look like the rest, list what pictures show (Things), and, if you turn them on, read the text in pictures and group faces into people. It uses the machine-learning part of Immich (a self-hosted photo app), running in Docker on this PC; nothing is sent anywhere else, and only addresses on this computer or your local network are accepted. Each distinct picture is looked at once, in the background. Instructions: docs/image-recognition.md.</div>
 <div class="btns">Address: <input class="t" data-set-text="mlUrl" value="${esc(s.mlUrl || '')}" placeholder="http://127.0.0.1:3003 (empty = off)" style="flex:1;min-width:240px"></div>
 <div class="btns">Model: <input class="t" data-set-text="mlModel" value="${esc(s.mlModel || '')}" placeholder="ViT-B-16-SigLIP2__webli" style="flex:1;min-width:240px"></div>
@@ -689,9 +719,13 @@ $app.addEventListener('click', async (ev) => {
       if (r.ok) { state.pick.clear(); state.pickOnly = false; } else state.error = errText(r);
       load(); break;
     }
-    case 'g-finish': case 'g-open': { const r = await api('POST', '/api/ix/groups/finished', { groupIds: [id], finished: act === 'g-finish' }); if (!r.ok) state.error = errText(r); load(); break; }
+    case 'g-finish': case 'g-open': {
+      const g = (state.status.groups || []).find((x) => x.id === id);
+      if (act === 'g-finish' && g && g.filesToGo > 0 && !confirm(`${fmtNum(g.filesToGo)} file(s) of this group are not saved yet. Rescans skip finished groups, so files not queued yet would never be downloaded. Finish it anyway?`)) break;
+      const r = await api('POST', '/api/ix/groups/finished', { groupIds: [id], finished: act === 'g-finish' }); if (!r.ok) state.error = errText(r); load(); break;
+    }
     case 'g-finish-complete': {
-      const ids = (state.status.groups || []).filter((g) => !g.finishedAt && g.tgCount && g.lastWalk && g.tgCount - (g.messages - g.deleted) <= 0).map((g) => g.id);
+      const ids = (state.status.groups || []).filter((g) => !g.finishedAt && groupComplete(g)).map((g) => g.id);
       if (!ids.length || !confirm(`Mark ${ids.length} complete group(s) as finished? Rescans will leave them alone (you can undo each one).`)) break;
       const r = await api('POST', '/api/ix/groups/finished', { groupIds: ids, finished: true }); if (!r.ok) state.error = errText(r); load(); break;
     }

@@ -12,7 +12,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/botnick/telegram-media-downloader/core-service/internal/telegram"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/ws"
 )
 
@@ -105,7 +104,7 @@ func (a *App) ixDeps() ixQueueDeps {
 }
 
 func (a *App) ixStart() {
-	telegram.SetPacing(a.ixLoadSettings(a.ctx).DownloadPacing)
+	ixApplyEngineSettings(a.ixLoadSettings(a.ctx))
 	a.ambientWG.Add(1)
 	go func() { defer a.ambientWG.Done(); a.ixRunQueue(a.ctx) }()
 	a.ambientWG.Add(1)
@@ -123,7 +122,7 @@ func (a *App) ixStart() {
 		go func() { defer a.ambientWG.Done(); run(a.ctx) }()
 	}
 	// Lower quality first, and the staging folder's moves to the library.
-	for _, run := range []func(context.Context){a.ixRunLowq, a.ixRunStaging} {
+	for _, run := range []func(context.Context){a.ixRunLowq, a.ixRunStaging, a.ixRunPreviewsAll} {
 		a.ambientWG.Add(1)
 		go func() { defer a.ambientWG.Done(); run(a.ctx) }()
 	}

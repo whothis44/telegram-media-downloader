@@ -5,6 +5,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/botnick/telegram-media-downloader/core-service/internal/engine"
 )
 
 // What goes last, and in which order.
@@ -177,16 +179,39 @@ func (a *App) ixLastProgress(ctx context.Context) time.Time {
 	return at
 }
 
+// ixBigApartTimes: big files waiting for their lane stay out of a
+// backfill's count up to this many times its limit (ixWaitingApart).
+const ixBigApartTimes = 2
+
 // ixWaitingApart is how many backfill items wait at the back of the queue,
 // paused: held copies, files set aside by the deadline order, and originals
 // waiting to replace a lower quality. They do not count towards a
 // backfill's queue limit: otherwise they fill it, no file that can download
 // comes in behind them, and the backfill stops bringing new files.
-func (a *App) ixWaitingApart(ctx context.Context) int {
-	var n int
-	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM tgdl_work w WHERE w.status='pending' AND w.paused=1 AND w.origin<>'live' AND (
+//
+// Files of 1 GB or more waiting for the big-file lane (engine.BigFileLane)
+// do not count either, up to ixBigApartTimes the backfill's limit (cap):
+// only a few of them download at once, so a queue filled with them (as
+// queues of earlier versions are) would stop the backfill for days while
+// the workers have nothing else to take. Beyond that they count, so that
+// the backfills cannot queue big files without end.
+//
+// The two counts are kept for ixApartCacheTTL: a backfill at its limit asks
+// every 250 ms.
+func (a *App) ixWaitingApart(ctx context.Context, cap int) int {
+	n := a.ixCaches().apart.get(ixApartCacheTTL, func() ([2]int, bool) { return a.ixWaitingApartNow(ctx) })
+	return n[0] + min(n[1], ixBigApartTimes*max(0, cap))
+}
+
+// ixWaitingApartNow counts the paused items waiting apart, and the big
+// files waiting for their lane.
+func (a *App) ixWaitingApartNow(ctx context.Context) ([2]int, bool) {
+	var apart, big int
+	err := a.db.Reader.QueryRowContext(ctx, `SELECT COALESCE(SUM(w.paused=1),0), COALESCE(SUM(w.paused=0),0) FROM tgdl_work w WHERE w.status='pending' AND w.origin<>'live' AND (
+		w.paused=1 AND (
 		EXISTS (SELECT 1 FROM ix_held h WHERE h.work_id=w.id AND h.released_at=0 AND h.reason<>'')
 		OR EXISTS (SELECT 1 FROM ix_deferred x WHERE x.work_id=w.id AND x.released_at=0)
-		OR EXISTS (SELECT 1 FROM ix_lowq q WHERE q.work_id=w.id AND q.state='saved'))`).Scan(&n)
-	return n
+		OR EXISTS (SELECT 1 FROM ix_lowq q WHERE q.work_id=w.id AND q.state='saved'))
+		OR ? > 0 AND w.paused=0 AND w.ttl_seconds=0 AND w.file_size>=?)`, engine.BigFileLane(), engine.BigFileSize).Scan(&apart, &big)
+	return [2]int{apart, big}, err == nil
 }

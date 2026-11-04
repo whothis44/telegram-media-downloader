@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/botnick/telegram-media-downloader/core-service/internal/seekbar"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/telegram"
@@ -290,5 +292,165 @@ func TestIxBigHeldCopyIsCheckedBeforeItGoes(t *testing.T) {
 	_ = a.db.Reader.QueryRow(`SELECT confirm FROM ix_copy_hold WHERE work_id=?`, big).Scan(&confirm)
 	if confirm != "confirmed" {
 		t.Fatalf("confirm %q", confirm)
+	}
+}
+
+// ixThrottledReader delays every part the way Telegram's speed limit for
+// accounts without Premium does, or answers with a flood wait.
+type ixThrottledReader struct {
+	*ixFakeReader
+	delay time.Duration
+	flood map[int64]bool // documents whose parts are refused with FLOOD_PREMIUM_WAIT
+}
+
+func (r *ixThrottledReader) FilePart(a telegram.Attachment, offset int64) ([]byte, error) {
+	time.Sleep(r.delay)
+	if id, _ := strconv.ParseInt(a.Identity.ID, 10, 64); r.flood[id] {
+		return nil, errors.New("rpc error code 420: FLOOD_PREMIUM_WAIT_30")
+	}
+	return r.ixFakeReader.FilePart(a, offset)
+}
+
+// Under Telegram's speed limit each part takes long: the check's own time
+// does not count those waits, so it still confirms a copy; it stops at its
+// time in all. A failure for a passing reason (the time, a flood wait) is
+// tried again later; one in the file itself (no index) is final. The
+// reasons are counted for the diagnostics, by category only.
+func TestIxSamplingUnderThrottleAndRetries(t *testing.T) {
+	a, ctx := ixTestApp(t)
+	savedFake, frameFake := ixSampleFake, ixSampleFrame
+	savedTimeout, savedHard, savedTick := ixSampleTimeout, ixSampleHardTimeout, ixSampleClockTick
+	ixSampleFake = true
+	ixSampleTimeout, ixSampleHardTimeout, ixSampleClockTick = 300*time.Millisecond, 10*time.Second, 10*time.Millisecond
+	t.Cleanup(func() {
+		ixSampleFake, ixSampleFrame = savedFake, frameFake
+		ixSampleTimeout, ixSampleHardTimeout, ixSampleClockTick = savedTimeout, savedHard, savedTick
+	})
+	hashAt := func(s int) uint64 { return uint64(s+1) * 0x9E3779B97F4A7C15 }
+	var fp []ixVFrame
+	for s := 0; s < 600; s++ {
+		fp = append(fp, ixVFrame{T: float32(s), H: hashAt(s), HF: ^hashAt(s)})
+	}
+	key := "h:" + ixSixtyFour("8")
+	if err := a.ixVdupSave(ctx, key, "c/v.mp4", 600, fp, ""); err != nil {
+		t.Fatal(err)
+	}
+	const parts = 8
+	noIndex := map[string]bool{}
+	ixSampleFrame = func(ctx context.Context, address string, at float64) (ixSampledFrame, bool, error) {
+		// As ffmpeg: a range in one part of the file per point.
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, address, nil)
+		off := (int64(at) % parts) * telegram.PartSize
+		req.Header.Set("Range", "bytes="+strconv.FormatInt(off, 10)+"-"+strconv.FormatInt(off+15, 10))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return ixSampledFrame{}, false, err
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if len(b) < 16 {
+			return ixSampledFrame{}, false, errors.New("ffmpeg: exit status 1: " + address + ": Input/output error")
+		}
+		if noIndex[string(b[:8])] {
+			return ixSampledFrame{}, false, errors.New("ffmpeg: exit status 1: [mov,mp4,m4a,3gp,3g2,mj2 @ 0x1] moov atom not found")
+		}
+		return ixSampledFrame{T: at, H: hashAt(int(at)), HF: ^hashAt(int(at))}, true, nil
+	}
+	fake := &ixFakeReader{files: map[int64][]byte{}}
+	r := &ixThrottledReader{ixFakeReader: fake, delay: 120 * time.Millisecond, flood: map[int64]bool{}}
+	file := func(doc int64, mark string) {
+		data := make([]byte, parts*telegram.PartSize)
+		for p := 0; p < parts; p++ {
+			copy(data[p*telegram.PartSize:], mark)
+		}
+		fake.files[doc] = data
+	}
+	check := func(doc int64) ixSampleResult {
+		msg := ixTestVideo(int(doc), doc, parts*telegram.PartSize, 600, 1280, 720, nil, 1700000000)
+		f, _ := ixCopyFactsOf(msg)
+		return a.ixSampleCheck(ctx, r, msg, f, key)
+	}
+	// 8 parts at 120 ms each: about a second of waits, against 300 ms.
+	file(901, "copy0000")
+	if res := check(901); res.Result != "confirmed" || res.Parts < 6 {
+		t.Fatalf("under the speed limit: %+v", res)
+	}
+	// The time in all still stops a check.
+	ixSampleHardTimeout = 400 * time.Millisecond
+	file(902, "copy0000")
+	res := check(902)
+	if res.Result != "failed" || res.Why != ixSampleWhyTimeout || ixSampleFinal(res.Why) {
+		t.Fatalf("over the time in all: %+v", res)
+	}
+	ixSampleHardTimeout = 10 * time.Second
+
+	// Through the round: a flood wait, and a file without an index.
+	r.delay = 0
+	ixTestUseReader(t, fake)
+	ixOpenCopyReader = func(*App, context.Context, string) (ixCopyReader, error) { return r, nil }
+	queue := func(doc int64, mark string) int64 {
+		file(doc, mark)
+		return ixTestQueue(t, a, ixTestVideo(int(doc), doc, 3<<30-doc, 600, 1280, 720, nil, 1700000000))
+	}
+	flooded := queue(911, "flood000")
+	r.flood[911] = true
+	broken := queue(912, "noindex0")
+	noIndex["noindex0"] = true
+	ixSamplesPerRun = 1
+	defer func() { ixSamplesPerRun = 3 }()
+	for i := 0; i < 2; i++ {
+		if err := a.ixSampleRound(ctx, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	why := func(id int64) (string, bool) {
+		var reason string
+		var final bool
+		if err := a.db.Reader.QueryRow(`SELECT reason, final FROM ix_copy_sample WHERE work_id=?`, id).Scan(&reason, &final); err != nil {
+			t.Fatal(err)
+		}
+		return reason, final
+	}
+	if reason, final := why(flooded); reason != ixSampleWhyFlood || final {
+		t.Fatalf("flood wait: %s final %v", reason, final)
+	}
+	if reason, final := why(broken); reason != ixSampleWhyNoIndex || !final {
+		t.Fatalf("no index: %s final %v", reason, final)
+	}
+	jobs := func() map[int64]bool {
+		js, err := a.ixSampleJobs(ctx, false, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[int64]bool{}
+		for _, j := range js {
+			out[j.work] = true
+		}
+		return out
+	}
+	if js := jobs(); js[flooded] || js[broken] {
+		t.Fatalf("tried again at once: %v", js)
+	}
+	// An hour on, the flood wait is tried again; the file without an
+	// index never is. After more failures the wait grows.
+	_, _ = a.db.Writer.Exec(`UPDATE ix_copy_sample SET at=at-3700000`)
+	if js := jobs(); !js[flooded] || js[broken] {
+		t.Fatalf("an hour later: %v", js)
+	}
+	_, _ = a.db.Writer.Exec(`UPDATE ix_copy_sample SET tries=4 WHERE work_id=?`, flooded)
+	if js := jobs(); js[flooded] {
+		t.Fatal("tried again an hour after its fourth failure")
+	}
+	// Checks made before the reasons were recorded are tried again too.
+	_, _ = a.db.Writer.Exec(`UPDATE ix_copy_sample SET reason='', final=0, tries=3, note='could not check without downloading', at=at-30000000 WHERE work_id=?`, flooded)
+	if js := jobs(); !js[flooded] {
+		t.Fatal("an old failed check is not tried again")
+	}
+	tot := a.ixSampleTotalsNow(ctx)
+	if tot.Failed != 2 || tot.Retry != 1 || tot.FailedBy[ixSampleWhyNoIndex] != 1 || tot.FailedBy[""] != 1 {
+		t.Fatalf("totals: %+v", tot)
+	}
+	if lines := strings.Join(a.ixCopiesDiag(ctx), "\n"); !strings.Contains(lines, "2 could not be checked (unrecorded 1, no-index 1; 1 to try again later)") {
+		t.Fatalf("diagnostics: %s", lines)
 	}
 }

@@ -292,7 +292,7 @@ func TestIxBackfillCapLeavesOutWhatWaitsApart(t *testing.T) {
 	released := ixTestWork(t, a, "acc", g, 7, "video", 300<<20, 0) // an original let go: it can download
 	ixTestLowq(t, a, released)
 	_, _ = a.db.Writer.Exec(`UPDATE ix_lowq SET state='released' WHERE work_id=?`, released)
-	if n := a.ixWaitingApart(ctx); n != 3 {
+	if n := a.ixWaitingApart(ctx, 500); n != 3 {
 		t.Fatalf("waiting apart: %d, want 3", n)
 	}
 }
@@ -303,7 +303,7 @@ func TestHistoryCapIgnoresItemsWaitingApart(t *testing.T) {
 	var transfers, pages atomic.Int64
 	page := func(context.Context, telegram.HistoryRequest) (telegram.HistoryPage, error) {
 		pages.Add(1)
-		return historyMessages(10), nil
+		return historyMessages(10, 9, 8, 7, 6, 5, 4, 3, 2, 1), nil // the limit's worth (10)
 	}
 	a, err := newConfiguredTestApp(context.Background(), Config{DataDir: t.TempDir(), AccountFactory: historyFactory(t, page, nil, &transfers)})
 	if err != nil {
@@ -315,7 +315,7 @@ func TestHistoryCapIgnoresItemsWaitingApart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ensureMap(cfg, "advanced")["history"] = map[string]any{"backpressureCap": 1, "backpressureMaxWaitMs": 1}
+	ensureMap(cfg, "advanced")["history"] = map[string]any{"backpressureCap": 10, "backpressureMaxWaitMs": 1}
 	if err = a.config.Save(context.Background(), cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -329,8 +329,8 @@ func TestHistoryCapIgnoresItemsWaitingApart(t *testing.T) {
 	ixTestLowq(t, a, ixTestWork(t, a, "acc", "-1009", 2, "video", 300<<20, 1))
 	res := historyHTTP(t, a, "POST", "/api/history", `{"groupId":"-1000000000042"}`)
 	j := historyFinished(t, a, res["jobId"].(string))
-	// One page read and queued; then the walk's own file fills the limit.
-	if j.Processed != 1 || pages.Load() != 1 || j.Error == nil || !strings.Contains(*j.Error, "stall deadline") {
+	// One page read and queued; then the walk's own files fill the limit.
+	if j.Processed != 10 || pages.Load() != 1 || j.Error == nil || !strings.Contains(*j.Error, "stall deadline") {
 		t.Fatalf("backfill job=%+v pages=%d", j, pages.Load())
 	}
 }

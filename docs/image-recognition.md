@@ -1,4 +1,9 @@
-# Image recognition and speech to text (optional)
+# Image recognition (recommended) and speech to text (optional)
+
+Image recognition is recommended. **Without it, these stop working:** copy checks by how alike the previews look
+(and their calibration), search by what pictures show, "more like this", Things, look-alikes, faces and people,
+text in pictures, and album suggestions by likeness. **These keep working without it:** downloads, the forward,
+exact re-upload and likely video copy checks, sampling of big videos, the deadline order, backups and browsing.
 
 The archive browser can use image recognition to:
 

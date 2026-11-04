@@ -562,3 +562,136 @@ func TestScalerHalvesOnceForAPacedAccountsWait(t *testing.T) {
 		t.Fatalf("a paced account's wait should halve the workers once: %v", status)
 	}
 }
+
+// recurringGateAccount is gated again and again: for 2/3 of every period,
+// as Telegram's speed limit for accounts without Premium does with a wait
+// every few seconds (speedOnly), or for good with a plain FLOOD_WAIT.
+type recurringGateAccount struct {
+	pacedAccount
+	start     atomic.Int64 // UnixNano; 0: not gated
+	period    time.Duration
+	speedOnly bool
+}
+
+func (a *recurringGateAccount) FloodWaitUntil() time.Time {
+	start := a.start.Load()
+	if start == 0 {
+		return time.Time{}
+	}
+	if a.period > 0 && time.Since(time.Unix(0, start))%a.period >= a.period*2/3 {
+		return time.Time{}
+	}
+	return time.Now().Add(time.Second)
+}
+
+func (a *recurringGateAccount) SpeedLimitedOnly() bool { return a.speedOnly }
+
+// Speed-limit waits (FLOOD_PREMIUM_WAIT) every tick and a half no longer
+// halve the files at once again and again: the target holds. A plain
+// FLOOD_WAIT still halves once.
+func TestScalerHoldsThroughSpeedLimitWaits(t *testing.T) {
+	for _, speedOnly := range []bool{true, false} {
+		t.Run(map[bool]string{true: "speed-limit", false: "flood-wait"}[speedOnly], func(t *testing.T) {
+			ctx := context.Background()
+			s := testStore(t)
+			for i := 1; i <= 40; i++ {
+				if _, _, err := s.Enqueue(ctx, "one", Target{}, testMessage(i, 1, int64(i))); err != nil {
+					t.Fatal(err)
+				}
+			}
+			account := &recurringGateAccount{speedOnly: speedOnly}
+			if speedOnly {
+				account.period = 30 * time.Millisecond // the scaler ticks every 20 ms
+			}
+			factory := func(AccountConfig, *telegram.UpdateState, func(context.Context, tg.UpdatesClass) error, func(int64)) (Account, error) {
+				return account, nil
+			}
+			filter := func(context.Context, string, *tg.Message, tg.UpdatesClass) (Target, bool, error) {
+				return Target{}, true, nil
+			}
+			release := make(chan struct{})
+			defer close(release)
+			sink := func(ctx context.Context, _ *Work, _ *tg.Message, _ telegram.MediaDownloader) error {
+				select {
+				case <-release:
+				case <-ctx.Done():
+				}
+				return ctx.Err()
+			}
+			c := New(s.writer, s.reader, t.TempDir(), factory, filter, sink, nil)
+			c.SetScaling(Scaling{Min: 1, Max: 8, Interval: 20 * time.Millisecond})
+			if err := c.Start(ctx, ctx, []AccountConfig{{ID: "one"}}, 2, 1); err != nil {
+				t.Fatal(err)
+			}
+			defer c.Stop(ctx)
+			deadline := time.Now().Add(5 * time.Second)
+			for time.Now().Before(deadline) {
+				if status, _ := c.Status(ctx); status["workers"] == 8 {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			account.start.Store(time.Now().UnixNano())
+			time.Sleep(400 * time.Millisecond) // some 20 scaler ticks, a dozen waits
+			want := map[bool]int{true: 8, false: 4}[speedOnly]
+			if status, _ := c.Status(ctx); status["workers"] != want {
+				t.Fatalf("workers %v, want %d", status["workers"], want)
+			}
+		})
+	}
+}
+
+// Idle workers look at an empty queue less and less often, and a wake
+// still brings them back at once: one wake reaches every idle worker
+// while there is work for them.
+func TestIdleWorkersBackOffAndWakeTogether(t *testing.T) {
+	oldPoll, oldMax := workerIdlePoll, workerIdlePollMax
+	workerIdlePoll, workerIdlePollMax = 10*time.Millisecond, 400*time.Millisecond
+	t.Cleanup(func() { workerIdlePoll, workerIdlePollMax = oldPoll, oldMax })
+	ctx := context.Background()
+	s := testStore(t)
+	factory := func(AccountConfig, *telegram.UpdateState, func(context.Context, tg.UpdatesClass) error, func(int64)) (Account, error) {
+		return &readyAccount{}, nil
+	}
+	filter := func(context.Context, string, *tg.Message, tg.UpdatesClass) (Target, bool, error) {
+		return Target{}, true, nil
+	}
+	var started atomic.Int64
+	release := make(chan struct{})
+	sink := func(ctx context.Context, _ *Work, _ *tg.Message, _ telegram.MediaDownloader) error {
+		started.Add(1)
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return nil
+	}
+	c := New(s.writer, s.reader, t.TempDir(), factory, filter, sink, nil)
+	if err := c.Start(ctx, ctx, []AccountConfig{{ID: "one"}}, 4, 1); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Stop(ctx)
+	defer close(release)
+	time.Sleep(1200 * time.Millisecond)
+	// Polling every 10 ms would be some 480 claims; backing off, about 36.
+	if n := s.emptyClaims.Load(); n > 60 {
+		t.Fatalf("4 idle workers made %d claims in 1.2 s", n)
+	}
+	for i := 1; i <= 3; i++ {
+		if _, _, err := s.Enqueue(ctx, "one", Target{}, testMessage(i, 1, int64(i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run, err := c.queueRun()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.wake(run)
+	deadline := time.Now().Add(150 * time.Millisecond)
+	for started.Load() < 3 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if n := started.Load(); n != 3 {
+		t.Fatalf("%d of 3 files started soon after one wake", n)
+	}
+}

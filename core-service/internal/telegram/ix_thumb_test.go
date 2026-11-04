@@ -36,6 +36,28 @@ func TestThumbAttachmentPicksThe320pxPreview(t *testing.T) {
 	}
 }
 
+// A video's preview comes from its own thumbnail sizes (the document's
+// thumbs, asked for with thumb_size), never from its animated video
+// previews: "m" (320 px) when it has one, else the small "s".
+func TestThumbAttachmentUsesTheVideoThumbSizes(t *testing.T) {
+	doc := &tg.Document{ID: 78, AccessHash: 6, FileReference: []byte{1}, DCID: 2, Size: 40 << 20, MimeType: "video/mp4",
+		Attributes:  []tg.DocumentAttributeClass{&tg.DocumentAttributeVideo{W: 720, H: 1280, Duration: 20}},
+		Thumbs:      []tg.PhotoSizeClass{&tg.PhotoStrippedSize{Type: "i", Bytes: []byte{1, 2, 3}}, &tg.PhotoSize{Type: "s", W: 51, H: 90, Size: 1500}},
+		VideoThumbs: []tg.VideoSizeClass{&tg.VideoSize{Type: "u", W: 720, H: 1280, Size: 300000}}}
+	msg := &tg.Message{ID: 12, PeerID: &tg.PeerChannel{ChannelID: 42}, Media: &tg.MessageMediaDocument{Document: doc}}
+	a, w, h, ok := ThumbAttachment(msg)
+	if !ok || w != 51 || h != 90 || a.Identity.Kind != "thumb-s" {
+		t.Fatalf("preview: %+v %dx%d %v", a.Identity, w, h, ok)
+	}
+	if loc, isDoc := a.Location.(*tg.InputDocumentFileLocation); !isDoc || loc.ThumbSize != "s" || loc.ID != 78 {
+		t.Fatalf("location: %#v", a.Location)
+	}
+	doc.Thumbs = append(doc.Thumbs, &tg.PhotoSize{Type: "m", W: 180, H: 320, Size: 18000})
+	if a, w, _, ok := ThumbAttachment(msg); !ok || w != 180 || a.Location.(*tg.InputDocumentFileLocation).ThumbSize != "m" {
+		t.Fatalf("with m: %v %d", ok, w)
+	}
+}
+
 type onePart struct {
 	data  []byte
 	asked []tg.UploadGetFileRequest

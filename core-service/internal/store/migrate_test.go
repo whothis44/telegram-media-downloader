@@ -129,7 +129,7 @@ func TestOriginMigrationPreservesExistingPendingWork(t *testing.T) {
 	}
 	defer db.Writer.Close()
 	defer db.Reader.Close()
-	if _, err = db.Writer.Exec(`DROP INDEX idx_tgdl_work_priority; ALTER TABLE tgdl_work DROP COLUMN origin;
+	if _, err = db.Writer.Exec(`DROP INDEX idx_tgdl_work_priority; DROP INDEX idx_tgdl_work_claim; ALTER TABLE tgdl_work DROP COLUMN origin;
 INSERT INTO tgdl_work(account_id,group_id,group_name,message_id,version,identity,media_type,file_name,file_size,body,created_at,updated_at) VALUES('one','42','Media',1,1,'document:1','document','file',4,X'01',1,1)`); err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +195,7 @@ func TestTTLMigrationAddsQueueLaneAndRebuildsPriorityIndex(t *testing.T) {
 	}
 	defer db.Writer.Close()
 	defer db.Reader.Close()
-	if _, err = db.Writer.Exec(`DROP INDEX idx_tgdl_work_priority; ALTER TABLE tgdl_work DROP COLUMN ttl_seconds;
+	if _, err = db.Writer.Exec(`DROP INDEX idx_tgdl_work_priority; DROP INDEX idx_tgdl_work_claim; ALTER TABLE tgdl_work DROP COLUMN ttl_seconds;
 CREATE INDEX idx_tgdl_work_priority ON tgdl_work(status,paused,CASE origin WHEN 'history' THEN 1 ELSE 0 END,id);
 INSERT INTO tgdl_work(account_id,group_id,group_name,message_id,version,identity,media_type,file_name,file_size,body,created_at,updated_at) VALUES('one','42','Media',1,1,'document:1','document','file',4,X'01',1,1)`); err != nil {
 		t.Fatal(err)
