@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/botnick/telegram-media-downloader/core-service/internal/ws"
 )
 
 func TestAmbientMonitorUsesHTTPProjectionAndStatsAreLive(t *testing.T) {
@@ -114,5 +116,63 @@ func TestAmbientQueryFailureDoesNotPublishInventedCounters(t *testing.T) {
 	case event := <-c.Events():
 		t.Fatalf("invented state: %+v", event)
 	default:
+	}
+}
+
+// The download throughput is the operator's: a guest's monitor status,
+// over HTTP and over the websocket, has none.
+func TestMonitorStatusThroughputIsForAdminsOnly(t *testing.T) {
+	a, srv := socketTestApp(t)
+	adminToken, guestToken := socketToken(t, a, "admin", time.Hour), socketToken(t, a, "guest", time.Hour)
+	status := func(token string) map[string]any {
+		req, _ := http.NewRequest("GET", srv.URL+"/api/monitor/status", nil)
+		req.AddCookie(&http.Cookie{Name: a.sessions.CookieName(), Value: token})
+		res, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		var out map[string]any
+		if res.StatusCode != 200 || json.NewDecoder(res.Body).Decode(&out) != nil {
+			t.Fatalf("status %d", res.StatusCode)
+		}
+		return out
+	}
+	if _, ok := status(adminToken)["throughput"]; !ok {
+		t.Fatal("no throughput for an admin")
+	}
+	g := status(guestToken)
+	if _, ok := g["throughput"]; ok {
+		t.Fatalf("throughput sent to a guest: %v", g)
+	}
+	if _, ok := g["state"]; !ok {
+		t.Fatalf("the guest's status lost more than the throughput: %v", g)
+	}
+	admin, guest := a.hub.Add("admin"), a.hub.Add("guest")
+	defer a.hub.Remove(admin)
+	defer a.hub.Remove(guest)
+	if err := a.pushMonitorStatus(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	read := func(c interface{ Events() <-chan ws.Event }) []ws.Event {
+		var out []ws.Event
+		for {
+			select {
+			case e := <-c.Events():
+				out = append(out, e)
+			default:
+				return out
+			}
+		}
+	}
+	ae, ge := read(admin), read(guest)
+	if len(ae) != 1 || len(ge) != 1 || ae[0].Type != "monitor_status_push" || ge[0].Type != "monitor_status_push" {
+		t.Fatalf("admin got %+v, guest got %+v", ae, ge)
+	}
+	if _, ok := ae[0].Payload.(map[string]any)["throughput"]; !ok {
+		t.Fatal("no throughput in the admin's push")
+	}
+	if _, ok := ge[0].Payload.(map[string]any)["throughput"]; ok {
+		t.Fatal("throughput in the guest's push")
 	}
 }

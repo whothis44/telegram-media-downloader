@@ -59,7 +59,9 @@ func (a *App) pushMonitorStatus(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	a.hub.Broadcast(ws.Event{Type: "monitor_status_push", Payload: status})
+	// The same event for both roles; only admins get the throughput.
+	a.hub.Broadcast(ws.Event{Type: "monitor_status_push", Payload: status, Roles: []string{"admin"}})
+	a.hub.Broadcast(ws.Event{Type: "monitor_status_push", Payload: monitorStatusForGuests(status), Roles: []string{"guest"}})
 	return nil
 }
 

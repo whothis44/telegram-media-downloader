@@ -65,7 +65,8 @@ function applyRecent(chipId, prefix, totals, titleKey, titleFallback) {
 
 // `throughput` rides the monitor status (internal/app/throughput.go):
 // speed while an engine run is in progress, and files + bytes completed
-// in the last hour / 24 h.
+// in the last hour / 24 h. Admins only: a guest's status has none, and
+// the chips stay hidden.
 function applyThroughput(tp) {
     const speedChip = $('status-speed-chip');
     if (speedChip) {

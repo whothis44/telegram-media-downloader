@@ -10,7 +10,9 @@ import (
 
 // The dashboard status bar shows how fast files arrive right now and how
 // much arrived lately. Both ride the monitor status payload (HTTP and the
-// 3 s `monitor_status_push`), under "throughput":
+// 3 s `monitor_status_push`), under "throughput", for admins only: a
+// guest's status (HTTP, and its own copy of the push) has none
+// (monitorStatusForGuests), and the status bar hides the chips then:
 //
 //	"throughput": {
 //	  "running": true,                       // an engine run is in progress
