@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/botnick/telegram-media-downloader/core-service/internal/procutil"
 )
 
 // Starting the optional recognition services: the image-recognition and
@@ -64,7 +66,7 @@ func (ixExecDocker) find() (string, error) {
 
 func (ixExecDocker) run(ctx context.Context, bin string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, bin, args...)
-	ixHideWindow(cmd)
+	procutil.HideWindow(cmd)
 	cmd.WaitDelay = 5 * time.Second
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err

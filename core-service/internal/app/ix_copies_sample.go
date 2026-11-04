@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/botnick/telegram-media-downloader/core-service/internal/procutil"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/seekbar"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/telegram"
 	"github.com/gotd/td/tg"
@@ -223,7 +224,7 @@ var ixSampleFrame = func(ctx context.Context, address string, t float64) (ixSamp
 		"-noaccurate_seek", "-copyts", "-ss", strconv.FormatFloat(t, 'f', 2, 64), "-i", address,
 		"-frames:v", "1", "-an", "-sn", "-dn", "-vf", fmt.Sprintf("scale=%d:%d:flags=area,format=gray,showinfo", ixVSide, ixVSide),
 		"-f", "rawvideo", "-pix_fmt", "gray", "pipe:1")
-	ixHideWindow(cmd)
+	procutil.HideWindow(cmd)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return ixSampledFrame{}, false, err

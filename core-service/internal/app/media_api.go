@@ -22,6 +22,7 @@ import (
 
 	"github.com/botnick/telegram-media-downloader/core-service/internal/auth"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/front"
+	"github.com/botnick/telegram-media-downloader/core-service/internal/procutil"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/ws"
 )
 
@@ -206,7 +207,9 @@ func renderGalleryThumb(ctx context.Context, source, tmp string, accels []string
 			}
 			args = append(args, seek...)
 			args = append(args, "-i", source, "-frames:v", "1", "-an", "-vf", "scale='min(320,iw)':-1:flags=fast_bilinear", "-pix_fmt", "yuv420p", "-c:v", "libwebp", "-quality", "62", "-compression_level", "6", "-f", "webp", "-y", tmp)
-			if _, err := exec.CommandContext(ctx, "ffmpeg", args...).CombinedOutput(); err == nil && thumbFileNonEmpty(tmp) {
+			cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+			procutil.HideWindow(cmd)
+			if _, err := cmd.CombinedOutput(); err == nil && thumbFileNonEmpty(tmp) {
 				return true
 			}
 			if ctx.Err() != nil {

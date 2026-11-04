@@ -18,12 +18,6 @@ func ixDockerFallbacks() []string {
 	return []string{`C:\Program Files\Docker\Docker\resources\bin\docker.exe`}
 }
 
-// ixHideWindow keeps a console window from flashing up for each command
-// (docker, ffmpeg): every program the archive runs in the background uses it.
-func ixHideWindow(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000} // CREATE_NO_WINDOW
-}
-
 // ixStartDockerDesktop starts Docker Desktop and does not wait for it: it
 // keeps running on its own after the archive stops.
 func ixStartDockerDesktop() error {
@@ -31,7 +25,9 @@ func ixStartDockerDesktop() error {
 		return errors.New(`Docker is not running, and Docker Desktop was not found in C:\Program Files\Docker. Start Docker yourself, then try again.`)
 	}
 	cmd := exec.Command(ixDockerDesktopExe)
-	// Its own process group, away from the archive's console.
+	// Its own process group, away from the archive's console. (Programs the
+	// archive runs in the background and waits for, such as docker and
+	// ffmpeg, get no console window instead: procutil.HideWindow.)
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: 0x00000200 | 0x00000008} // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("Docker is not running, and Docker Desktop could not be started: %v", err)

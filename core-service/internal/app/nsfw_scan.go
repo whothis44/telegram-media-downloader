@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/botnick/telegram-media-downloader/core-service/internal/nsfw"
+	"github.com/botnick/telegram-media-downloader/core-service/internal/procutil"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/ws"
 )
 
@@ -371,6 +372,7 @@ func (a *App) nsfwDecodeSprite(ctx context.Context, stored, format string) (imag
 	}
 	var out bytes.Buffer
 	cmd := exec.CommandContext(ctx, bin, "-hide_banner", "-loglevel", "error", "-f", "webp_pipe", "-i", "pipe:0", "-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "pipe:1")
+	procutil.HideWindow(cmd)
 	cmd.Stdin, cmd.Stdout = bytes.NewReader(data), &out
 	if err := cmd.Run(); err != nil {
 		return nil, err

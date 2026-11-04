@@ -21,6 +21,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/botnick/telegram-media-downloader/core-service/internal/procutil"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/seekbar"
 )
 
@@ -592,7 +593,7 @@ func ixFFmpegFingerprint(ctx context.Context, path, hwaccel string) (float64, []
 	args = append(args, "-i", path, "-an", "-sn", "-dn",
 		"-vf", fmt.Sprintf("fps=2,scale=%d:%d:flags=area,format=gray,showinfo", ixVSide, ixVSide), "-f", "rawvideo", "-pix_fmt", "gray", "pipe:1")
 	cmd := exec.CommandContext(ctx, bin, args...)
-	ixHideWindow(cmd)
+	procutil.HideWindow(cmd)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return 0, nil, err

@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/botnick/telegram-media-downloader/core-service/internal/procutil"
 )
 
 // Options are the operator's advanced.seekbar tuning knobs. Zero values pick
@@ -192,6 +194,7 @@ func ProbeDuration(ctx context.Context, input string) (float64, error) {
 	defer cancel()
 	if bin := FFprobePath(); bin != "" {
 		cmd := exec.CommandContext(ctx, bin, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", input)
+		procutil.HideWindow(cmd)
 		var stdout bytes.Buffer
 		cmd.Stdout = &stdout
 		if err := runLowPriority(cmd); err == nil {
@@ -207,6 +210,7 @@ func ProbeDuration(ctx context.Context, input string) (float64, error) {
 		return 0, errors.New("ffmpeg: executable not found")
 	}
 	cmd := exec.CommandContext(ctx, bin, "-hide_banner", "-i", input)
+	procutil.HideWindow(cmd)
 	var stderr limitedBuffer
 	cmd.Stderr = &stderr
 	_ = runLowPriority(cmd) // exits non-zero without an output file
@@ -263,7 +267,9 @@ func HWAccels(ctx context.Context) []string {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, bin, "-hide_banner", "-hwaccels").Output()
+	cmd := exec.CommandContext(ctx, bin, "-hide_banner", "-hwaccels")
+	procutil.HideWindow(cmd)
+	out, err := cmd.Output()
 	compiled := []string{}
 	if err != nil {
 		return compiled

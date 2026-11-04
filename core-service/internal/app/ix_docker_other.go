@@ -2,14 +2,9 @@
 
 package app
 
-import (
-	"errors"
-	"os/exec"
-)
+import "errors"
 
 func ixDockerFallbacks() []string { return nil }
-
-func ixHideWindow(*exec.Cmd) {}
 
 // ixStartDockerDesktop: only Docker Desktop on Windows is started by the
 // archive; elsewhere Docker runs as a system service.
