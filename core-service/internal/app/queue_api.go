@@ -43,13 +43,32 @@ func (a *App) handleQueuePauseAll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
 
+// handleQueueResumeAll lifts the queue-wide pause and the pauses people
+// made. Items the archive set aside stay waiting unless includeArchive is
+// set: resumed by hand, the archive never sets them aside again.
 func (a *App) handleQueueResumeAll(w http.ResponseWriter, r *http.Request) {
-	if err := a.monitor.ResumeAll(r.Context()); err != nil {
+	var body struct {
+		IncludeArchive bool `json:"includeArchive"`
+	}
+	if !decodeOptionalBody(w, r, &body) {
+		return
+	}
+	if body.IncludeArchive {
+		if err := a.monitor.ResumeAll(r.Context()); err != nil {
+			writeQueueError(w, err)
+			return
+		}
+		queueChanged(a, map[string]any{"op": "resume-all", "includeArchive": true})
+		writeJSON(w, http.StatusOK, map[string]any{"success": true, "keptAside": 0})
+		return
+	}
+	resumed, kept, err := a.queueResumeAllKeepHeld(r.Context())
+	if err != nil {
 		writeQueueError(w, err)
 		return
 	}
-	queueChanged(a, map[string]any{"op": "resume-all"})
-	writeJSON(w, http.StatusOK, map[string]any{"success": true})
+	queueChanged(a, map[string]any{"op": "resume-all", "includeArchive": false})
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "resumed": resumed, "keptAside": kept})
 }
 
 func (a *App) handleQueueCancelAll(w http.ResponseWriter, r *http.Request) {
@@ -135,6 +154,9 @@ func (a *App) handleQueueBatch(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Keys   []any  `json:"keys"`
 		Action string `json:"action"`
+		// resume: also items the archive set aside (they become the
+		// person's: never set aside again). Left out, those are skipped.
+		IncludeArchive bool `json:"includeArchive"`
 	}
 	if err := decodeBody(w, r, &body); err != nil {
 		return
@@ -167,6 +189,17 @@ func (a *App) handleQueueBatch(w http.ResponseWriter, r *http.Request) {
 		case "pause":
 			ok, err = a.monitor.PauseJob(r.Context(), key)
 		case "resume":
+			if !body.IncludeArchive {
+				hold, holdErr := a.queueHoldReason(r.Context(), key)
+				if holdErr != nil {
+					writeJSONError(w, http.StatusInternalServerError, "queue read failed")
+					return
+				}
+				if hold != "" {
+					failed = append(failed, map[string]any{"key": key, "reason": "set aside by the archive", "archiveHold": hold})
+					continue
+				}
+			}
 			ok, err = a.monitor.ResumeJob(r.Context(), key)
 		case "cancel":
 			ok, err = a.monitor.CancelJob(r.Context(), key)

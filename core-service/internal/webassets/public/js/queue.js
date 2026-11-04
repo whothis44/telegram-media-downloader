@@ -19,7 +19,7 @@ import { showToast, escapeHtml, formatBytes, getFileIcon } from './utils.js';
 import { t as i18nT, tf as i18nTf } from './i18n.js';
 import { getGroupName } from './store.js';
 import { fileTokenQuery } from './media-url.js';
-import { confirmSheet } from './sheet.js';
+import { confirmSheet, openSheet } from './sheet.js';
 
 // ============ Constants ============
 //
@@ -75,11 +75,18 @@ const STATUS_FILTERS = [
         fallback: 'Queued',
         match: (j) => j.status === 'queued',
     },
+    // Paused by a person — the archive's own set-asides have their chip.
     {
         id: 'paused',
         i18n: 'queue.chip.paused',
         fallback: 'Paused',
-        match: (j) => j.status === 'paused',
+        match: (j) => j.status === 'paused' && !j.archiveHold,
+    },
+    {
+        id: 'held',
+        i18n: 'queue.chip.held',
+        fallback: 'Set aside by the archive',
+        match: (j) => isArchiveHeld(j),
     },
     {
         id: 'dupe',
@@ -94,6 +101,41 @@ const STATUS_FILTERS = [
         match: (j) => j.nsfwBlocked === true,
     },
 ];
+
+// ============ Set aside by the archive ============
+//
+// The archive pauses some queue items itself (snapshot `archiveHold`):
+// larger files wait while private chats and smaller files go first, likely
+// copies of saved files wait to be checked, and originals wait until their
+// smaller version is replaced. It lets them go by itself. A person resuming
+// one makes it theirs — the archive never sets it aside again — so these
+// rows are told apart from the ones a person paused, and resuming them
+// always asks first.
+const HOLD_REASONS = {
+    deadline: [
+        'queue.hold.reason.deadline',
+        'larger file, private chats and smaller files first',
+    ],
+    copy: ['queue.hold.reason.copy', 'likely copy of a saved file'],
+    lowq: [
+        'queue.hold.reason.lowq',
+        'original waiting for its smaller version to be replaced',
+    ],
+};
+
+function isArchiveHeld(j) {
+    return j?.status === 'paused' && !!j.archiveHold;
+}
+
+function holdReasonText(j) {
+    const r = HOLD_REASONS[j?.archiveHold];
+    return r ? i18nT(r[0], r[1]) : '';
+}
+
+// Whole-queue counts from the server (the snapshot lists up to 1000
+// waiting items, the counts cover all of them). Adjusted by single-row WS
+// events; bulk events reload the snapshot.
+const holdCounts = { archive: null, person: null };
 
 // ============ Store ============
 //
@@ -124,7 +166,8 @@ const view = {
     scrollTop: 0,
     booted: false,
     visible: false,
-    rendered: 0, // how many rows of the filtered list are in the DOM
+    rendered: 0, // end of the rendered window in `_order`
+    frozen: false, // "Pause list updates" — in memory only, off after a reload
 };
 let _loadMoreObserver = null;
 // Keys whose rows landed in the DOM since the last full re-render. We
@@ -166,8 +209,10 @@ function scheduleRender() {
             // repaints it all from the store on the next visit.
             updateNavBadge();
             if (!view.visible) return;
-            if (structural) renderRows();
-            else patchRenderedRows();
+            // Data changes never re-render from the top: rows come and go
+            // around the reader (reconcileRows), then patch in place.
+            if (structural) reconcileRows(true);
+            patchRenderedRows();
             renderChips();
             renderAggregate();
             // Refresh batch-action button state alongside other toolbar
@@ -367,7 +412,46 @@ function scheduleSelectionRender() {
 async function runBatchAction(action) {
     if (_selected.size === 0) return;
     const keys = Array.from(_selected);
+    const extra = {};
     try {
+        if (action === 'resume') {
+            const held = keys.filter((k) => isArchiveHeld(store.get(k))).length;
+            if (held > 0) {
+                const mine = keys.length - held;
+                const choices = [];
+                if (mine > 0) {
+                    choices.push({
+                        id: 'mine',
+                        primary: true,
+                        label: i18nTf(
+                            'queue.hold.resume_mine_n',
+                            { n: mine },
+                            `Resume only the ${mine} paused by you`,
+                        ),
+                    });
+                }
+                choices.push({
+                    id: 'all',
+                    danger: true,
+                    label: i18nTf(
+                        'queue.hold.resume_held_n',
+                        { n: held },
+                        `Also resume the ${held} set aside by the archive`,
+                    ),
+                });
+                const pick = await choiceSheet({
+                    title: i18nT('queue.hold.resume_title', 'Resume files the archive set aside?'),
+                    message: i18nTf(
+                        'queue.hold.resume_selected_body',
+                        { n: held },
+                        `${held} of the selected files were set aside by the archive. It lets them go by itself, in order.\nResume them by hand and they download now as your decision — the archive will never set them aside again.`,
+                    ),
+                    choices,
+                });
+                if (!pick) return;
+                extra.includeArchive = pick === 'all';
+            }
+        }
         if (action === 'cancel') {
             if (
                 !(await confirmSheet({
@@ -385,7 +469,8 @@ async function runBatchAction(action) {
             )
                 return;
         }
-        const r = await api.post('/api/queue/batch', { keys, action });
+        const r = await api.post('/api/queue/batch', { keys, action, ...extra });
+        if (action === 'resume') refreshSoon();
         // The downloader's per-key `queue_changed` events update each
         // row, but `dismiss` is a client-only "drop from view" — handle
         // it here so the UI reacts immediately for done/failed rows.
@@ -477,6 +562,8 @@ async function loadSnapshot() {
         globalPaused = !!snap.globalPaused;
         engineRunning = !!snap.engineRunning;
         maxSpeedConfig = snap.maxSpeed ?? null;
+        holdCounts.archive = Number.isFinite(snap.archiveHeldCount) ? snap.archiveHeldCount : null;
+        holdCounts.person = Number.isFinite(snap.personPausedCount) ? snap.personPausedCount : null;
         for (const j of snap.active || []) upsert({ ...j });
         for (const j of snap.queued || []) upsert({ ...j });
         for (const j of snap.recent || []) upsert({ ...j });
@@ -494,6 +581,60 @@ async function loadSnapshot() {
             );
         }
     }
+}
+
+// Reload the snapshot shortly — after bulk changes whose WS event carries
+// no per-row detail (resume all, batch), and when the page is shown again
+// (the archive sets items aside and lets them go without per-row events).
+let _refreshTimer = 0;
+function refreshSoon(ms = 400) {
+    clearTimeout(_refreshTimer);
+    _refreshTimer = setTimeout(() => loadSnapshot(), ms);
+}
+
+// A sheet with one button per choice; resolves to the chosen id, or null
+// when dismissed.
+function choiceSheet({ title, message, choices }) {
+    return new Promise((resolve) => {
+        let decided = false;
+        const settle = (v) => {
+            if (decided) return;
+            decided = true;
+            resolve(v);
+        };
+        const cls = (c) =>
+            c.danger
+                ? 'bg-red-500/15 text-red-300 hover:bg-red-500/25'
+                : c.primary
+                  ? 'bg-tg-blue text-white hover:bg-opacity-90'
+                  : 'bg-tg-bg/60 text-tg-text hover:bg-tg-hover';
+        const msg = String(message || '')
+            .split('\n')
+            .map((line) => escapeHtml(line))
+            .join('<br>');
+        const sheet = openSheet({
+            title,
+            size: 'sm',
+            content: `
+                <div class="text-tg-text text-sm leading-relaxed">${msg}</div>
+                <div class="flex flex-col gap-2 mt-5">
+                    ${choices
+                        .map(
+                            (c) =>
+                                `<button type="button" data-choice="${escapeHtml(c.id)}" class="px-4 py-2 rounded-lg text-sm font-medium text-left transition ${cls(c)}">${escapeHtml(c.label)}</button>`,
+                        )
+                        .join('')}
+                    <button type="button" data-choice="" class="px-4 py-2 rounded-lg text-sm text-tg-textSecondary hover:bg-tg-hover transition">${escapeHtml(i18nT('common.cancel', 'Cancel'))}</button>
+                </div>`,
+            onClose: () => settle(null),
+        });
+        sheet.root.addEventListener('click', (e) => {
+            const b = e.target.closest('[data-choice]');
+            if (!b) return;
+            settle(b.dataset.choice || null);
+            sheet.close();
+        });
+    });
 }
 
 // ============ WS handlers ============
@@ -526,12 +667,21 @@ function handleWs(msg) {
         if (p.op === 'resume-all') {
             globalPaused = false;
             scheduleStructuralRender();
+            // Rows the resume lifted (and, without includeArchive, the
+            // set-aside rows it kept) come from the server.
+            refreshSoon();
+            return;
+        }
+        if (p.op === 'batch') {
+            refreshSoon();
             return;
         }
         if (p.op === 'cancel-all') {
             for (const [k, v] of store) {
                 if (v.status === 'queued' || v.status === 'paused') remove(k);
             }
+            holdCounts.archive = holdCounts.archive == null ? null : 0;
+            holdCounts.person = holdCounts.person == null ? null : 0;
             scheduleStructuralRender();
             return;
         }
@@ -559,11 +709,20 @@ function handleWs(msg) {
         }
         const cur = store.get(p.key);
         if (p.op === 'pause' && cur) {
+            if (cur.status !== 'paused' && holdCounts.person != null) holdCounts.person++;
+            // Paused by a person, whatever held it before.
+            cur.archiveHold = null;
             cur.status = 'paused';
             bumpStatus('queued', -1);
             bumpStatus('active', -1);
             bumpStatus('paused', 1);
         } else if (p.op === 'resume' && cur) {
+            if (cur.status === 'paused') {
+                const k = cur.archiveHold ? 'archive' : 'person';
+                if (holdCounts[k] != null) holdCounts[k] = Math.max(0, holdCounts[k] - 1);
+            }
+            // Resumed by a person: theirs now, never set aside again.
+            cur.archiveHold = null;
             cur.status = cur.received ? 'active' : 'queued';
             bumpStatus('paused', -1);
             bumpStatus(cur.status, 1);
@@ -758,8 +917,10 @@ function _chipCounts() {
     // (O(n), n bounded by MAX_FINISHED + live jobs). Without this the
     // "Duplicate" chip always showed 0 even when rows carried the badge.
     let dupe = 0;
+    let held = 0;
     for (const j of store.values()) {
         if (j.deduped === true) dupe += 1;
+        if (isArchiveHeld(j)) held += 1;
     }
     const active = statusCounts.get('active') || 0;
     const queued = statusCounts.get('queued') || 0;
@@ -769,7 +930,9 @@ function _chipCounts() {
         all: store.size,
         active,
         queued,
-        paused,
+        // Paused by a person; the archive's own are `held`.
+        paused: Math.max(0, paused - held),
+        held,
         failed: statusCounts.get('failed') || 0,
         done: statusCounts.get('done') || 0,
         dupe,
@@ -875,35 +1038,75 @@ function _renderEmpty() {
     }
 }
 
-// Full re-render — wipes the rows host, paints INITIAL_RENDER rows, and
-// arms the load-more sentinel for further pages. Called when the
-// filter/sort/search changes, or on the very first paint.
+// ============ Keeping the reader's place ============
+//
+// The list on screen follows `_order` — the keys in the order they are
+// shown — not the live sorted list. A full re-render (renderRows) takes
+// the live order: on the first paint, a filter / sort / search change, a
+// visit to the page, and the "N new — show" pill. Everything the data does
+// on its own (downloads arriving, finishing, being cancelled) goes through
+// reconcileRows(), which never moves what the reader is looking at:
+//   - rows that arrive above the viewport are inserted and the scroll
+//     position is corrected so the first visible row stays put;
+//   - rows that would land at the top while the list is at the top, or
+//     among the visible rows, wait behind the "N new — show" pill;
+//   - rows already on screen keep updating in place (progress, status)
+//     and stay while visible even when they leave the filter;
+//   - "Pause list updates" holds every arrival and removal-by-filter
+//     until resumed; counters keep updating.
+// The browser's own scroll anchoring is off for the viewport (CSS
+// overflow-anchor: none) so it can't add a second correction.
+let _order = [];
+let _orderVersion = -1;
+let _pendingCount = 0; // live rows not shown yet (the pill)
+let _staleCount = 0; // rows shown that no longer match the filter
+
+function _paintEmpty() {
+    const rowsHost = document.getElementById('queue-rows');
+    const empty = document.getElementById('queue-empty');
+    if (rowsHost) rowsHost.innerHTML = '';
+    _renderedKeys.clear();
+    view.rendered = 0;
+    _renderEmpty();
+    if (empty) empty.classList.remove('hidden');
+    _toggleSentinel(false);
+}
+
+// Full re-render — wipes the rows host, takes the live order, paints
+// INITIAL_RENDER rows, and arms the load-more sentinel for further pages.
+// Called when the filter/sort/search changes, or on the very first paint.
 function renderRows() {
+    _order = getFilteredSorted().map((j) => j.key);
+    _orderVersion = _storeVersion;
+    paintWindow();
+}
+
+// Paint the first page of `_order` from scratch.
+function paintWindow() {
     const viewport = document.getElementById('queue-viewport');
     const rowsHost = document.getElementById('queue-rows');
     const empty = document.getElementById('queue-empty');
-    const sentinel = document.getElementById('queue-load-more');
     if (!viewport || !rowsHost) return;
 
-    const rows = getFilteredSorted();
     _renderedKeys.clear();
-    if (rows.length === 0) {
-        rowsHost.innerHTML = '';
-        view.rendered = 0;
-        _renderEmpty();
-        if (empty) empty.classList.remove('hidden');
-        if (sentinel) sentinel.classList.add('hidden');
+    _countPending();
+    renderNewPill();
+    if (_order.length === 0) {
+        _paintEmpty();
         return;
     }
     if (empty) empty.classList.add('hidden');
 
-    const initial = Math.min(INITIAL_RENDER, rows.length);
-    const slice = rows.slice(0, initial);
+    const initial = Math.min(INITIAL_RENDER, _order.length);
+    const slice = _order
+        .slice(0, initial)
+        .map((k) => store.get(k))
+        .filter(Boolean);
     rowsHost.innerHTML = slice.map((j) => renderRow(j)).join('');
     for (const j of slice) _renderedKeys.add(j.key);
     view.rendered = initial;
 
-    _toggleSentinel(rows.length > view.rendered);
+    _toggleSentinel(_order.length > view.rendered);
     _ensureLoadMoreObserver();
 
     // Wire per-row interaction via event delegation. Doing it on the host
@@ -1019,34 +1222,85 @@ const MAX_DOM_ROWS = 500;
 function appendNextPage() {
     const rowsHost = document.getElementById('queue-rows');
     if (!rowsHost) return;
-    const rows = getFilteredSorted();
-    if (view.rendered >= rows.length) {
+    // Pages come from the order on screen, not the live order — a row
+    // that arrived since sits wherever reconcileRows() put it.
+    if (view.rendered >= _order.length) {
         _toggleSentinel(false);
         return;
     }
-    const slice = rows.slice(view.rendered, view.rendered + PAGE_SIZE);
-    if (slice.length === 0) {
+    const keys = _order.slice(view.rendered, view.rendered + PAGE_SIZE);
+    if (keys.length === 0) {
         _toggleSentinel(false);
         return;
     }
+    const slice = keys.map((k) => store.get(k)).filter(Boolean);
     // Use insertAdjacentHTML for an O(N_appended) DOM insert that
     // doesn't re-parse the existing rows — a `rowsHost.innerHTML += …`
     // would re-parse the entire prior content, killing performance on
     // a long queue.
     rowsHost.insertAdjacentHTML('beforeend', slice.map((j) => renderRow(j)).join(''));
     for (const j of slice) _renderedKeys.add(j.key);
-    view.rendered += slice.length;
+    view.rendered += keys.length;
     // Sliding window — drop the topmost N rows that have scrolled out of
     // the viewport so the DOM stays bounded. Keeps the IntersectionObserver
     // sentinel intact at the bottom because it lives outside `queue-rows`.
-    while (rowsHost.children.length > MAX_DOM_ROWS) {
-        const first = rowsHost.firstElementChild;
-        if (!first) break;
-        const k = first.dataset?.key;
-        if (k) _renderedKeys.delete(k);
-        first.remove();
+    // The rows go from above the reader, so the scroll position is
+    // corrected to keep the visible rows still.
+    if (rowsHost.children.length > MAX_DOM_ROWS) {
+        const viewport = document.getElementById('queue-viewport');
+        const trim = (anchor) => {
+            while (rowsHost.children.length > MAX_DOM_ROWS) {
+                const first = rowsHost.firstElementChild;
+                if (!first || first === anchor) break;
+                const k = first.dataset?.key;
+                if (k) _renderedKeys.delete(k);
+                first.remove();
+            }
+        };
+        if (viewport) {
+            _keepPlace(viewport, rowsHost, _readerPlace(viewport, rowsHost), () => true, trim);
+        } else {
+            trim(null);
+        }
     }
-    _toggleSentinel(view.rendered < rows.length);
+    _toggleSentinel(view.rendered < _order.length);
+}
+
+// The other end of the sliding window: rows dropped off the top come back
+// when the reader scrolls up to them (inserted above, so the visible rows
+// stay put), and rows far below go to keep the DOM bounded.
+function prependPrevPage() {
+    const viewport = document.getElementById('queue-viewport');
+    const rowsHost = document.getElementById('queue-rows');
+    const firstKey = rowsHost?.firstElementChild?.dataset.key;
+    if (!viewport || !firstKey) return;
+    const from = _order.indexOf(firstKey);
+    if (from <= 0) return;
+    const keys = _order.slice(Math.max(0, from - PAGE_SIZE), from);
+    const place = _readerPlace(viewport, rowsHost);
+    _keepPlace(viewport, rowsHost, place, () => true, () => {
+        const jobs = keys.map((k) => store.get(k)).filter(Boolean);
+        rowsHost.insertAdjacentHTML('afterbegin', jobs.map((j) => renderRow(j)).join(''));
+        for (const j of jobs) _renderedKeys.add(j.key);
+        while (rowsHost.children.length > MAX_DOM_ROWS) {
+            const last = rowsHost.lastElementChild;
+            if (!last) break;
+            _renderedKeys.delete(last.dataset.key);
+            last.remove();
+            view.rendered--;
+        }
+    });
+    _toggleSentinel(view.rendered < _order.length);
+}
+
+let _prevPageScheduled = false;
+function _maybePrependPrev(viewport) {
+    if (_prevPageScheduled || viewport.scrollTop > 400) return;
+    _prevPageScheduled = true;
+    requestAnimationFrame(() => {
+        _prevPageScheduled = false;
+        prependPrevPage();
+    });
 }
 
 function _toggleSentinel(show) {
@@ -1092,39 +1346,236 @@ function _ensureLoadMoreObserver() {
 // by the structural-render path.
 function patchRenderedRows() {
     const rowsHost = document.getElementById('queue-rows');
-    if (!rowsHost || _renderedKeys.size === 0) return;
-    // Detect newly-added jobs that AREN'T in the rendered window — if
-    // there are any (e.g. monitor just started a fresh download), force
-    // a structural re-render so they appear.
-    const filtered = getFilteredSorted();
-    // The DOM holds the window [from, view.rendered) — appendNextPage()
-    // drops rows off the top past MAX_DOM_ROWS. Compare against that
-    // window only; comparing against [0, view.rendered) made every tick
-    // after a trim look "diverged" and snap the list back to the top.
-    const from = Math.max(0, view.rendered - _renderedKeys.size);
-    const filteredKeys = new Set();
-    for (let i = from; i < Math.min(filtered.length, view.rendered); i++) {
-        filteredKeys.add(filtered[i].key);
+    if (!rowsHost) return;
+    // Rows added / removed since the last pass (cheap no-op otherwise).
+    reconcileRows(false);
+    // Patch in place. Each `[data-key]` row has a small set of named
+    // child nodes the patcher knows about; update only those.
+    for (const rowEl of Array.from(rowsHost.children)) {
+        const job = store.get(rowEl.dataset.key);
+        if (job) _patchRowNode(rowEl, job);
     }
-    // If the rendered window's set of keys diverged from the filtered
-    // window (a new top-of-list job, a removal), do a structural pass.
-    if (filteredKeys.size !== _renderedKeys.size) {
+}
+
+// Index of the first element of `els` for which pred holds, given that it
+// holds for every element after it too (rows are in layout order).
+function _firstWhere(els, pred) {
+    let lo = 0;
+    let hi = els.length;
+    while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (pred(els[mid])) hi = mid;
+        else lo = mid + 1;
+    }
+    return lo;
+}
+
+// Where the reader is: the DOM rows, the first visible one and the first
+// one below the viewport. Row offsets are relative to the viewport's
+// content (#queue-viewport is position: relative).
+function _readerPlace(viewport, rowsHost) {
+    const rows = Array.from(rowsHost.children);
+    const top = viewport.scrollTop;
+    const bottom = top + viewport.clientHeight;
+    const first = _firstWhere(rows, (r) => r.offsetTop + r.offsetHeight > top);
+    const below = _firstWhere(rows, (r) => r.offsetTop >= bottom);
+    return { rows, top, first, below, atTop: top <= 2 };
+}
+
+// Run a DOM change without moving the reader: the first visible row that
+// survives (`keep(key)`) stays at the same height on screen.
+function _keepPlace(viewport, rowsHost, place, keep, change) {
+    let anchor = null;
+    let offset = 0;
+    for (let i = place.first; i < place.rows.length; i++) {
+        const r = place.rows[i];
+        if (keep(r.dataset.key)) {
+            anchor = r;
+            offset = r.offsetTop - place.top;
+            break;
+        }
+    }
+    change(anchor);
+    if (anchor && anchor.isConnected) {
+        const want = anchor.offsetTop - offset;
+        if (Math.abs(viewport.scrollTop - want) >= 1) viewport.scrollTop = want;
+    }
+}
+
+// Bring the list on screen in line with the store without moving what
+// the reader is looking at (see "Keeping the reader's place" above).
+function reconcileRows(force) {
+    if (!force && _orderVersion === _storeVersion) return;
+    const viewport = document.getElementById('queue-viewport');
+    const rowsHost = document.getElementById('queue-rows');
+    if (!viewport || !rowsHost) return;
+    _orderVersion = _storeVersion;
+    // Nothing on screen yet: nothing to keep in place.
+    if (_order.length === 0 && !view.frozen) {
         renderRows();
         return;
     }
-    for (const k of _renderedKeys) {
-        if (!filteredKeys.has(k)) {
-            renderRows();
-            return;
+    const live = getFilteredSorted();
+    const liveSet = new Set(live.map((j) => j.key));
+    const place = _readerPlace(viewport, rowsHost);
+    const visible = new Set();
+    for (let i = place.first; i < place.below; i++) visible.add(place.rows[i].dataset.key);
+    const posOf = new Map();
+    place.rows.forEach((r, i) => posOf.set(r.dataset.key, i));
+
+    // Rows that stay: still in the store, and still in the filter — or on
+    // screen, or the list is paused (they update in place until the next
+    // full re-render).
+    const survivors = _order.filter(
+        (k) => store.has(k) && (liveSet.has(k) || view.frozen || visible.has(k)),
+    );
+    const surviving = new Set(survivors);
+
+    // New rows, grouped by the surviving row they go before (null: end).
+    const groups = new Map();
+    let next = null;
+    for (let i = live.length - 1; i >= 0; i--) {
+        const k = live[i].key;
+        if (surviving.has(k)) {
+            next = k;
+            continue;
         }
+        let g = groups.get(next);
+        if (!g) groups.set(next, (g = []));
+        g.push(k); // reversed; read back to front below
     }
-    // Patch in place. Each `[data-key]` row has a small set of named
-    // child nodes the patcher knows about; update only those.
-    for (const job of filtered.slice(from, view.rendered)) {
-        const rowEl = rowsHost.querySelector(`[data-key="${CSS.escape(job.key)}"]`);
-        if (!rowEl) continue;
-        _patchRowNode(rowEl, job);
+    // At the top of the list itself, not of a window that starts lower.
+    const atListTop = place.atTop && place.rows[0]?.dataset.key === _order[0];
+    // Whether a group goes in now or waits behind the pill.
+    const goesIn = (before) => {
+        if (view.frozen) return false;
+        if (before == null || !posOf.has(before)) return true; // off screen
+        const i = posOf.get(before);
+        if (i < place.first) return true; // above the viewport
+        if (i === place.first) return !atListTop; // kept still by the anchor
+        return i >= place.below; // among the visible rows → wait
+    };
+    const newOrder = [];
+    const take = (before) => {
+        const g = groups.get(before);
+        if (!g || !goesIn(before)) return;
+        for (let j = g.length - 1; j >= 0; j--) newOrder.push(g[j]);
+    };
+    for (const k of survivors) {
+        take(k);
+        newOrder.push(k);
     }
+    take(null);
+
+    // The rendered window in the new order: from the first surviving DOM
+    // row to the last (stretched to the top / end when it reached them).
+    const oldIndex = new Map();
+    _order.forEach((k, i) => oldIndex.set(k, i));
+    const domKeys = place.rows.map((r) => r.dataset.key);
+    const keptDom = domKeys.filter((k) => surviving.has(k));
+    const oldFrom = domKeys.length ? (oldIndex.get(domKeys[0]) ?? 0) : 0;
+    const oldEnd = domKeys.length ? (oldIndex.get(domKeys[domKeys.length - 1]) ?? -1) + 1 : 0;
+    const reachedEnd = oldEnd >= _order.length;
+    _order = newOrder;
+    if (keptDom.length === 0) {
+        // Nothing on screen survived (cancel all, a reload that dropped
+        // them): start from the top of the new order.
+        paintWindow();
+        viewport.scrollTop = 0;
+        return;
+    }
+    const newIndex = new Map();
+    newOrder.forEach((k, i) => newIndex.set(k, i));
+    const start = oldFrom === 0 ? 0 : newIndex.get(keptDom[0]);
+    const end = reachedEnd ? newOrder.length : newIndex.get(keptDom[keptDom.length - 1]) + 1;
+    const desired = newOrder.slice(start, end);
+    const desiredSet = new Set(desired);
+
+    _keepPlace(viewport, rowsHost, place, (k) => desiredSet.has(k), (anchor) => {
+        for (const r of place.rows) {
+            if (!desiredSet.has(r.dataset.key)) {
+                _renderedKeys.delete(r.dataset.key);
+                r.remove();
+            }
+        }
+        // Survivors keep their relative order, so one pass inserts the rest.
+        let cursor = rowsHost.firstElementChild;
+        for (const k of desired) {
+            if (cursor && cursor.dataset.key === k) {
+                cursor = cursor.nextElementSibling;
+                continue;
+            }
+            const j = store.get(k);
+            if (!j) continue;
+            if (cursor) cursor.insertAdjacentHTML('beforebegin', renderRow(j));
+            else rowsHost.insertAdjacentHTML('beforeend', renderRow(j));
+            _renderedKeys.add(k);
+        }
+        // Keep the DOM bounded: drop rows from the top, above the anchor.
+        while (rowsHost.children.length > MAX_DOM_ROWS) {
+            const first = rowsHost.firstElementChild;
+            if (!first || first === anchor) break;
+            _renderedKeys.delete(first.dataset.key);
+            first.remove();
+        }
+    });
+    view.rendered = end;
+    document.getElementById('queue-empty')?.classList.toggle('hidden', newOrder.length > 0);
+    if (newOrder.length === 0) _renderEmpty();
+    _toggleSentinel(view.rendered < _order.length);
+    _countPending(liveSet);
+    renderNewPill();
+}
+
+function _countPending(liveSet) {
+    const live = liveSet || new Set(getFilteredSorted().map((j) => j.key));
+    const shown = new Set(_order);
+    let pending = 0;
+    for (const k of live) if (!shown.has(k)) pending++;
+    let stale = 0;
+    for (const k of _order) if (!live.has(k)) stale++;
+    _pendingCount = pending;
+    _staleCount = stale;
+}
+
+// The sticky "N new — show" pill at the top of the list. Also offered
+// (as "Update list") when rows on screen no longer match the filter.
+function renderNewPill() {
+    const wrap = document.getElementById('queue-new-pill');
+    const btn = document.getElementById('queue-new-pill-btn');
+    if (!wrap || !btn) return;
+    const show = _pendingCount > 0 || _staleCount > 0;
+    wrap.classList.toggle('hidden', !show);
+    if (!show) return;
+    const label =
+        _pendingCount > 0
+            ? i18nTf('queue.list.new_n', { n: _pendingCount }, `${_pendingCount} new — show`)
+            : i18nT('queue.list.update', 'Update list');
+    if (btn.textContent !== label) btn.textContent = label;
+}
+
+// Take the live order now (the pill): new rows in, finished rows out.
+function showNewRows() {
+    renderRows();
+    const vp = document.getElementById('queue-viewport');
+    if (vp) vp.scrollTop = 0;
+}
+
+function setListFrozen(on) {
+    view.frozen = !!on;
+    const btn = document.getElementById('queue-freeze');
+    if (btn) {
+        btn.setAttribute('aria-pressed', view.frozen ? 'true' : 'false');
+        btn.classList.toggle('queue-freeze--on', view.frozen);
+        const label = view.frozen
+            ? i18nT('queue.list.resume_updates', 'Resume list updates')
+            : i18nT('queue.list.pause_updates', 'Pause list updates');
+        const span = btn.querySelector('[data-freeze-label]');
+        if (span) span.textContent = label;
+        btn.title = label;
+        btn.setAttribute('aria-label', label);
+    }
+    if (!view.frozen && view.visible) reconcileRows(true);
 }
 
 function _patchRowNode(rowEl, job) {
@@ -1149,8 +1600,9 @@ function _patchRowNode(rowEl, job) {
         meta.textContent = [sizeLine, speed, eta].filter(Boolean).join(' · ');
     }
     // Status pill — only DOM-touch when the status actually changed
+    // (a row the archive set aside counts as its own state).
     const pillEl = rowEl.querySelector('[data-row-status]');
-    if (pillEl && pillEl.dataset.status !== job.status) {
+    if (pillEl && pillEl.dataset.status !== rowStatusTag(job)) {
         // Status change can flip the action set (active → done changes
         // the per-row buttons). Cheapest correct fix: re-render this
         // single row.
@@ -1162,7 +1614,12 @@ function _patchRowNode(rowEl, job) {
     }
 }
 
+function rowStatusTag(j) {
+    return isArchiveHeld(j) ? 'held' : j.status;
+}
+
 function renderRow(j) {
+    const held = isArchiveHeld(j);
     const name =
         j.fileName ||
         (j.messageId ? `#${j.messageId}` : i18nT('queue.row.unnamed', 'Unnamed file'));
@@ -1206,8 +1663,20 @@ function renderRow(j) {
             paused: 'bg-tg-orange/20 text-tg-orange',
             failed: 'bg-red-500/20 text-red-400',
             done: 'bg-tg-green/20 text-tg-green',
-        }[j.status] || 'bg-gray-700/40 text-gray-300';
-    const pillLabel = i18nT(`queue.status.${j.status}`, j.status);
+            // Set aside by the archive: waiting by design, not a problem.
+            held: 'bg-tg-blue/10 text-tg-textSecondary',
+        }[rowStatusTag(j)] || 'bg-gray-700/40 text-gray-300';
+    const pillLabel = held
+        ? i18nT('queue.status.held', 'Set aside')
+        : i18nT(`queue.status.${j.status}`, j.status);
+    const heldLabel = held ? i18nT('queue.hold.label', 'Set aside by the archive') : '';
+    const heldReason = held ? holdReasonText(j) : '';
+    const heldTitle = held ? (heldReason ? `${heldLabel}: ${heldReason}` : heldLabel) : '';
+    const pillTitle = held
+        ? ` title="${escapeHtml(heldTitle)}"`
+        : j.status === 'paused'
+          ? ` title="${escapeHtml(i18nT('queue.status.paused_tooltip', 'Paused by you'))}"`
+          : '';
 
     // "Duplicate" tag — emitted when the downloader finished but the file
     // hash matched an existing on-disk row. The file isn't downloaded
@@ -1273,7 +1742,16 @@ function renderRow(j) {
             ),
         );
     } else if (j.status === 'paused') {
-        actions.push(actionBtn('resume', 'ri-play-line', i18nT('queue.action.resume', 'Resume')));
+        // Same action for a set-aside row; runRowAction asks first.
+        actions.push(
+            actionBtn(
+                'resume',
+                'ri-play-line',
+                held
+                    ? i18nT('queue.action.resume_held', 'Download now…')
+                    : i18nT('queue.action.resume', 'Resume'),
+            ),
+        );
         actions.push(
             actionBtn(
                 'cancel',
@@ -1316,6 +1794,10 @@ function renderRow(j) {
     // `data-row-status` let `_patchRowNode()` update only the changing
     // bits on every WS progress tick (no full re-render of the row).
     const rowSelClass = isSelected ? ' bg-tg-blue/10' : '';
+    // Why the archive set this row aside — its own line under the file.
+    const holdLine = held
+        ? `<div data-row-hold class="text-[11px] text-tg-textSecondary flex items-center gap-1 min-w-0" title="${escapeHtml(heldTitle)}"><i class="ri-inbox-archive-line shrink-0" aria-hidden="true"></i><span class="truncate">${escapeHtml(heldTitle)}</span></div>`
+        : '';
     const metaLine = [
         j.addedAt
             ? `<span class="inline-flex items-center gap-0.5 tabular-nums" title="${escapeHtml(i18nT('queue.row.added_tooltip', 'Added to queue'))}"><i class="ri-add-circle-line"></i>${escapeHtml(_fmtClock(j.addedAt))}</span>`
@@ -1344,6 +1826,7 @@ function renderRow(j) {
                     ${metaLine.map((s) => `<span class="text-tg-textSecondary/40">·</span>${s}`).join('')}
                     ${j.error ? `<span class="text-tg-textSecondary/40">·</span><span class="text-red-400/80 truncate">${escapeHtml(j.error)}</span>` : ''}
                 </div>
+                ${holdLine}
             </div>
             <div class="hidden md:block text-xs text-tg-textSecondary text-right tabular-nums">${escapeHtml(sizeStr)}</div>
             <div class="mt-1.5 md:mt-0">
@@ -1354,14 +1837,14 @@ function renderRow(j) {
                     <span data-row-pct class="text-[10px] text-tg-textSecondary tabular-nums">${escapeHtml(pctLabel)}</span>
                     <span class="text-[10px] text-tg-textSecondary tabular-nums">${escapeHtml(sizeStr)}</span>
                     <span data-row-meta class="text-[10px] text-tg-textSecondary tabular-nums">${escapeHtml(speedStr !== '—' ? speedStr : '')}</span>
-                    <span data-row-status data-status="${escapeHtml(j.status)}" class="text-[10px] px-1.5 py-0.5 rounded-full ${pillCls} ml-auto">${escapeHtml(pillLabel)}</span>
+                    <span data-row-status data-status="${escapeHtml(rowStatusTag(j))}"${pillTitle} class="text-[10px] px-1.5 py-0.5 rounded-full ${pillCls} ml-auto">${escapeHtml(pillLabel)}</span>
                     ${actions.length ? `<span class="flex items-center gap-1.5">${actions.join('')}</span>` : ''}
                 </div>
                 <div data-row-pct class="hidden md:block text-[10px] text-tg-textSecondary tabular-nums mt-0.5">${escapeHtml(pctLabel)}</div>
             </div>
             <div class="hidden md:block" data-row-meta><span class="text-xs text-tg-textSecondary text-right tabular-nums">${escapeHtml(speedStr)}</span></div>
             <div class="hidden md:block text-xs text-tg-textSecondary text-right tabular-nums">${escapeHtml(etaStr)}</div>
-            <div class="hidden md:block"><span data-row-status data-status="${escapeHtml(j.status)}" class="text-[11px] px-2 py-0.5 rounded-full ${pillCls}">${escapeHtml(pillLabel)}</span>${dupBadge}</div>
+            <div class="hidden md:block"><span data-row-status data-status="${escapeHtml(rowStatusTag(j))}"${pillTitle} class="text-[11px] px-2 py-0.5 rounded-full ${pillCls}">${escapeHtml(pillLabel)}</span>${dupBadge}</div>
             <div class="hidden md:flex items-center justify-end gap-1">${actions.join('')}</div>
             </div></div>
         </div>`;
@@ -1463,13 +1946,34 @@ function renderAggregate() {
     }
     _pushSpeed(totalBps);
     const speed = totalBps ? `${formatBytes(totalBps)}/s` : '0 B/s';
+    const { held, paused } = pausedSplit();
+    const pausedLine =
+        held || paused
+            ? `<span data-queue-paused-split title="${escapeHtml(i18nT('queue.agg.held_tooltip', 'The archive pauses some files itself and lets them go in order: larger files after private chats and smaller files, likely copies until they are checked, originals until their smaller version is replaced. Nothing is wrong with them.'))}"><i class="ri-pause-circle-line"></i> ${escapeHtml(
+                  [
+                      i18nTf('queue.agg.held', { n: held }, `${held} set aside by the archive`),
+                      i18nTf('queue.agg.paused_mine', { n: paused }, `${paused} paused by you`),
+                  ].join(' · '),
+              )}</span>`
+            : '';
     host.innerHTML = `
         <span><i class="ri-loader-2-line text-tg-blue"></i> ${i18nTf('queue.agg.active', { n: active }, `${active} active`)}</span>
         <span><i class="ri-time-line"></i> ${i18nTf('queue.agg.queued', { n: queued }, `${queued} queued`)}</span>
+        ${pausedLine}
         <span><i class="ri-flashlight-line"></i> ${escapeHtml(speed)}${_speedSparkline()}</span>
         ${globalPaused ? `<span class="text-tg-orange">· ${escapeHtml(i18nT('queue.agg.paused_global', 'Globally paused'))}</span>` : ''}
         ${!engineRunning ? `<span class="text-tg-textSecondary">· ${escapeHtml(i18nT('queue.agg.engine_stopped', 'Engine stopped'))}</span>` : ''}
     `;
+}
+
+// Paused items split by who paused them: the server's whole-queue counts
+// when it sent them, else what the store holds.
+function pausedSplit() {
+    if (holdCounts.archive != null && holdCounts.person != null) {
+        return { held: holdCounts.archive, paused: holdCounts.person };
+    }
+    const c = _chipCounts();
+    return { held: c.held, paused: c.paused };
 }
 
 function updateNavBadge() {
@@ -1490,6 +1994,26 @@ async function runRowAction(action, key) {
         if (action === 'pause') {
             await api.post(`/api/queue/${encodeURIComponent(key)}/pause`);
         } else if (action === 'resume') {
+            const job = store.get(key);
+            if (isArchiveHeld(job)) {
+                const reason = holdReasonText(job);
+                if (
+                    !(await confirmSheet({
+                        title: i18nT(
+                            'queue.hold.resume_one_title',
+                            'Resume a file the archive set aside?',
+                        ),
+                        message: i18nTf(
+                            'queue.hold.resume_one_body',
+                            { reason },
+                            `The archive set this file aside (${reason}) and will let it go by itself, in order.\nResume it now and it downloads as your decision — the archive will never set it aside again.`,
+                        ),
+                        confirmLabel: i18nT('queue.hold.resume_one_confirm', 'Resume anyway'),
+                        danger: true,
+                    }))
+                )
+                    return;
+            }
             await api.post(`/api/queue/${encodeURIComponent(key)}/resume`);
         } else if (action === 'cancel') {
             // Confirm before aborting an in-flight download — easy to
@@ -1533,8 +2057,54 @@ async function runGlobalAction(action) {
             await api.post('/api/queue/pause-all');
             showToast(i18nT('queue.toast.paused_all', 'Paused all downloads'), 'info');
         } else if (action === 'resume-all') {
-            await api.post('/api/queue/resume-all');
-            showToast(i18nT('queue.toast.resumed_all', 'Resumed all downloads'), 'success');
+            // Never lifts the archive's own set-asides unless asked: resumed
+            // by hand, they would never be set aside again.
+            const { held } = pausedSplit();
+            let includeArchive = false;
+            if (held > 0) {
+                const pick = await choiceSheet({
+                    title: i18nT('queue.hold.resume_all_title', 'Resume all downloads?'),
+                    message: i18nTf(
+                        'queue.hold.resume_all_body',
+                        { n: held },
+                        `${held} files were set aside by the archive. They are not stuck: it lets them go by itself, in order.\nResume them by hand and they download now as your decision — the archive will never set them aside again.`,
+                    ),
+                    choices: [
+                        {
+                            id: 'mine',
+                            primary: true,
+                            label: i18nT(
+                                'queue.hold.resume_all_keep',
+                                'Resume, and keep set-aside files waiting',
+                            ),
+                        },
+                        {
+                            id: 'all',
+                            danger: true,
+                            label: i18nTf(
+                                'queue.hold.resume_held_n',
+                                { n: held },
+                                `Also resume the ${held} set aside by the archive`,
+                            ),
+                        },
+                    ],
+                });
+                if (!pick) return;
+                includeArchive = pick === 'all';
+            }
+            const r = await api.post('/api/queue/resume-all', { includeArchive });
+            refreshSoon();
+            const kept = r?.keptAside || 0;
+            showToast(
+                kept > 0
+                    ? i18nTf(
+                          'queue.toast.resumed_all_kept',
+                          { n: kept },
+                          `Resumed. ${kept} files set aside by the archive keep waiting.`,
+                      )
+                    : i18nT('queue.toast.resumed_all', 'Resumed all downloads'),
+                'success',
+            );
         } else if (action === 'cancel-all') {
             if (
                 !(await confirmSheet({
@@ -1630,6 +2200,7 @@ export async function showQueuePage(params = {}) {
         invalidateFilterCache();
     }
     if (!view.booted) await loadSnapshot();
+    else refreshSoon(0); // the archive sets items aside without per-row events
     wireOnce();
     bindThrottleSlider();
     renderChips();
@@ -1740,6 +2311,11 @@ function wireOnce() {
         .getElementById('queue-clear-finished')
         ?.addEventListener('click', () => runGlobalAction('clear-finished'));
     document.getElementById('queue-retry-all')?.addEventListener('click', () => runRetryAll());
+    document.getElementById('queue-new-pill-btn')?.addEventListener('click', () => showNewRows());
+    document
+        .getElementById('queue-freeze')
+        ?.addEventListener('click', () => setListFrozen(!view.frozen));
+    setListFrozen(view.frozen); // labels
     wireMoreMenu();
 
     // Header "select all visible" checkbox. Tri-state: empty / partial /
@@ -1796,6 +2372,7 @@ function wireOnce() {
             'scroll',
             () => {
                 view.scrollTop = viewport.scrollTop;
+                _maybePrependPrev(viewport);
             },
             { passive: true },
         );

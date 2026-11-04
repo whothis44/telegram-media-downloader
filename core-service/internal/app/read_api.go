@@ -128,6 +128,7 @@ func (a *App) handleAPIQueueSnapshot(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, 500, "queue read failed")
 		return
 	}
+	a.queueAddHolds(r.Context(), snapshot) // queue_hold.go
 	writeJSON(w, http.StatusOK, snapshot)
 }
 
