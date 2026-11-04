@@ -425,7 +425,7 @@ func (a *App) ixFaceRegroupStep(ctx context.Context, pass int, after int64) (int
 			continue
 		}
 		s.group.Lock()
-		err := a.ixGroupFaceLocked(ctx, id, v, unit, reuse)
+		_, err := a.ixGroupFaceLocked(ctx, id, v, unit, reuse) // (passes keep their order: no retries here)
 		s.group.Unlock()
 		if err != nil {
 			return 0, err

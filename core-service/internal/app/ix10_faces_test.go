@@ -8,6 +8,7 @@ import (
 	"image/jpeg"
 	"math"
 	"math/rand"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -44,11 +45,23 @@ func ix10MakePictures() {
 }
 
 // ix10Scan scans the given files (key -> what the fake service sees in it;
-// several strings are several video frames) as the faces task does.
+// several strings are several video frames) as the faces task does, one
+// at a time in the order of their keys.
 func ix10Scan(t *testing.T, a *App, ctx context.Context, files map[string][]string, flat map[string]bool) {
 	t.Helper()
-	m := &ixModel{ByKey: map[string]int32{}}
+	keys := make([]string, 0, len(files))
 	for k := range files {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	ix10ScanInOrder(t, a, ctx, keys, files, flat)
+}
+
+// ix10ScanInOrder is ix10Scan in the order given.
+func ix10ScanInOrder(t *testing.T, a *App, ctx context.Context, keys []string, files map[string][]string, flat map[string]bool) {
+	t.Helper()
+	m := &ixModel{ByKey: map[string]int32{}}
+	for _, k := range keys {
 		m.ByKey[k] = int32(len(m.Items))
 		m.Items = append(m.Items, ixMItem{Key: k, Type: "photo", Path: "x/" + k + ".jpg", Cluster: int32(len(m.Clusters))})
 		m.Clusters = append(m.Clusters, ixMCluster{Canon: int32(len(m.Items) - 1)})
@@ -135,13 +148,69 @@ func TestIxFaceQualityGate(t *testing.T) {
 		t.Fatalf("F: %+v", p)
 	}
 	// A weak face only somewhat alike (0.57) does not join; a good one does.
-	ix10Scan(t, a, ctx, map[string][]string{"f7": {"F*0.55:0.75"}, "f8": {"F*0.55"}}, nil)
+	// (Not alike to each other: a weak face clearly alike to the good one
+	// joins through it, see TestIxFaceGroupingIsOrderFree.)
+	ix10Scan(t, a, ctx, map[string][]string{"f7": {"F*0.55/x:0.75"}, "f8": {"F*0.55/y"}}, nil)
 	if f := ix10Faces(t, a, "f7"); f[0].Person != 0 {
 		t.Fatal("a weak face joined at the usual likeness")
 	}
 	if f := ix10Faces(t, a, "f8"); f[0].Person != p[0].ID {
 		t.Fatal("a good face did not join at the usual likeness")
 	}
+}
+
+// Grouping ends the same whatever order files are looked at in (they are
+// looked at several at a time). Person F exists; then, in every order:
+//   - w, a weak face 0.57 alike to F (too little to join F by itself) but
+//     the twin of g;
+//   - g, a good face 0.57 alike to F (enough for a good face to join);
+//   - l, a good face only 0.33 alike to F, but 0.96 alike to g and w.
+//
+// g joins F; w and l join through g whether they come before or after it.
+func TestIxFaceGroupingIsOrderFree(t *testing.T) {
+	srv := ix8FakeML(t)
+	defer srv.Close()
+	files := map[string][]string{"w": {"F*0.55/q:0.75"}, "g": {"F*0.55/q"}, "l": {"F*0.3/q"}}
+	check := func(t *testing.T, a *App, ctx context.Context) {
+		t.Helper()
+		p := ix10People(t, a, ctx)
+		if len(p) != 1 || p[0].Files != 6 {
+			t.Fatalf("people: %+v", p)
+		}
+		for _, k := range []string{"w", "g", "l"} {
+			if f := ix10Faces(t, a, k); len(f) != 1 || f[0].Person != p[0].ID {
+				t.Fatalf("%s: %+v (F is %d)", k, f, p[0].ID)
+			}
+		}
+	}
+	for _, order := range [][]string{{"w", "g", "l"}, {"w", "l", "g"}, {"g", "w", "l"}, {"g", "l", "w"}, {"l", "w", "g"}, {"l", "g", "w"}} {
+		t.Run(strings.Join(order, ""), func(t *testing.T) {
+			a, ctx := ix8App(t, map[string]any{"mlUrl": srv.URL, "mlFaces": true})
+			ix10Scan(t, a, ctx, map[string][]string{"f1": {"F"}, "f2": {"F"}, "f3": {"F"}}, nil)
+			for _, k := range order {
+				ix10ScanInOrder(t, a, ctx, []string{k}, files, nil)
+			}
+			check(t, a, ctx)
+		})
+	}
+	// And all at once, as the faces task does them (several in flight).
+	t.Run("together", func(t *testing.T) {
+		a, ctx := ix8App(t, map[string]any{"mlUrl": srv.URL, "mlFaces": true})
+		ix10Scan(t, a, ctx, map[string][]string{"f1": {"F"}, "f2": {"F"}, "f3": {"F"}}, nil)
+		m := &ixModel{ByKey: map[string]int32{}}
+		for _, k := range []string{"l", "w", "g"} {
+			m.ByKey[k] = int32(len(m.Items))
+			m.Items = append(m.Items, ixMItem{Key: k, Type: "photo", Path: "x/" + k + ".jpg", Cluster: int32(len(m.Clusters))})
+			m.Clusters = append(m.Clusters, ixMCluster{Canon: int32(len(m.Items) - 1)})
+		}
+		old := ixMLFullPictureHook
+		defer func() { ixMLFullPictureHook = old }()
+		ixMLFullPictureHook = func(_ *App, _ context.Context, it *ixMItem) ([][]byte, error) {
+			return [][]byte{append(append([]byte(nil), ix10FacePicture()...), []byte("#faces="+files[it.Key][0])...)}, nil
+		}
+		a.ixMLRoundTask(ctx, a.ixFaceTask(ctx, a.ixMLClientNow(ctx)), m, 10)
+		check(t, a, ctx)
+	})
 }
 
 func TestIxFacesCountFilesNotFramesOrCopies(t *testing.T) {

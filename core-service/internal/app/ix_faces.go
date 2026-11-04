@@ -472,7 +472,69 @@ func (a *App) ixGroupFace(ctx context.Context, id int64, v []int8) error {
 	// so a face never joins a person merged away a moment before.
 	box.faces.group.Lock()
 	defer box.faces.group.Unlock()
-	return a.ixGroupFaceLocked(ctx, id, v, a.ixFaceUnitOf(), nil)
+	unit := a.ixFaceUnitOf()
+	placed, err := a.ixGroupFaceLocked(ctx, id, v, unit, nil)
+	if err != nil || len(placed) == 0 {
+		return err
+	}
+	return a.ixFaceRetryNearLocked(ctx, placed, unit)
+}
+
+// ixFaceRetryMax is how many loose look-alikes one grouping gives another
+// chance at most (the grouping lock is held meanwhile); any left over wait
+// for ixRegroupFaces.
+const ixFaceRetryMax = 200
+
+// ixFaceRetryNearLocked gives the loose look-alikes of faces just put with
+// a person another chance, and theirs in turn when they join. Files are
+// looked at several at a time and in no set order, and without this the
+// outcome depended on it: a weak face looked at before the good face it is
+// clearly alike to stayed loose (until ixRegroupFaces came round to it,
+// which in a large archive can take many rounds), while looked at after it
+// it joined. Now both orders end alike. With the grouping lock held.
+func (a *App) ixFaceRetryNearLocked(ctx context.Context, placed []int64, unit func(string) string) error {
+	s := &a.ixMLBox().faces
+	tried := map[int64]bool{}
+	for _, id := range placed {
+		tried[id] = true
+	}
+	type face struct {
+		id int64
+		v  []int8
+	}
+	queue, budget := append([]int64(nil), placed...), ixFaceRetryMax
+	for len(queue) > 0 && budget > 0 && ctx.Err() == nil {
+		id := queue[0]
+		queue = queue[1:]
+		var loose []face
+		s.mu.RLock()
+		if i, ok := s.index[id]; ok && s.person[i] > 0 && s.norms[i] != 0 {
+			d, tier := s.dim, s.tier[i]
+			for _, n := range s.nearLocked(s.vecs[int(i)*d:int(i+1)*d], ixFaceSameSim, id) {
+				t := s.tier[n.idx]
+				if n.person != 0 || tried[n.id] || t == ixFaceJunk || n.sim < ixFacePairSim(tier, t) {
+					continue
+				}
+				loose = append(loose, face{n.id, append([]int8(nil), s.vecs[int(n.idx)*d:int(n.idx+1)*d]...)})
+			}
+		}
+		s.mu.RUnlock()
+		for _, f := range loose {
+			if budget == 0 {
+				break
+			}
+			budget--
+			tried[f.id] = true
+			// The usual rules decide (closest grouped look-alike, likeness
+			// the pair needs, faces taken out, one face per picture).
+			got, err := a.ixGroupFaceLocked(ctx, f.id, f.v, unit, nil)
+			if err != nil {
+				return err
+			}
+			queue = append(queue, got...)
+		}
+	}
+	return nil
 }
 
 // ixGroupFaceLocked does ixGroupFace with the grouping lock held. The rules:
@@ -485,8 +547,9 @@ func (a *App) ixGroupFace(ctx context.Context, id int64, v []int8) error {
 //     those faces with it, and the weak ones that are clearly alike.
 //
 // reuse, when set, may give an existing empty person for the new one (and
-// the faces that may go to them).
-func (a *App) ixGroupFaceLocked(ctx context.Context, id int64, v []int8, unit func(string) string, reuse func([]int64) (int64, []int64)) error {
+// the faces that may go to them). It says which faces were put with a
+// person (none: the face stays loose).
+func (a *App) ixGroupFaceLocked(ctx context.Context, id int64, v []int8, unit func(string) string, reuse func([]int64) (int64, []int64)) ([]int64, error) {
 	box := a.ixMLBox()
 	s := &box.faces
 	rejected := a.ixFaceRejects(ctx, id) // people a person took this face out of
@@ -494,7 +557,7 @@ func (a *App) ixGroupFaceLocked(ctx context.Context, id int64, v []int8, unit fu
 	me, ok := s.index[id]
 	if !ok || s.person[me] != 0 || s.tier[me] == ixFaceJunk {
 		s.mu.RUnlock()
-		return nil
+		return nil, nil
 	}
 	tier := s.tier[me]
 	myShot := s.shotLocked(me)
@@ -527,10 +590,10 @@ func (a *App) ixGroupFaceLocked(ctx context.Context, id int64, v []int8, unit fu
 	myUnit := unit(s.keys[s.key[me]])
 	s.mu.RUnlock()
 	if len(grouped) > 0 {
-		return a.ixSetFacePerson(ctx, []int64{id}, grouped[0].person)
+		return []int64{id}, a.ixSetFacePerson(ctx, []int64{id}, grouped[0].person)
 	}
 	if tier != ixFaceGood {
-		return nil // weak faces only join
+		return nil, nil // weak faces only join
 	}
 	units := map[string]bool{myUnit: true}
 	take := []int64{id}
@@ -541,7 +604,7 @@ func (a *App) ixGroupFaceLocked(ctx context.Context, id int64, v []int8, unit fu
 		take = append(take, n.id)
 	}
 	if len(units) < ixFaceMinFaces {
-		return nil
+		return nil, nil
 	}
 	var person int64
 	if reuse != nil {
@@ -551,11 +614,11 @@ func (a *App) ixGroupFaceLocked(ctx context.Context, id int64, v []int8, unit fu
 		now := ixNowMs()
 		res, err := a.db.Writer.ExecContext(ctx, `INSERT INTO ix_people(name,created_at,updated_at) VALUES('',?,?)`, now, now)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		person, _ = res.LastInsertId()
 	}
-	return a.ixSetFacePerson(ctx, take, person)
+	return take, a.ixSetFacePerson(ctx, take, person)
 }
 
 // ixRegroupFaces gives ungrouped faces another chance: a person may have

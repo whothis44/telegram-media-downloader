@@ -55,10 +55,12 @@ func ix8FakeML(t *testing.T) *httptest.Server {
 		out := map[string]any{"imageWidth": 64, "imageHeight": 64}
 		switch {
 		case entries["facial-recognition"] != nil:
-			// A face is "who[*likeness][:score[:size]]": who is one letter;
-			// "A*0.45" is someone only 0.45 alike to A (and alike to other
-			// "A*..." faces); score is the detection score (0.95), size the
-			// box's short side in pixels (180) of a 640 px picture.
+			// A face is "who[*likeness[/other]][:score[:size]]": who is one
+			// letter; "A*0.45" is someone only 0.45 alike to A (and alike to
+			// other "A*..." faces); "A*0.45/x" is as alike to A, but alike
+			// only to other "A*.../x" faces; score is the detection score
+			// (0.95), size the box's short side in pixels (180) of a 640 px
+			// picture.
 			out["imageWidth"], out["imageHeight"] = 640, 640
 			faces := []any{}
 			for i, spec := range strings.Split(parts["faces"], ",") {
@@ -73,13 +75,18 @@ func ix8FakeML(t *testing.T) *httptest.Server {
 				if len(fields) > 2 {
 					size, _ = strconv.ParseFloat(fields[2], 64)
 				}
+				other := ""
 				if n, l, ok := strings.Cut(who, "*"); ok {
 					who = n
+					l, other, _ = strings.Cut(l, "/")
 					like, _ = strconv.ParseFloat(l, 64)
+				}
+				if other == "" {
+					other = who
 				}
 				v := make([]float32, 512)
 				v[int(who[0])%512] = float32(like)
-				v[(300+int(who[0]))%512] = float32(math.Sqrt(1 - like*like))
+				v[(300+int(other[0]))%512] = float32(math.Sqrt(1 - like*like))
 				v[(int(who[0])*7+i)%512] += 0.2 // a little difference between photos of one person
 				raw, _ := json.Marshal(v)
 				x1 := 8 + float64(i)*210
@@ -183,8 +190,10 @@ func TestIxFacesBecomePeopleAndCanBeCorrected(t *testing.T) {
 	if err := a.ixPersonChange(ctx, pa, "rename", "Alice", 0, 0); err != nil {
 		t.Fatal(err)
 	}
+	// (B's face in s02, the video with both: files are looked at several
+	// at a time, so the order of the faces' numbers is not known.)
 	var faceOfB int64
-	_ = a.db.Reader.QueryRow(`SELECT id FROM ix_faces WHERE person=? ORDER BY id LIMIT 1`, pb).Scan(&faceOfB)
+	_ = a.db.Reader.QueryRow(`SELECT id FROM ix_faces WHERE person=? AND key='s02'`, pb).Scan(&faceOfB)
 	if err := a.ixPersonChange(ctx, pb, "remove-face", "", 0, faceOfB); err != nil {
 		t.Fatal(err)
 	}
