@@ -660,3 +660,61 @@ func TestIxCopiesAreKnownBeforeDownload(t *testing.T) {
 		t.Fatalf("estimate: %+v", d)
 	}
 }
+
+// Telegram's speed limit for accounts without Premium starts part-way
+// through the day: a fast morning, then slow hours. The estimate goes by
+// the slower figure (and by the last 3 hours alone while the limit is on),
+// so it sees that the queue will not finish and puts private chats first.
+func TestIxDeadlineEstimateUsesTheSlowRecentSpeed(t *testing.T) {
+	a, ctx := ix8App(t, map[string]any{"deadlineOrder": "auto"})
+	now := time.Now()
+	a.ixSaveFreeze(ctx, ixFreezeInfo{FreezeState: ixTestFreeze(now.Add(25 * 24 * time.Hour).Unix())})
+	premium := 0
+	saved := ixDeadlinePremium
+	ixDeadlinePremium = func(*App) int { return premium }
+	t.Cleanup(func() { ixDeadlinePremium = saved })
+	row := func(msg int, status string, size int64, at time.Time) {
+		t.Helper()
+		if _, err := a.db.Writer.Exec(`INSERT INTO tgdl_work(account_id,group_id,group_name,message_id,version,identity,media_type,file_name,file_size,body,status,origin,created_at,updated_at)
+			VALUES('acc','-1001','G',?,1,?,'video','v.mp4',?,X'',?,'history',?,?)`, msg, fmt.Sprint(msg), size, status, at.UnixMilli(), at.UnixMilli()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 280 GB over the morning (14 to 20 hours ago), then 2.4 GB an hour.
+	for i := 0; i < 140; i++ {
+		row(i+1, "completed", 2<<30, now.Add(-20*time.Hour+time.Duration(i)*150*time.Second))
+	}
+	for i := 0; i < 9; i++ {
+		row(1000+i, "completed", 800<<20, now.Add(-time.Duration(i)*20*time.Minute-time.Minute))
+	}
+	// 3.6 TB still to get.
+	for i := 0; i < 1800; i++ {
+		row(5000+i, "pending", 2<<30, now)
+	}
+	d := a.ixDeadlineEstimate(ctx, false)
+	if d.Rate24h*3600 < 10e9 || d.Rate3h*3600 > 3e9 {
+		t.Fatalf("rates: day %.0f MB/h, 3 h %.0f MB/h", d.Rate24h*3600/1e6, d.Rate3h*3600/1e6)
+	}
+	// At the day's speed it would finish in time; at the recent one it would not.
+	if dayEta := float64(d.LeftBytes) / d.Rate24h; now.Add(time.Duration(dayEta)*time.Second).Unix() >= d.Until {
+		t.Fatal("the test's day speed should finish in time")
+	}
+	if d.RateUsed != "3h" || d.Rate != d.Rate3h || d.Finishes != "no" || !d.Active {
+		t.Fatalf("estimate: rate %s %.0f MB/h, finishes %s, active %v", d.RateUsed, d.Rate*3600/1e6, d.Finishes, d.Active)
+	}
+	// With the speed limit on, the last 3 hours count even when faster.
+	if r, used := ixDeadlineRate(1000, 2000, true); r != 2000 || used != "3h" {
+		t.Fatalf("throttled: %v %s", r, used)
+	}
+	if r, used := ixDeadlineRate(1000, 2000, false); r != 1000 || used != "day" {
+		t.Fatalf("not throttled: %v %s", r, used)
+	}
+	premium = 624
+	d = a.ixDeadlineEstimate(ctx, false)
+	if d.RateUsed != "3h" || d.Finishes != "no" || !d.Active || d.Premium1h != 624 {
+		t.Fatalf("throttled estimate: %+v", d)
+	}
+	if r := a.ixDiagnostics(ctx); !strings.Contains(r, "estimate at the last 3 h speed (") || !strings.Contains(r, "624 FLOOD_PREMIUM_WAIT in the last hour") {
+		t.Fatalf("diagnostics: %s", r)
+	}
+}

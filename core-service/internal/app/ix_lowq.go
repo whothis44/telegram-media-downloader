@@ -141,13 +141,13 @@ func (a *App) ixLowqPick(ctx context.Context, work *engine.Work, message *tg.Mes
 }
 
 // ixLowqShort: the original would not be reached before the deletion date
-// at the speed of the last day. What goes before it is what the deadline
+// at the deadline estimate's speed (ixDeadlineRate). What goes before it is what the deadline
 // order lets go first: the queued files smaller than it (held copies and
 // other upgrades go after), plus the same share of the files the rescans
 // have not queued yet.
 func (a *App) ixLowqShort(ctx context.Context, work *engine.Work, size int64) bool {
 	d := a.ixLowqDeadline(ctx)
-	if !d.Active || d.Until <= 0 || d.Rate24h <= 0 || d.Finishes == "yes" {
+	if !d.Active || d.Until <= 0 || d.Rate <= 0 || d.Finishes == "yes" {
 		return false
 	}
 	var ahead int64
@@ -158,7 +158,7 @@ func (a *App) ixLowqShort(ctx context.Context, work *engine.Work, size int64) bo
 	if d.LeftBytes > 0 && d.ToGetBytes > d.LeftBytes {
 		ahead += int64(float64(ahead) / float64(d.LeftBytes) * float64(d.ToGetBytes-d.LeftBytes))
 	}
-	reach := time.Now().Unix() + int64(float64(ahead+size)/d.Rate24h)
+	reach := time.Now().Unix() + int64(float64(ahead+size)/d.Rate)
 	return reach >= d.Until
 }
 

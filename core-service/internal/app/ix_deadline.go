@@ -72,8 +72,12 @@ type ixDeadlineInfo struct {
 	ToGetBytes int64            `json:"toGetBytes"`
 	Copies     int              `json:"copies"`   // not downloaded, but the same Telegram file is saved or queued elsewhere
 	Rate24h    float64          `json:"rate24h"`  // bytes a second over the last day
+	Rate3h     float64          `json:"rate3h"`   // over the last 3 hours
 	Rate1h     float64          `json:"rate1h"`   // over the last hour
-	EtaSec     int64            `json:"etaSec"`   // at the day's rate; 0: unknown
+	Rate       float64          `json:"rate"`     // the one the estimate uses (ixDeadlineRate)
+	RateUsed   string           `json:"rateUsed"` // which: "day" or "3h"
+	Premium1h  int              `json:"premium1h"`
+	EtaSec     int64            `json:"etaSec"` // at Rate; 0: unknown
 	Finishes   string           `json:"finishes"` // yes, no, unknown
 	Deferred   []int            `json:"deferred"` // items set aside, by band
 	Unscanned  int              `json:"unscanned"`
@@ -99,7 +103,9 @@ func (a *App) ixDeadlineEstimate(ctx context.Context, withLoss bool) ixDeadlineI
 			AND NOT EXISTS (SELECT 1 FROM ix_subst s WHERE s.group_id=w.group_id AND s.message_id=w.message_id)`, now.Add(-since).UnixMilli()).Scan(&bytes)
 		return float64(bytes) / since.Seconds()
 	}
-	d.Rate24h, d.Rate1h = rate(24*time.Hour), rate(time.Hour)
+	d.Rate24h, d.Rate3h, d.Rate1h = rate(24*time.Hour), rate(3*time.Hour), rate(time.Hour)
+	d.Premium1h = ixDeadlinePremium(a)
+	d.Rate, d.RateUsed = ixDeadlineRate(d.Rate24h, d.Rate3h, d.Premium1h > 0)
 	// The queue holds only what rescans have reached so far: what is left
 	// is every file seen in messages and not downloaded, a copy counted
 	// once (the browser's model knows which are copies).
@@ -132,8 +138,8 @@ func (a *App) ixDeadlineEstimate(ctx context.Context, withLoss bool) ixDeadlineI
 		need = max(need, d.ToGetBytes)
 	}
 	d.Finishes = "unknown"
-	if d.Rate24h > 0 {
-		d.EtaSec = int64(float64(need) / d.Rate24h)
+	if d.Rate > 0 {
+		d.EtaSec = int64(float64(need) / d.Rate)
 		if d.Until > 0 {
 			d.Finishes = map[bool]string{true: "yes", false: "no"}[now.Unix()+d.EtaSec < d.Until]
 		}
@@ -223,6 +229,24 @@ func (a *App) ixDeadlineEstimate(ctx context.Context, withLoss bool) ixDeadlineI
 		d.Loss = d.Loss[:300]
 	}
 	return d
+}
+
+// ixDeadlinePremium is how many of Telegram's speed-limit waits for
+// accounts without Premium (FLOOD_PREMIUM_WAIT) the running accounts'
+// downloads met in the last hour (replaceable in tests).
+var ixDeadlinePremium = func(a *App) int { return a.ixPaceNow().Premium1h }
+
+// ixDeadlineRate is the speed the estimate goes by: the slower of the last
+// day's and the last 3 hours'. Telegram's speed limit for accounts without
+// Premium is about volume: once it starts, the day's figure still holds the
+// hours before it and promises far more than the downloads now get. While
+// the limit is on (a FLOOD_PREMIUM_WAIT in the last hour) the last 3 hours
+// alone count, never the day.
+func ixDeadlineRate(day, last3h float64, throttled bool) (float64, string) {
+	if throttled || last3h < day {
+		return last3h, "3h"
+	}
+	return day, "day"
 }
 
 // ixDeadlineActive: on always; auto when a deletion date is set and the

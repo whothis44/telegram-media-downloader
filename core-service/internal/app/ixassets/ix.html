@@ -150,13 +150,16 @@ function viewDeadline() {
   const left = d.until ? (d.until - Date.now() / 1000) : 0;
   const rate = (b) => b > 0 ? fmtSize(b * 86400) + '/day' : '—';
   let verdict = '';
+  // The estimate goes by the slower of the last day and the last 3 hours
+  // (the last 3 hours alone while Telegram's speed limit is on).
+  const used = d.rateUsed === '3h' ? `the last 3 hours' speed${d.premium1h ? " (Telegram's speed limit is on)" : ''}` : "the last day's speed";
   if (!d.leftFiles && !d.toGetFiles) verdict = '<span class="ok">Nothing left to download.</span>';
-  else if (!d.etaSec) verdict = '<span class="muted">Speed not known yet (no download finished in the last day).</span>';
-  else verdict = `At the last day's speed that takes about <b>${days(d.etaSec)} days</b>.` + (d.until ? (d.finishes === 'yes' ? ' <span class="ok">That is before the deletion date.</span>' : ' <span class="bad">That is after the deletion date.</span>') : '');
+  else if (!d.etaSec) verdict = d.rate24h > 0 ? '<span class="muted">Speed not known (no download finished in the last 3 hours).</span>' : '<span class="muted">Speed not known yet (no download finished in the last day).</span>';
+  else verdict = `At ${used} that takes about <b>${days(d.etaSec)} days</b>.` + (d.until ? (d.finishes === 'yes' ? ' <span class="ok">That is before the deletion date.</span>' : ' <span class="bad">That is after the deletion date.</span>') : '');
   const deferred = (d.deferred || []).reduce((a, b) => a + b, 0);
   let h = `<div class="card"><h2>Before the deadline</h2>
 <div>${d.until ? `Telegram deletes this account in <b>${days(Math.max(0, left))} days</b>. ` : 'Telegram has not set a deletion date. '}<b>${fmtNum(d.toGetFiles || d.leftFiles)}</b> distinct file(s), <b>${fmtSize(d.toGetBytes || d.leftBytes)}</b>, still to download${d.copies ? ` (${fmtNum(d.copies)} more are copies of these or of saved files: they come free)` : ''}; ${fmtNum(d.leftFiles)} of them are in the download queue now${d.unscanned ? `, the rest come as the ${fmtNum(d.unscanned)} group(s) still waiting for their rescan are reached` : ''}. ${verdict}</div>
-<div class="muted">Speed: ${rate(d.rate24h)} over the last day, ${rate(d.rate1h)} over the last hour (files covered by a saved copy not counted).${d.active ? ` <b>Private chats go first, smaller files before larger ones</b>${deferred ? ` (${fmtNum(deferred)} file(s) set aside for now: public chats' files and larger files)` : ''}. Public chats can still be read from another account after the deletion; private ones can't.` : d.mode === 'off' ? ' Order: normal (Settings).' : ''}</div>
+<div class="muted">Speed: ${rate(d.rate24h)} over the last day, ${rate(d.rate3h)} over the last 3 hours, ${rate(d.rate1h)} over the last hour (files covered by a saved copy not counted).${d.active ? ` <b>Private chats go first, smaller files before larger ones</b>${deferred ? ` (${fmtNum(deferred)} file(s) set aside for now: public chats' files and larger files)` : ''}. Public chats can still be read from another account after the deletion; private ones can't.` : d.mode === 'off' ? ' Order: normal (Settings).' : ''}</div>
 <div class="btns"><button class="b" data-act="dl-loss">${state.loss ? 'Refresh' : 'Show'} what would be lost today</button></div>`;
   const L = state.loss;
   if (L && L.error) h += `<div class="bad">${esc(L.error)}</div>`;
