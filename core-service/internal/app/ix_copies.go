@@ -93,6 +93,9 @@ func ixParseCopySettings(body map[string]any, s *ixSettings) {
 	if v, ok := body["copyThumbs"].(bool); ok {
 		s.CopyThumbsOff = !v
 	}
+	if v, ok := body["previewsAll"].(string); ok && (v == "auto" || v == "on" || v == "off") {
+		s.PreviewsAll = v
+	}
 }
 
 // ---------- the facts compared ----------
@@ -584,5 +587,6 @@ func (a *App) ixCopiesDiag(ctx context.Context) []string {
 	s := c.Sampled
 	out = append(out, fmt.Sprintf("  big videos sampled: checked %d big videos using %d MB instead of %.1f GB; %d confirmed copies; %d could not be checked · previews kept %d · likeness threshold %.3f",
 		s.Checked, s.PartsMB, float64(s.SizeBytes)/(1<<30), s.Confirmed, s.Failed, c.Previews, c.Threshold))
+	out = append(out, a.ixPreviewAllDiag(ctx))
 	return out
 }

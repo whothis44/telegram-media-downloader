@@ -77,6 +77,10 @@ type ixSettings struct {
 	// Copies (ix_copies.go). Both off by default means the recommended way.
 	ConfirmedGoEarly bool `json:"confirmedGoEarly"` // confirmed copies may go once the queue is empty, like other held copies
 	CopyThumbsOff    bool `json:"copyThumbsOff"`    // no Telegram previews fetched to compare by recognition
+	// PreviewsAll fetches Telegram's 320 px preview of every photo and video
+	// not downloaded (ix_previews_all.go): auto (while a deletion date is
+	// set), on, off.
+	PreviewsAll string `json:"previewsAll"`
 }
 
 // public is the settings as the dashboard may see them.
@@ -87,7 +91,7 @@ func (s ixSettings) public() ixSettings {
 }
 
 func ixDefaultSettings() ixSettings {
-	return ixSettings{ExportEnabled: true, ExportTime: "03:30", Pace: "normal", DupEnabled: true, DupHWAccel: "cuda", AutoRetry: true, FixityEnabled: true, SubstExact: true, HoldLikely: true, MLText: true, MLDupes: true, MLContainer: ixMLDefaultContainer, STTContainer: ixSTTDefaultContainer, DeadlineOrder: "auto", DownloadPacing: true, LowqFirst: true, StageCapGB: 20, AlertWebhookKind: "ntfy", AlertSMTPPort: "587"}
+	return ixSettings{ExportEnabled: true, ExportTime: "03:30", Pace: "normal", DupEnabled: true, DupHWAccel: "cuda", AutoRetry: true, FixityEnabled: true, SubstExact: true, HoldLikely: true, MLText: true, MLDupes: true, MLContainer: ixMLDefaultContainer, STTContainer: ixSTTDefaultContainer, DeadlineOrder: "auto", DownloadPacing: true, LowqFirst: true, StageCapGB: 20, AlertWebhookKind: "ntfy", AlertSMTPPort: "587", PreviewsAll: "auto"}
 }
 
 func (a *App) ixLoadSettings(ctx context.Context) ixSettings {

@@ -39,7 +39,8 @@ import (
 // The biggest files go first (a preview costs one request; the file may
 // cost thousands), then private chats. The previews are kept in the data
 // folder (ixpreviews): they show in the browser for files that may never
-// be downloaded.
+// be downloaded. A preview the pass for everything not downloaded kept
+// already (ix_previews_all.go) is looked at without asking Telegram again.
 
 const (
 	ixPreviewMinPicture = 2 << 20
@@ -380,6 +381,23 @@ type ixPreviewJob struct {
 	account string
 	body    []byte
 	f       ixCopyFacts
+	kept    string // a preview kept already, under ixpreviews
+}
+
+// ixPreviewKept reads a kept preview ("" or unreadable: nil).
+func (a *App) ixPreviewKept(rel string) ([]byte, int, int) {
+	if rel == "" || rel != ixNormPath(rel) || strings.Contains(rel, "..") {
+		return nil, 0, 0
+	}
+	data, err := os.ReadFile(filepath.Join(a.ixPreviewDir(), filepath.FromSlash(rel)))
+	if err != nil || len(data) == 0 {
+		return nil, 0, 0
+	}
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return nil, 0, 0
+	}
+	return data, cfg.Width, cfg.Height
 }
 
 // ixPreviewCandidates are the queued files worth a preview, biggest first.
@@ -420,10 +438,12 @@ func (a *App) ixPreviewCandidates(ctx context.Context, model string, n int) ([]i
 		f.ID = j.work
 		var tries int
 		var have bool
-		_ = a.db.Reader.QueryRowContext(ctx, `SELECT tries, (path<>'' AND model=? AND length(vec)>0) FROM ix_copy_thumb WHERE ident=?`, model, f.Ident).Scan(&tries, &have)
+		var kept string
+		_ = a.db.Reader.QueryRowContext(ctx, `SELECT tries, (path<>'' AND model=? AND length(vec)>0), path FROM ix_copy_thumb WHERE ident=?`, model, f.Ident).Scan(&tries, &have, &kept)
 		if have || tries >= ixPreviewTries {
 			continue
 		}
+		j.kept = kept // fetched already (ix_previews_all.go): looked at without asking Telegram
 		// An exact re-upload is checked by its bytes when it downloads.
 		// (Both sizes are indexed: ix_downloads_size, ix_downloads_tg_size.)
 		var same bool
@@ -465,31 +485,36 @@ func (a *App) ixPreviewRound(ctx context.Context) error {
 			r.Close()
 		}
 	}()
-	for i, j := range jobs {
+	asked := 0
+	for _, j := range jobs {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if i > 0 && ixPreviewGap > 0 {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(ixPreviewGap):
+		data, w, h := a.ixPreviewKept(j.kept)
+		if data == nil {
+			if asked > 0 && ixPreviewGap > 0 {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(ixPreviewGap):
+				}
 			}
-		}
-		r := readers[j.account]
-		if r == nil {
-			if r, err = ixOpenCopyReader(a, ctx, j.account); err != nil {
-				return err
+			asked++
+			r := readers[j.account]
+			if r == nil {
+				if r, err = ixOpenCopyReader(a, ctx, j.account); err != nil {
+					return err
+				}
+				readers[j.account] = r
 			}
-			readers[j.account] = r
-		}
-		data, w, h, err := ixFetchPreview(r, j.body)
-		if err != nil {
-			a.ixPreviewFailed(ctx, j.f, err.Error())
-			if ixSlowDown(err) {
-				return nil // Telegram wants the account to wait: next round
+			data, w, h, err = ixFetchPreview(r, j.body)
+			if err != nil {
+				a.ixPreviewFailed(ctx, j.f, err.Error())
+				if ixSlowDown(err) {
+					return nil // Telegram wants the account to wait: next round
+				}
+				continue
 			}
-			continue
 		}
 		v, err := c.embed(ctx, data, "")
 		if err != nil || !ixNormalise(v) {
