@@ -578,8 +578,8 @@ async function showPerson(id) {
     <button class="b" id="pp-hide">${p.hidden ? 'Show' : 'Hide'}</button>
     <button class="b" id="pp-feed">Browse their posts</button></div>
     <div class="row" style="margin-top:6px">Same person as: <select class="t" id="pp-into"><option value="">choose…</option>${others.map((o) => `<option value="${o.id}">${esc(o.name || 'Unnamed')} (${o.files})</option>`).join('')}</select><button class="b" id="pp-merge">Merge into them</button></div>
-    <p class="muted">${p.files.toLocaleString()} file(s). Faces: click one that is someone else to take it out.</p>
-    <div class="row">${r.data.faces.map((f) => `<button class="link" data-face="${f.id}" title="Not this person"><img loading="lazy" src="/api/ix/face?id=${f.id}" alt="" style="width:52px;height:52px;border-radius:50%;object-fit:cover"></button>`).join('')}</div>
+    <p class="muted">${p.files.toLocaleString()} file(s). Click a face to <select class="t" id="pp-facemode"><option value="out">take it out (it is someone else)</option><option value="cover">show it as their picture</option></select></p>
+    <div class="row">${r.data.faces.map((f) => `<button class="link" data-face="${f.id}"><img loading="lazy" src="/api/ix/face?id=${f.id}" alt="" style="width:52px;height:52px;border-radius:50%;object-fit:cover${f.id === p.cover ? ';outline:3px solid var(--accent);outline-offset:1px' : ''}"></button>`).join('')}</div>
     <h3 style="font-size:14px;margin:12px 0 4px">Their files</h3>${mosaicHTML(items, k)}`;
   showDialog(p.name || 'Unnamed person', `<div id="sd-files">${h}</div>`);
   const change = async (body, msg) => { const x = await api('POST', '/api/ix/browse/person/' + id, body); toast(x.ok ? msg : errText(x)); if (x.ok) loadPeople(); return x.ok; };
@@ -587,7 +587,11 @@ async function showPerson(id) {
   $('#pp-hide').onclick = async () => { if (await change({ action: p.hidden ? 'show' : 'hide' }, p.hidden ? 'Shown.' : 'Hidden.')) dlg.close(); };
   $('#pp-merge').onclick = async () => { const into = Number($('#pp-into').value); if (!into) return; if (await change({ action: 'merge', into }, 'Merged.')) showPerson(into); };
   $('#pp-feed').onclick = () => { S.person = id; S.personName = p.name || 'this person'; dlg.close(); switchTab('browse'); S.view = 'posts'; $$('#view button').forEach((x) => x.classList.toggle('on', x.dataset.v === 'posts')); resetFeed(); };
-  $$('[data-face]').forEach((b) => b.onclick = async () => { if (await change({ action: 'remove-face', face: Number(b.dataset.face) }, 'Taken out.')) b.remove(); });
+  $$('[data-face]').forEach((b) => b.onclick = async () => {
+    const face = Number(b.dataset.face);
+    if ($('#pp-facemode').value === 'cover') { if (await change({ action: 'cover', face }, 'Picture chosen.')) showPerson(id); return; }
+    if (await change({ action: 'remove-face', face }, 'Taken out.')) b.remove();
+  });
 }
 
 // ---------- things ----------

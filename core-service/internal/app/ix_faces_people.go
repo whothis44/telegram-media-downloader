@@ -234,6 +234,10 @@ func (a *App) ixFacePeoplePass(ctx context.Context) error {
 	no := a.ixPersonNoPairs(ctx, resolve)
 	s.mu.RLock()
 	mids := s.personMidsLocked(a.ixFaceUnitOf())
+	covers := map[int64]int64{}
+	for id, m := range mids {
+		covers[id] = s.coverLocked(m)
+	}
 	s.mu.RUnlock()
 	var list []*ixPersonMid
 	for id, m := range mids {
@@ -309,7 +313,42 @@ func (a *App) ixFacePeoplePass(ctx context.Context) error {
 			return err
 		}
 	}
+	for id, face := range covers {
+		if _, err := tx.ExecContext(ctx, `UPDATE ix_people SET auto_cover=? WHERE id=? AND auto_cover<>?`, face, id, face); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
+}
+
+// ixFaceCoverNear: the cover is the clearest of this many faces nearest
+// the middle of a person's faces (the research notes' advice; Immich picks
+// one at random).
+const ixFaceCoverNear = 10
+
+// coverLocked picks a person's cover face (store read lock held).
+func (s *ixFaceStore) coverLocked(m *ixPersonMid) int64 {
+	type near struct {
+		i   int32
+		sim float32
+	}
+	d := s.dim
+	ns := make([]near, 0, len(m.faces))
+	for _, i := range m.faces {
+		var dot float32
+		for j, x := range s.vecs[int(i)*d : int(i+1)*d] {
+			dot += float32(x) * m.mid[j]
+		}
+		ns = append(ns, near{i, dot / s.norms[i]})
+	}
+	sort.Slice(ns, func(x, y int) bool { return ns[x].sim > ns[y].sim })
+	best := ns[0]
+	for _, n := range ns[:min(ixFaceCoverNear, len(ns))] {
+		if s.qual[n.i] > s.qual[best.i] {
+			best = n
+		}
+	}
+	return s.ids[best.i]
 }
 
 func ixPairKey(x, y int64) [2]int64 { return [2]int64{min(x, y), max(x, y)} }

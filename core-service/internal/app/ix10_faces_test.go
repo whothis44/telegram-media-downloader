@@ -286,6 +286,43 @@ func TestIxPeopleSuggestionsAndMerges(t *testing.T) {
 	}
 }
 
+func TestIxPersonCoverIsClearFaceOrChosen(t *testing.T) {
+	a, ctx := ix8App(t, map[string]any{})
+	// Ten faces near the middle (face 2 the clearest of them), and an
+	// even clearer one far from it, which is not the person's typical look.
+	e := map[int]float64{1: 1}
+	var faces []ix10Face
+	for i := int64(1); i <= 10; i++ {
+		faces = append(faces, ix10Face{id: i, key: fmt.Sprint("k", i), person: 1, vec: e, score: 0.85, px: 100, blur: 80})
+	}
+	faces[1] = ix10Face{id: 2, key: "k2", person: 1, vec: e, score: 0.97, px: 200, blur: 400}
+	faces = append(faces, ix10Face{id: 11, key: "k11", person: 1, vec: map[int]float64{1: 0.8, 2: 0.6}, score: 0.99, px: 300, blur: 500})
+	ix10Put(t, a, map[int64]string{1: ""}, faces)
+	cover := func() int64 { return ix10People(t, a, ctx)[0].Cover }
+	if err := a.ixFacePeoplePass(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if c := cover(); c != 2 {
+		t.Fatalf("cover %d", c)
+	}
+	// A face chosen by a person wins, until it is taken out.
+	if err := a.ixPersonChange(ctx, 1, "cover", "", 0, 3); err != nil {
+		t.Fatal(err)
+	}
+	if c := cover(); c != 3 || a.ixPersonCover(ctx, 1) != 3 {
+		t.Fatalf("chosen cover %d", c)
+	}
+	if err := a.ixPersonChange(ctx, 1, "cover", "", 0, 99); err == nil {
+		t.Fatal("chose a face that is not the person's")
+	}
+	if err := a.ixPersonChange(ctx, 1, "remove-face", "", 0, 3); err != nil {
+		t.Fatal(err)
+	}
+	if c := cover(); c != 2 {
+		t.Fatalf("cover after taking the chosen face out: %d", c)
+	}
+}
+
 func TestIxFacesSeenTogetherAreTwoPeople(t *testing.T) {
 	srv := ix8FakeML(t)
 	defer srv.Close()

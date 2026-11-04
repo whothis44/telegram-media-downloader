@@ -655,32 +655,101 @@ type ixPerson struct {
 	Hidden bool   `json:"hidden,omitempty"`
 	Faces  int    `json:"faces"`
 	Files  int    `json:"files"`
-	Cover  int64  `json:"cover"` // the clearest face
+	Cover  int64  `json:"cover"` // the face chosen for the picture, else the clearest near the middle
 }
 
+// ixPeople lists the people with faces: named first, then by files.
 func (a *App) ixPeople(ctx context.Context) ([]ixPerson, error) {
-	rows, err := a.db.Reader.QueryContext(ctx, `SELECT p.id, p.name, p.hidden, COUNT(f.id), COUNT(DISTINCT f.key),
-			(SELECT f2.id FROM ix_faces f2 WHERE f2.person=p.id ORDER BY f2.score DESC, f2.id LIMIT 1)
-		FROM ix_people p JOIN ix_faces f ON f.person=p.id WHERE p.merged_into=0 GROUP BY p.id ORDER BY (p.name='') , COUNT(DISTINCT f.key) DESC, p.id`)
+	type acc struct {
+		p                  ixPerson
+		cover, auto        int64
+		haveCover, haveAut bool
+		best               int64
+		bestQ              float32
+		keys               map[string]bool
+	}
+	people := map[int64]*acc{}
+	rows, err := a.db.Reader.QueryContext(ctx, `SELECT id, name, hidden, cover, auto_cover FROM ix_people WHERE merged_into=0`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		r := &acc{keys: map[string]bool{}, bestQ: -1}
+		if rows.Scan(&r.p.ID, &r.p.Name, &r.p.Hidden, &r.cover, &r.auto) == nil {
+			people[r.p.ID] = r
+		}
+	}
+	rows.Close()
+	rows, err = a.db.Reader.QueryContext(ctx, `SELECT id, person, key, score, px, blur FROM ix_faces WHERE person>0 ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := []ixPerson{}
 	for rows.Next() {
-		var p ixPerson
-		var cover sql.NullInt64
-		if rows.Scan(&p.ID, &p.Name, &p.Hidden, &p.Faces, &p.Files, &cover) == nil {
-			p.Cover = cover.Int64
-			out = append(out, p)
+		var id, person int64
+		var key string
+		var score, px, blur float64
+		if rows.Scan(&id, &person, &key, &score, &px, &blur) != nil {
+			continue
+		}
+		r := people[person]
+		if r == nil {
+			continue
+		}
+		r.p.Faces++
+		r.keys[key] = true
+		r.haveCover = r.haveCover || id == r.cover
+		r.haveAut = r.haveAut || id == r.auto
+		if q := ixFaceQuality(score, px, blur); q > r.bestQ {
+			r.best, r.bestQ = id, q
 		}
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := []ixPerson{}
+	for _, r := range people {
+		if r.p.Faces == 0 {
+			continue
+		}
+		r.p.Files = len(r.keys)
+		switch {
+		case r.haveCover:
+			r.p.Cover = r.cover
+		case r.haveAut:
+			r.p.Cover = r.auto
+		default:
+			r.p.Cover = r.best
+		}
+		out = append(out, r.p)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		x, y := out[i], out[j]
+		if (x.Name == "") != (y.Name == "") {
+			return x.Name != ""
+		}
+		if x.Files != y.Files {
+			return x.Files > y.Files
+		}
+		return x.ID < y.ID
+	})
+	return out, nil
+}
+
+// ixPersonCover is the face shown for one person (see ixPerson.Cover).
+func (a *App) ixPersonCover(ctx context.Context, id int64) int64 {
+	var face int64
+	_ = a.db.Reader.QueryRowContext(ctx, `SELECT f.id FROM ix_people p JOIN ix_faces f ON f.person=p.id AND f.id IN (p.cover, p.auto_cover)
+		WHERE p.id=? ORDER BY f.id=p.cover DESC LIMIT 1`, id).Scan(&face)
+	if face == 0 {
+		_ = a.db.Reader.QueryRowContext(ctx, `SELECT id FROM ix_faces WHERE person=? ORDER BY score DESC, id LIMIT 1`, id).Scan(&face)
+	}
+	return face
 }
 
 // ixPersonChange: rename, hide, show, merge (into another person), say two
-// people are not the same, or take a face out (it is never put with this
-// person again).
+// people are not the same, choose the face shown, or take a face out (it
+// is never put with this person again).
 func (a *App) ixPersonChange(ctx context.Context, id int64, action, name string, other, face int64) error {
 	box := a.ixMLBox()
 	box.faces.group.Lock()
@@ -717,6 +786,15 @@ func (a *App) ixPersonChange(ctx context.Context, id int64, action, name string,
 		lo, hi := min(id, other), max(id, other)
 		_, err = a.db.Writer.ExecContext(ctx, `INSERT INTO ix_person_pair(a,b,state,at) VALUES(?,?,'no',?)
 			ON CONFLICT(a,b) DO UPDATE SET state='no', at=excluded.at`, lo, hi, now)
+	case "cover":
+		// The face shown for the person; 0 goes back to the clearest one.
+		if face != 0 {
+			var n int
+			if err := a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM ix_faces WHERE id=? AND person=?`, face, id).Scan(&n); err != nil || n == 0 {
+				return errors.New("that face is not this person's")
+			}
+		}
+		_, err = a.db.Writer.ExecContext(ctx, `UPDATE ix_people SET cover=?, updated_at=? WHERE id=?`, face, now, id)
 	case "remove-face":
 		// As in Ente: the face is never put with this person again (nor with
 		// anyone this person is merged with), but may go to someone else.
@@ -861,6 +939,7 @@ func (a *App) handleIxPerson(w http.ResponseWriter, r *http.Request) {
 	}
 	p.Files = len(hits)
 	p.Faces = len(faces)
+	p.Cover = a.ixPersonCover(ctx, id)
 	writeJSON(w, http.StatusOK, map[string]any{"person": p, "faces": faces, "cards": cards})
 }
 
