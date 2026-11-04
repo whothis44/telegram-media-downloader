@@ -331,6 +331,17 @@ func ixAssignSets(m *ixModel, fixes ixSetFixes, sim func(a, b string) (float32, 
 			}
 		}
 	}
+	// Look-alike pairs nobody has decided link families too, more weakly
+	// (ix_shoots.go), except albums a person said differ.
+	apart := map[[2]int32]bool{}
+	for _, t := range fixes.apart {
+		if a, ok := famOfPost[t[0]]; ok {
+			if b, ok := famOfPost[t[1]]; ok {
+				apart[ixFamPair(a, b)] = true
+			}
+		}
+	}
+	ixAddSoftLinks(m, holders, alone, apart, weights)
 	for _, t := range fixes.ties {
 		a, okA := famOfPost[t[0]]
 		b, okB := famOfPost[t[1]]

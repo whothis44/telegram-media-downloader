@@ -117,8 +117,10 @@ type ixModel struct {
 	FamSet       []int32        // family -> set (-1: none)
 
 	// Albums, lone files and overlapping chats (ix_albums.go and siblings).
-	EmbSim   func(a, b string) (float32, bool) // image embeddings alone (nil: off)
-	LooseSim float32                           // likeness below which a one-off file is unlike a set
+	EmbSim     func(a, b string) (float32, bool) // image embeddings alone (nil: off)
+	LooseSim   float32                           // likeness below which a one-off file is unlike a set
+	Soft       []ixSoftPair                      // look-alike pairs nobody has decided, and clips
+	SameAlbums []ixAlbumSug                      // albums that look the same, for review
 }
 
 type ixModelBox struct {
@@ -533,7 +535,9 @@ func (a *App) ixBuildModel(ctx context.Context) (*ixModel, error) {
 	m.Suggest = ixContentSuggestions(m)
 	a.ixLoadPeople(ctx, m)
 	m.EmbSim = a.ixEmbSim()
+	m.Soft = a.ixLoadSoftPairs(ctx)
 	ixAssignSets(m, a.ixLoadSetFixes(ctx), ixSetLikeness(m, m.EmbSim))
+	m.SameAlbums = ixSameAlbums(m, a.ixAlbumDecided(ctx), nil)
 	m.Built = time.Now()
 	m.Took = time.Since(start)
 	return m, nil

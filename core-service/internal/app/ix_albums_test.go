@@ -311,3 +311,174 @@ func TestIxLoneFileIsSuggestedForItsAlbumAndCanBeAccepted(t *testing.T) {
 		t.Fatalf("still to review: %+v", left)
 	}
 }
+
+// ---------- the same album in several chats ----------
+
+// ixShootScene: album A (10 files) in chat 1; B in chat 2 holds watermarked
+// copies of A's files (other bytes, so other clusters); C in chat 3 is
+// unrelated but one of its files was wrongly paired with one of A's; D in
+// chat 4 is a re-encode of E in chat 5, with a single pair found. All
+// invented.
+func ixShootScene(r *rand.Rand) (*ixModel, map[string][]float32) {
+	m := &ixModel{GroupName: map[string]string{}, GroupCat: map[string]string{}, ByKey: map[string]int32{}, ByMsg: map[string]int32{},
+		PersonKeys: map[int64]map[string]bool{}, PersonHidden: map[int64]bool{}}
+	vec := map[string][]float32{}
+	add := func(group string, date int64, keys ...string) {
+		pi := int32(len(m.Posts))
+		p := ixMPost{Idx: pi, Group: group, Msg: 1, Date: date, Origin: date, Family: -1, Grouped: "x"}
+		for _, k := range keys {
+			cl := int32(len(m.Clusters))
+			m.Clusters = append(m.Clusters, ixMCluster{Canon: int32(len(m.Items)), Kind: "photo", Posts: 1, Chats: 1})
+			ii := int32(len(m.Items))
+			m.Items = append(m.Items, ixMItem{Group: group, Msg: 1, Key: k, Cluster: cl, Post: pi, Type: "photo", Status: "ok"})
+			m.Clusters[cl].Items = []int32{ii}
+			m.ByKey[k] = ii
+			p.Items = append(p.Items, ii)
+		}
+		m.Posts = append(m.Posts, p)
+		m.ByMsg[ixPostRef(&p)] = pi
+	}
+	shoot := ixRandUnit(r, 64)
+	var a, b, c, d, e []string
+	for i := 0; i < 10; i++ {
+		ka, kb, kc := fmt.Sprintf("a%d", i), fmt.Sprintf("b%d", i), fmt.Sprintf("c%d", i)
+		vec[ka] = ixMix(64, 1.0, shoot, 0.6, ixRandUnit(r, 64))
+		vec[kb] = ixMix(64, 1.0, vec[ka], 0.1, ixRandUnit(r, 64))
+		vec[kc] = ixRandUnit(r, 64)
+		a, b, c = append(a, ka), append(b, kb), append(c, kc)
+	}
+	other := ixRandUnit(r, 64)
+	for i := 0; i < 4; i++ {
+		kd, ke := fmt.Sprintf("d%d", i), fmt.Sprintf("e%d", i)
+		vec[kd] = ixMix(64, 1.0, other, 0.6, ixRandUnit(r, 64))
+		vec[ke] = ixMix(64, 1.0, vec[kd], 0.1, ixRandUnit(r, 64))
+		d, e = append(d, kd), append(e, ke)
+	}
+	add("1", 100, a...)
+	add("2", 200, b...)
+	add("3", 300, c...)
+	add("4", 400, d...)
+	add("5", 500, e...)
+	for i := 0; i < 8; i++ {
+		m.Soft = append(m.Soft, ixSoftPair{A: a[i], B: b[i], Kind: "look"})
+	}
+	m.Soft = append(m.Soft, ixSoftPair{A: a[9], B: c[0], Kind: "photo"}, ixSoftPair{A: d[0], B: e[0], Kind: "photo"})
+	ixAssignFamilies(m)
+	return m, vec
+}
+
+func TestIxLookAlikeAlbumsShareASetAndAreOfferedAsOne(t *testing.T) {
+	m, vec := ixShootScene(rand.New(rand.NewSource(4)))
+	ixAssignSets(m, ixSetFixes{}, nil)
+	fam := func(g string) int32 { return m.Posts[m.ByMsg[g+":1"]].Family }
+	if s := m.FamSet[fam("1")]; s < 0 || s != m.FamSet[fam("2")] {
+		t.Fatalf("A and B are not one set: %v", m.FamSet)
+	}
+	if m.FamSet[fam("3")] >= 0 {
+		t.Fatalf("one wrong pair put C in a set: %v", m.FamSet)
+	}
+	// Without image recognition: only A+B (8 pairs) is offered.
+	got := ixSameAlbums(m, nil, nil)
+	if len(got) != 1 || got[0].A != fam("1") || got[0].B != fam("2") || len(got[0].Pairs) != 8 || got[0].Pending != 8 {
+		t.Fatalf("offers: %+v", got)
+	}
+	// With it: D+E too (one pair, but all files alike), and A+B gains its
+	// two unpaired files; the largest comes first.
+	m.EmbSim = func(x, y string) (float32, bool) { return ixCos(vec[x], vec[y]), true }
+	got = ixSameAlbums(m, nil, nil)
+	if len(got) != 2 || got[0].A != fam("1") || len(got[0].Pairs) != 10 || got[1].A != fam("4") || got[1].Sim < ixAlbumSimBar {
+		t.Fatalf("offers: %+v", got)
+	}
+	if !strings.Contains(got[1].Why, "alike overall") {
+		t.Fatal(got[1].Why)
+	}
+	// Answered pairs are not offered again.
+	ra, rb := ixPairRefs("4:1", "5:1")
+	if got = ixSameAlbums(m, map[[2]string]bool{{ra, rb}: true}, nil); len(got) != 1 {
+		t.Fatalf("answered pair offered: %+v", got)
+	}
+	// Different people in each rule a pair out; the same person in both
+	// lowers the bar.
+	m.PersonKeys[1] = map[string]bool{"d0": true}
+	m.PersonKeys[2] = map[string]bool{"e0": true}
+	if got = ixSameAlbums(m, nil, nil); len(got) != 1 {
+		t.Fatalf("different people: %+v", got)
+	}
+	m.PersonKeys[2] = map[string]bool{"e0": true, "e1": true}
+	m.PersonKeys[1]["e1"] = true
+	if got = ixSameAlbums(m, nil, nil); len(got) != 2 || !got[1].Person {
+		t.Fatalf("same person: %+v", got)
+	}
+	// Albums a person said differ are never linked by their pairs.
+	ixAssignSets(m, ixSetFixes{apart: [][2]string{{"1:1", "2:1"}}}, nil)
+	if s := m.FamSet[fam("1")]; s >= 0 && s == m.FamSet[fam("2")] {
+		t.Fatal("A and B linked although said to differ")
+	}
+}
+
+func TestIxSameAlbumsAnsweredInOneClick(t *testing.T) {
+	a, ctx := ix8App(t, map[string]any{})
+	const g1, g2, g3 = "-1000000000401", "-1000000000402", "-1000000000403"
+	ixAlbChats(t, a, g1, g2, g3)
+	day := int64(1700000000)
+	ka := ixAlbPost(t, a, g1, day, "A", 1, 2, 3, 4)
+	kb := ixAlbPost(t, a, g2, day+600, "B", 1, 2, 3, 4)
+	kc := ixAlbPost(t, a, g3, day+900, "C", 1, 2, 3)
+	for i := 0; i < 4; i++ {
+		x, y := ixPairRefs(ka[i], kb[i])
+		if _, err := a.db.Writer.Exec(`INSERT INTO ix_msug(key_a,key_b,kind,distance,found_at) VALUES(?,?,'photo',25,1)`, x, y); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		x, y := ixPairRefs(kb[i], kc[i])
+		if _, err := a.db.Writer.Exec(`INSERT INTO ix_msug(key_a,key_b,kind,distance,found_at) VALUES(?,?,'photo',27,1)`, x, y); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m, err := a.ixRebuildModel(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.SameAlbums) != 2 || len(m.SameAlbums[0].Pairs) != 4 {
+		t.Fatalf("offers: %+v", m.SameAlbums)
+	}
+	rec := httptest.NewRecorder()
+	a.handleIxAlbumReview(rec, httptest.NewRequest("GET", "/api/ix/browse/review/albums", nil))
+	var got struct {
+		Albums []ixAlbumJ `json:"albums"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || len(got.Albums) != 2 || got.Albums[0].Matched != 4 || got.Albums[0].AFiles != 4 {
+		t.Fatalf("review: %v %s", err, rec.Body.String())
+	}
+	if _, err := a.ixAlbumDecide(ctx, m, g1+":1", g2+":1", "maybe"); err == nil {
+		t.Fatal("bad answer accepted")
+	}
+	// Yes: four pairs become the same file, so B folds into A as a repost.
+	n, err := a.ixAlbumDecide(ctx, m, g1+":1", g2+":1", "same")
+	if err != nil || n != 4 {
+		t.Fatalf("same: %d %v", n, err)
+	}
+	// No: B+C's pairs are marked different and the albums kept apart.
+	if n, err = a.ixAlbumDecide(ctx, m, g2+":1", g3+":1", "different"); err != nil || n != 3 {
+		t.Fatalf("different: %d %v", n, err)
+	}
+	var same, diff int
+	_ = a.db.Reader.QueryRow(`SELECT COUNT(*) FILTER (WHERE decision='same'), COUNT(*) FILTER (WHERE decision='different') FROM ix_org_pairs`).Scan(&same, &diff)
+	if same != 4 || diff != 3 {
+		t.Fatalf("pair decisions: %d same, %d different", same, diff)
+	}
+	if m, err = a.ixRebuildModel(ctx); err != nil {
+		t.Fatal(err)
+	}
+	pa, pb, pc := m.Posts[m.ByMsg[g1+":1"]], m.Posts[m.ByMsg[g2+":1"]], m.Posts[m.ByMsg[g3+":1"]]
+	if pa.Family != pb.Family || pb.Role != "repost" {
+		t.Fatalf("B is not a repost of A: %+v %+v", pa, pb)
+	}
+	if pc.Family == pa.Family || m.FamSet[pc.Family] >= 0 && m.FamSet[pc.Family] == m.FamSet[pa.Family] {
+		t.Fatal("C was joined although said to differ")
+	}
+	if len(m.SameAlbums) != 0 {
+		t.Fatalf("still offered: %+v", m.SameAlbums)
+	}
+}
