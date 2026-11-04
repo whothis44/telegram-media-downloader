@@ -304,12 +304,13 @@ type ixFeedQuery struct {
 	Dups       bool
 	Status     string
 	Collection int64
-	Person     int64
+	Person     []int64 // all of them in one post (person=1,7)
 	From, To   int64
 	Cursor     int
 	Limit      int
 	Match      string // a search: words, looks or both
 	Rank       bool   // a search: best match first
+	people     []map[int32]bool // each person's duplicate sets (ixPeopleSets)
 }
 
 func ixParseFeed(r *http.Request) ixFeedQuery {
@@ -317,7 +318,11 @@ func ixParseFeed(r *http.Request) ixFeedQuery {
 	f := ixFeedQuery{View: q.Get("view"), Group: q.Get("group"), Category: q.Get("category"), Type: q.Get("type"), Sort: q.Get("sort"), Q: strings.TrimSpace(q.Get("q")),
 		Dups: q.Get("dups") == "1", Status: q.Get("status"), Match: q.Get("match"), Rank: q.Get("rank") == "relevance"}
 	f.Collection, _ = strconv.ParseInt(q.Get("collection"), 10, 64)
-	f.Person, _ = strconv.ParseInt(q.Get("person"), 10, 64)
+	for _, v := range strings.Split(q.Get("person"), ",") {
+		if id, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil && id > 0 && len(f.Person) < 4 {
+			f.Person = append(f.Person, id)
+		}
+	}
 	f.From, _ = strconv.ParseInt(q.Get("from"), 10, 64)
 	f.To, _ = strconv.ParseInt(q.Get("to"), 10, 64)
 	f.Cursor, _ = strconv.Atoi(q.Get("cursor"))
@@ -345,18 +350,8 @@ func (m *ixModel) postMatches(pi int32, f ixFeedQuery, hits map[int32]bool) bool
 	if hits != nil && !hits[pi] {
 		return false
 	}
-	if f.Person > 0 {
-		keys := m.PersonKeys[f.Person]
-		found := false
-		for _, ii := range p.Items {
-			if c := m.Items[ii].Cluster; c >= 0 && int(c) < len(m.Clusters) && keys[m.Items[m.Clusters[c].Canon].Key] {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
-		}
+	if len(f.Person) > 0 && !m.postHasPeople(pi, f) {
+		return false
 	}
 	if f.Dups && (p.Family < 0 || len(m.Families[p.Family].Posts) < 2) {
 		return false
@@ -437,6 +432,7 @@ func (a *App) ixWriteFeed(ctx context.Context, w http.ResponseWriter, m *ixModel
 		}
 		hits = in
 	}
+	f.people = m.ixPeopleSets(f.Person)
 	cards, total, next := m.ixFeedPage(f, hits, rank)
 	out := map[string]any{"cards": cards, "total": total, "next": next, "built": m.Built.UnixMilli()}
 	if rank != nil {
@@ -523,7 +519,7 @@ func (m *ixModel) ixFeedPage(f ixFeedQuery, hits map[int32]bool, rank *ixRank) (
 					continue
 				}
 				c := it.Cluster
-				if seen[c] {
+				if seen[c] || len(f.Person) > 0 && !m.setHasAnyone(c, f) {
 					continue
 				}
 				if rank != nil {

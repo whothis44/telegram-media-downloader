@@ -193,7 +193,7 @@ func TestIxFacesBecomePeopleAndCanBeCorrected(t *testing.T) {
 	if len(m.PersonKeys[pa]) != 5 || !m.PersonKeys[pa]["s02"] {
 		t.Fatalf("person keys: %v", m.PersonKeys)
 	}
-	f := ixFeedQuery{Person: pa}
+	f := ixFeedQuery{Person: []int64{pa}}
 	n := 0
 	for pi := range m.Posts {
 		if m.postMatches(int32(pi), f, nil) {

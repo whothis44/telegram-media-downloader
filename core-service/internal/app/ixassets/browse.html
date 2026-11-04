@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Archive browser</title>
 <style>
+.pface{width:22px;height:22px;border-radius:50%;object-fit:cover;vertical-align:middle;margin-right:6px}
 :root{--bg:#fff;--fg:#1f2328;--muted:#5d6670;--line:#d9dde3;--soft:#f3f5f7;--sunk:#e7ebef;--accent:#2481cc;--accent-fg:#fff;--ok:#1a7f37;--warn:#9a6700;--bad:#cf222e;--bubble:#fff;--bubble-line:#e3e7eb;--chatbg:#e6ebee;--new:#8250df}
 @media (prefers-color-scheme:dark){:root{--bg:#17212b;--fg:#e7edf3;--muted:#9aa7b4;--line:#2b3a49;--soft:#1f2c3a;--sunk:#24313f;--accent:#5eaaf0;--accent-fg:#0d1620;--ok:#4cc26a;--warn:#e3b341;--bad:#ff7b72;--bubble:#182533;--bubble-line:#26394b;--chatbg:#0e1621;--new:#c297ff}}
 *{box-sizing:border-box}html,body{margin:0;background:var(--bg);color:var(--fg);font:14.5px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
@@ -202,7 +203,7 @@ const fmtDur = (s) => { if (!s) return ''; s = Math.round(s); const h = Math.flo
 const roleText = { original: 'original', repost: 'repost', adds: 'adds new files' };
 const statusText = { held: 'waiting – likely a copy', missing: 'not downloaded', subst: 'same file as another upload' };
 
-const S = { info: null, view: 'families', group: '', category: '', q: '', match: 'both', type: '', status: '', sort: 'new', dups: false, collection: 0, cursor: 0, loading: false, done: false, tab: 'browse', cards: [], like: '', likeName: '', tieFrom: '' };
+const S = { info: null, view: 'families', group: '', category: '', people: [], q: '', match: 'both', type: '', status: '', sort: 'new', dups: false, collection: 0, cursor: 0, loading: false, done: false, tab: 'browse', cards: [], like: '', likeName: '', tieFrom: '' };
 const roleName = { core: 'Shared', member: 'Belongs', loose: 'Probably not part of it', elsewhere: 'Belongs to another set' };
 
 // ---------- info, sidebar ----------
@@ -231,6 +232,8 @@ function renderSide() {
     for (const c of info.collections) h += `<div class="side-item ${S.collection === c.id ? 'on' : ''}" data-coll="${c.id}"><span>${esc(c.name)}</span><span class="c">${c.items}</span></div>`;
   }
   const ml = info.ml || {};
+  const facesOn = !!(ml.enabled && ml.tasks && ml.tasks.faces && ml.tasks.faces.on);
+  if (facesOn) h += `<h3>People</h3><div style="padding:0 8px 4px"><input class="t" id="side-pq" type="search" placeholder="Find a person" style="width:100%" value="${esc(P.sideQ)}"></div><div id="side-people"></div>`;
   const mlLine = !ml.enabled ? '' : `<br>Image recognition: ${ml.reachable ? (ml.embedded || 0).toLocaleString() + ' looked at' + (ml.pending ? ', ' + ml.pending.toLocaleString() + ' to go' : '') + (ml.failed ? ', ' + ml.failed + ' unreadable' : '') : '<span class="bad">' + esc(ml.lastError || 'not reachable') + '</span>'}`;
   $('#match').hidden = !ml.enabled;
   $('#q').placeholder = ml.enabled ? 'Search words, and what pictures and videos show' : 'Search captions, messages, file names, text in pictures and speech';
@@ -240,11 +243,50 @@ function renderSide() {
   $('#side').innerHTML = h;
   $$('#side .side-item').forEach((el) => el.addEventListener('click', () => {
     S.group = el.dataset.group || ''; S.category = el.dataset.cat || ''; S.collection = Number(el.dataset.coll || 0);
-    if (el.dataset.all) { S.group = S.category = ''; S.collection = 0; }
+    if (el.dataset.all) { S.group = S.category = ''; S.collection = 0; S.people = []; }
     if (S.tab === 'chat' && S.group) { $('#chat-group').value = S.group; openChat(S.group); return; }
     switchTab('browse'); renderSide(); resetFeed();
   }));
+  if (facesOn) {
+    renderSidePeople();
+    if (!P.side) loadSidePeople();
+    let pqTimer; $('#side-pq').addEventListener('input', () => { clearTimeout(pqTimer); pqTimer = setTimeout(() => { P.sideQ = $('#side-pq').value.trim(); loadSidePeople(); }, 300); });
+  }
   const rb = $('#rebuild'); if (rb) rb.addEventListener('click', async () => { rb.disabled = true; const r = await api('POST', '/api/ix/browse/rebuild'); if (!r.ok) toast(errText(r)); await loadInfo(); resetFeed(); });
+}
+// ---------- people in the sidebar ----------
+// Click a person to see only posts with them; a second one: posts with both.
+async function loadSidePeople() {
+  const r = await api('GET', '/api/ix/browse/people?top=30&q=' + encodeURIComponent(P.sideQ));
+  if (!r.ok) return;
+  P.side = r.data.people || []; P.sideTotal = r.data.total || 0;
+  renderSidePeople();
+}
+function renderSidePeople() {
+  const el = $('#side-people'); if (!el) return;
+  const list = P.side || [];
+  const chosen = new Set(S.people.map((x) => x.id));
+  // The people chosen stay listed, whatever the search.
+  const extra = S.people.filter((x) => !list.some((p) => p.id === x.id)).map((x) => ({ id: x.id, name: x.name, cover: x.cover, files: x.files }));
+  el.innerHTML = extra.concat(list).map((p) => `<div class="side-item person ${chosen.has(p.id) ? 'on' : ''}" data-pid="${p.id}" title="${chosen.has(p.id) ? 'Click again to stop filtering' : S.people.length ? 'Posts with both' : 'Only posts with them'}"><span>${p.cover ? `<img class="pface" loading="lazy" alt="" src="/api/ix/face?id=${p.cover}">` : ''}${esc(p.name || 'Unnamed')}</span><span class="c">${p.files === undefined ? '' : p.files.toLocaleString()}</span></div>`).join('')
+    + (P.side && !list.length ? '<div class="muted" style="padding:0 8px">No one by that name.</div>' : '')
+    + (P.sideTotal > list.length ? `<div class="muted" style="padding:2px 8px">${list.length} of ${P.sideTotal.toLocaleString()} shown: search to find others.</div>` : '')
+    + (list.length ? '<div class="muted" style="padding:2px 8px">Choose two people to see posts with both.</div>' : '');
+  $$('#side-people [data-pid]').forEach((d) => d.onclick = () => {
+    const p = extra.concat(list).find((x) => x.id === Number(d.dataset.pid));
+    togglePerson(p);
+  });
+}
+function togglePerson(p) {
+  if (S.people.some((x) => x.id === p.id)) S.people = S.people.filter((x) => x.id !== p.id);
+  else { S.people.push({ id: p.id, name: p.name || 'Unnamed', cover: p.cover, files: p.files }); if (S.people.length > 2) S.people.shift(); }
+  if (S.tab !== 'browse') switchTab('browse');
+  renderSidePeople(); resetFeed();
+}
+// "with Ann and Bob · everyone", after the feed's count.
+function peopleNote() {
+  if (!S.people.length) return '';
+  return ' · with ' + S.people.map((x) => '<b>' + esc(x.name) + '</b>').join(' and ') + (S.people.length > 1 ? ' together' : '') + ' · <button class="link" id="people-clear">everyone</button>';
 }
 function fillSelects() {
   const info = S.info;
@@ -325,7 +367,7 @@ function feedURL() {
   for (const k of ['group', 'category', 'type', 'status']) if (S[k]) p.set(k, S[k]);
   if (S.dups) p.set('dups', '1');
   if (S.collection) p.set('collection', String(S.collection));
-  if (S.person) p.set('person', String(S.person));
+  if (S.people.length) p.set('person', S.people.map((x) => x.id).join(','));
   if (S.like || S.thing) {
     if (S.like) p.set('like', S.like); else p.set('thing', S.thing);
     return '/api/ix/browse/similar?' + p;
@@ -345,15 +387,14 @@ async function loadMore() {
   feed.insertAdjacentHTML('beforeend', r.data.cards.map((c, i) => cardHTML(c, start + i)).join(''));
   S.cursor = r.data.next; S.done = !r.data.next;
   const what = { families: 'originals', sets: 'sets', posts: 'posts', media: 'pictures and videos' }[S.view];
-  if (S.like || S.thing) {
-    $('#feed-note').innerHTML = esc(r.data.total.toLocaleString() + ' ' + what) + (S.like ? ' with pictures most like the chosen ' + esc(S.likeName) : ' with pictures showing “' + esc(S.thing) + '”') + ', best first' + searchNote(r.data.search || {}) + ' · <button class="link" id="like-clear">back to browsing</button>';
-    $('#like-clear').onclick = () => { S.like = ''; S.thing = ''; resetFeed(); };
-  } else if (S.q) {
-    $('#feed-note').innerHTML = esc(r.data.total.toLocaleString() + ' ' + what) + ' match “' + esc(S.q) + '”' + searchNote(r.data.search || {});
-  } else if (S.person) {
-    $('#feed-note').innerHTML = esc(r.data.total.toLocaleString() + ' ' + what) + ' with <b>' + esc(S.personName || 'this person') + '</b> · <button class="link" id="person-clear">everyone</button>';
-    $('#person-clear').onclick = () => { S.person = 0; resetFeed(); };
-  } else $('#feed-note').textContent = r.data.total.toLocaleString() + ' ' + what + (S.view === 'families' ? ' (reposts and copies folded in)' : S.view === 'sets' ? ' (posts that share some of the same pictures)' : '');
+  const count = esc(r.data.total.toLocaleString() + ' ' + what);
+  let note;
+  if (S.like || S.thing) note = count + (S.like ? ' with pictures most like the chosen ' + esc(S.likeName) : ' with pictures showing “' + esc(S.thing) + '”') + ', best first' + searchNote(r.data.search || {}) + ' · <button class="link" id="like-clear">back to browsing</button>';
+  else if (S.q) note = count + ' match “' + esc(S.q) + '”' + searchNote(r.data.search || {});
+  else note = count + (S.view === 'families' ? ' (reposts and copies folded in)' : S.view === 'sets' ? ' (posts that share some of the same pictures)' : '');
+  $('#feed-note').innerHTML = note + peopleNote();
+  if ($('#like-clear')) $('#like-clear').onclick = () => { S.like = ''; S.thing = ''; resetFeed(); };
+  if ($('#people-clear')) $('#people-clear').onclick = () => { S.people = []; renderSidePeople(); resetFeed(); };
   $('#sentinel').textContent = S.done ? (S.cards.length ? 'End' : 'Nothing here') : '';
 }
 // What a search found, after the count.
@@ -566,11 +607,16 @@ async function loadExtra(key) {
   const r = await api('GET', '/api/ix/browse/extra?key=' + encodeURIComponent(key));
   const el = $('#lb-extra'); if (!r.ok || !el) return;
   const d = r.data; let h = '';
-  if (d.faces && d.faces.length) h += `<b>Faces</b><div class="row" style="margin:4px 0 8px">${d.faces.map((f) => `<button class="link" data-person="${f.person}" data-pname="${esc(f.name || '')}" ${f.person ? '' : 'disabled'} title="${f.person ? 'Show their files' : 'Not grouped with anyone yet'}" style="text-align:center"><img src="/api/ix/face?id=${f.id}" alt="" style="width:56px;height:56px;border-radius:50%;object-fit:cover;display:block;margin:0 auto"><span style="font-size:12px">${esc(f.name || (f.person ? 'unnamed' : '—'))}</span></button>`).join('')}</div>`;
+  if (d.faces && d.faces.length) h += `<b>Faces</b><div class="row" style="margin:4px 0 8px">${d.faces.map((f) => `<div style="text-align:center"><button class="link" data-person="${f.person}" data-pname="${esc(f.name || '')}" data-pcover="${f.id}" ${f.person ? '' : 'disabled'} title="${f.person ? 'Only posts with this person' : 'Not grouped with anyone yet'}"><img src="/api/ix/face?id=${f.id}" alt="" style="width:56px;height:56px;border-radius:50%;object-fit:cover;display:block;margin:0 auto"><span style="font-size:12px">${esc(f.name || (f.person ? 'unnamed' : '—'))}</span></button>${f.person ? `<br><button class="link" data-person-open="${f.person}" style="font-size:11.5px" title="Name them, merge, correct their faces">about them</button>` : ''}</div>`).join('')}</div>`;
   if (d.text) h += `<b>Text in the picture</b><div style="white-space:pre-wrap;word-break:break-word;margin:4px 0 8px;font-size:13px">${esc(d.text)}</div>`;
   if (d.speech && d.speech.text) h += `<b>Speech${d.speech.language ? ' (' + esc(d.speech.language) + ')' : ''}</b><div style="max-height:220px;overflow:auto;margin:4px 0 8px;font-size:13px">${(d.speech.segments || []).map((sg) => `<div><span class="muted">${esc(fmtDur(sg[0]) || '0:00')}</span> ${esc(sg[2])}</div>`).join('') || esc(d.speech.text)}</div>`;
   el.innerHTML = h;
-  $$('#lb-extra [data-person]').forEach((b) => b.onclick = () => { const id = Number(b.dataset.person); if (!id) return; dlg.close(); showPerson(id); });
+  $$('#lb-extra [data-person]').forEach((b) => b.onclick = () => {
+    const id = Number(b.dataset.person); if (!id) return;
+    dlg.close(); S.people = [{ id, name: b.dataset.pname || 'Unnamed', cover: Number(b.dataset.pcover) }]; S.like = ''; S.thing = '';
+    switchTab('browse'); window.scrollTo(0, 0); renderSidePeople(); resetFeed();
+  });
+  $$('#lb-extra [data-person-open]').forEach((b) => b.onclick = () => { dlg.close(); showPerson(Number(b.dataset.personOpen)); });
 }
 
 // ---------- people ----------
@@ -590,7 +636,7 @@ async function loadPeople() {
   P.list = list;
   $$('#people [data-pid]').forEach((b) => b.onclick = () => showPerson(Number(b.dataset.pid)));
 }
-const P = { list: [] };
+const P = { list: [], side: null, sideTotal: 0, sideQ: '' };
 async function showPerson(id) {
   const r = await api('GET', '/api/ix/browse/person?id=' + id);
   if (!r.ok) { toast(errText(r)); return; }
@@ -604,13 +650,13 @@ async function showPerson(id) {
     <div class="row" style="margin-top:6px">Same person as: <select class="t" id="pp-into"><option value="">choose…</option>${others.map((o) => `<option value="${o.id}">${esc(o.name || 'Unnamed')} (${o.files})</option>`).join('')}</select><button class="b" id="pp-merge">Merge into them</button></div>
     <p class="muted">${p.files.toLocaleString()} file(s). Faces: click one that is someone else to take it out.</p>
     <div class="row">${r.data.faces.map((f) => `<button class="link" data-face="${f.id}" title="Not this person"><img loading="lazy" src="/api/ix/face?id=${f.id}" alt="" style="width:52px;height:52px;border-radius:50%;object-fit:cover"></button>`).join('')}</div>
-    <h3 style="font-size:14px;margin:12px 0 4px">Their files</h3>${mosaicHTML(items, k)}`;
+    <h3 style="font-size:14px;margin:12px 0 4px">Their files${items.length < p.files ? ` <span class="muted">(${items.length.toLocaleString()} shown of ${p.files.toLocaleString()}; “Browse their posts” shows them all)</span>` : ''}</h3>${mosaicHTML(items, k)}`;
   showDialog(p.name || 'Unnamed person', `<div id="sd-files">${h}</div>`);
   const change = async (body, msg) => { const x = await api('POST', '/api/ix/browse/person/' + id, body); toast(x.ok ? msg : errText(x)); if (x.ok) loadPeople(); return x.ok; };
   $('#pp-save').onclick = () => change({ action: 'rename', name: $('#pp-name').value }, 'Saved.');
   $('#pp-hide').onclick = async () => { if (await change({ action: p.hidden ? 'show' : 'hide' }, p.hidden ? 'Shown.' : 'Hidden.')) dlg.close(); };
   $('#pp-merge').onclick = async () => { const into = Number($('#pp-into').value); if (!into) return; if (await change({ action: 'merge', into }, 'Merged.')) showPerson(into); };
-  $('#pp-feed').onclick = () => { S.person = id; S.personName = p.name || 'this person'; dlg.close(); switchTab('browse'); S.view = 'posts'; $$('#view button').forEach((x) => x.classList.toggle('on', x.dataset.v === 'posts')); resetFeed(); };
+  $('#pp-feed').onclick = () => { S.people = [{ id, name: p.name || 'Unnamed', cover: (r.data.faces[0] || {}).id }]; S.like = ''; S.thing = ''; dlg.close(); switchTab('browse'); renderSidePeople(); resetFeed(); };
   $$('[data-face]').forEach((b) => b.onclick = async () => { if (await change({ action: 'remove-face', face: Number(b.dataset.face) }, 'Taken out.')) b.remove(); });
 }
 

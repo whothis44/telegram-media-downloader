@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -519,6 +521,79 @@ func TestIxMoreLikeThisAndThingsArePaged(t *testing.T) {
 	}
 	if _, err := a.ixSimilarList(ctx, m, "nope", "", "", "", ""); err == nil {
 		t.Fatal("a file never looked at was searched")
+	}
+}
+
+// ---------- people ----------
+
+func TestIxPeopleFilterEveryView(t *testing.T) {
+	a, _, m, _ := ixLooksScene(t, nil)
+	// A face of person 9 was found on a copy that is no longer the best.
+	ixSceneCopy(m, "G", 1, 500, "s05b", "s05")
+	m.PersonKeys = map[int64]map[string]bool{1: {"s00": true, "x0": true}, 7: {"s01": true, "s03": true}, 9: {"s05b": true}}
+	feed := func(v url.Values) []ixFoundCard {
+		return ixFound(ixGetJSON(t, a.handleIxBrowseFeed, "/api/ix/browse/feed", v))
+	}
+	groups := func(cards []ixFoundCard) string {
+		var g []string
+		for _, c := range cards {
+			g = append(g, c.group)
+		}
+		sort.Strings(g)
+		return strings.Join(g, ",")
+	}
+	if got := groups(feed(url.Values{"view": {"posts"}, "person": {"1"}})); got != "A,B,D,E" {
+		t.Fatalf("with 1: %s", got)
+	}
+	// Two people: both in one post.
+	if got := groups(feed(url.Values{"view": {"posts"}, "person": {"1,7"}})); got != "A,B" {
+		t.Fatalf("with 1 and 7: %s", got)
+	}
+	if got := groups(feed(url.Values{"view": {"families"}, "person": {"7,1"}})); got != "A,B" {
+		t.Fatalf("originals with 1 and 7: %s", got)
+	}
+	// The media grid: only their files.
+	var keys []string
+	for _, c := range feed(url.Values{"view": {"media"}, "person": {"1"}}) {
+		keys = append(keys, c.key)
+	}
+	sort.Strings(keys)
+	if strings.Join(keys, ",") != "s00,x0" {
+		t.Fatalf("media with 1: %v", keys)
+	}
+	// Found by any copy's faces.
+	if got := groups(feed(url.Values{"view": {"posts"}, "person": {"9"}})); got != "A,G" {
+		t.Fatalf("with 9: %s", got)
+	}
+	// With a search or "more like this" too.
+	if got := groups(ixFound(ixGetJSON(t, a.handleIxSimilar, "/api/ix/browse/similar", url.Values{"like": {"x1"}, "view": {"posts"}, "person": {"1"}}))); got != "D,E" {
+		t.Fatalf("like x1 with 1: %s", got)
+	}
+	if got := groups(feed(url.Values{"view": {"posts"}, "person": {"1"}, "q": {"x9"}, "match": {"looks"}})); got != "D,E" {
+		t.Fatalf("x9 with 1: %s", got)
+	}
+	// The sidebar's list: not hidden, most files first, searchable.
+	for _, p := range [][3]any{{1, "Ann", 0}, {7, "Bob", 0}, {8, "Cartoon", 1}} {
+		if _, err := a.db.Writer.Exec(`INSERT INTO ix_people(id, name, hidden) VALUES (?, ?, ?)`, p[0], p[1], p[2]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, f := range [][2]any{{"s00", 1}, {"x0", 1}, {"s01", 7}, {"o1", 8}, {"o2", 8}, {"o3", 8}} {
+		if _, err := a.db.Writer.Exec(`INSERT INTO ix_faces(key, model, x1, y1, x2, y2, vec, person) VALUES (?, 'f', 0, 0, 1, 1, x'00', ?)`, f[0], f[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res := ixGetJSON(t, a.handleIxPeople, "/api/ix/browse/people", url.Values{"top": {"1"}})
+	people := res["people"].([]any)
+	if res["total"].(float64) != 2 || len(people) != 1 || people[0].(map[string]any)["name"] != "Ann" {
+		t.Fatalf("top 1: %v", res)
+	}
+	res = ixGetJSON(t, a.handleIxPeople, "/api/ix/browse/people", url.Values{"top": {"30"}, "q": {"bo"}})
+	if people := res["people"].([]any); len(people) != 1 || people[0].(map[string]any)["name"] != "Bob" {
+		t.Fatalf("bo: %v", res)
+	}
+	if res := ixGetJSON(t, a.handleIxPeople, "/api/ix/browse/people", nil); len(res["people"].([]any)) != 3 {
+		t.Fatalf("the People tab still lists everyone: %v", res)
 	}
 }
 

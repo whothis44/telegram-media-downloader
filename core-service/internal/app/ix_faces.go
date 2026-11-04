@@ -671,9 +671,14 @@ func (a *App) handleIxPeople(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	total := len(list)
+	if q := r.URL.Query(); q.Get("top") != "" || q.Get("q") != "" {
+		top, _ := strconv.Atoi(q.Get("top"))
+		list, total = ixPeopleTop(list, q.Get("q"), top) // the sidebar's list
+	}
 	var loose int
 	_ = a.db.Reader.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM ix_faces WHERE person=0`).Scan(&loose)
-	writeJSON(w, http.StatusOK, map[string]any{"people": list, "ungrouped": loose, "status": a.ixMLStatusNow(r.Context()).Tasks["faces"]})
+	writeJSON(w, http.StatusOK, map[string]any{"people": list, "total": total, "ungrouped": loose, "status": a.ixMLStatusNow(r.Context()).Tasks["faces"]})
 }
 
 func (a *App) handleIxPerson(w http.ResponseWriter, r *http.Request) {
