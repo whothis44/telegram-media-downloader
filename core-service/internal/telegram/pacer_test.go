@@ -477,7 +477,7 @@ func TestAPartTelegramNeverAnswersIsAskedForAgain(t *testing.T) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if d := p.dcLocked(4); d.inflight != 0 || d.answers != 1 {
+	if d := p.dcLocked(4); d.inflight != 0 || d.answers != 2 || d.took < filePartTimeout {
 		t.Fatalf("inflight %d answers %d", d.inflight, d.answers)
 	}
 }

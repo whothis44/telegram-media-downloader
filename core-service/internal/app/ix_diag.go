@@ -27,7 +27,10 @@ type ixRedactor struct {
 var (
 	ixReGroupID = regexp.MustCompile(`-100\d{6,}|-\d{6,}`)
 	ixReURL     = regexp.MustCompile(`(?i)\b(?:https?|ftp)://\S+|\bt\.me/\S+|\bwww\.\S+`)
-	ixReWinPath = regexp.MustCompile(`(?i)\b[A-Z]:\\[^\s"'<>|]*|\\\\[^\s"'<>|]+`)
+	// A Windows path (drive letter or \\server\share, either slash) runs to
+	// ": " (how Windows errors go on), a quote, or the end: folder names
+	// may hold spaces.
+	ixReWinPath = regexp.MustCompile(`(?i)(?:\b[A-Z]:[\\/]|\\\\)[^"'<>|\r\n]*?(?:: |["'<>|]|$)`)
 	ixReUnix    = regexp.MustCompile(`(?:^|[\s"'(=])((?:[\w.\-()\[\] ]+/)+[\w.\-()\[\] ]*\.[A-Za-z0-9]{1,5})`)
 	ixReFile    = regexp.MustCompile(`[\w\-() ]+\.(?i:jpe?g|png|gif|webp|mp4|mkv|mov|avi|webm|mp3|ogg|oga|m4a|pdf|zip|rar|7z|docx?|xlsx?|txt|apk|exe|heic|tgs)\b`)
 	ixReAt      = regexp.MustCompile(`@[A-Za-z][A-Za-z0-9_]{3,}`)
@@ -54,7 +57,16 @@ func (r *ixRedactor) clean(s string) string {
 	}
 	s = ixReURL.ReplaceAllString(s, "<link>")
 	s = ixReEmailD.ReplaceAllString(s, "<email>")
-	s = ixReWinPath.ReplaceAllString(s, "<path>")
+	s = ixReWinPath.ReplaceAllStringFunc(s, func(m string) string {
+		end := ""
+		switch {
+		case strings.HasSuffix(m, ": "):
+			end = ": "
+		case len(m) > 0 && strings.ContainsRune(`"'<>|`, rune(m[len(m)-1])):
+			end = m[len(m)-1:]
+		}
+		return "<path>" + end
+	})
 	s = ixReUnix.ReplaceAllStringFunc(s, func(m string) string {
 		lead := ""
 		if len(m) > 0 && strings.ContainsRune(" \"'(=", rune(m[0])) {

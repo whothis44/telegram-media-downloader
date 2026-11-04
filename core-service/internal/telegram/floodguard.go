@@ -152,7 +152,9 @@ func (g *floodGuard) invokeGate(ctx context.Context, next tg.Invoker, input bin.
 			err = next.Invoke(reqCtx, input, output)
 			timedOut := errors.Is(reqCtx.Err(), context.DeadlineExceeded)
 			cancel()
-			if err == nil && hooks.answered != nil {
+			// A part not answered in time counts as answered that slowly:
+			// when every part times out, the window must still shrink.
+			if hooks.answered != nil && (err == nil || timedOut && ctx.Err() == nil) {
 				hooks.answered(time.Since(started))
 			}
 			if err != nil && ctx.Err() == nil && timedOut {

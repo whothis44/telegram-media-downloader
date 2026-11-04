@@ -80,3 +80,25 @@ func TestIxVideosAreFoundByTheirBestFrame(t *testing.T) {
 		t.Fatalf("merged: %+v", got)
 	}
 }
+
+func TestIxReportHidesWindowsPathsWithSpaces(t *testing.T) {
+	r := &ixRedactor{groups: map[string]string{}}
+	for _, in := range []string{
+		`write \\NAS\Media\Telegram Archive\Family Group Chat\videos\.tgdl-clip.part: An unexpected network error occurred.`,
+		`open Z:\Telegram Archive\Ahmed and Sara\videos\x.mp4: The system cannot find the file specified.`,
+		`backup to Z:/Telegram index backups/2026-11-03 final failed`,
+	} {
+		out := r.clean(in)
+		for _, leak := range []string{"Archive", "Family", "Ahmed", "Sara", "videos", "backups", "Media"} {
+			if strings.Contains(out, leak) {
+				t.Fatalf("%q leaks %q: %s", in, leak, out)
+			}
+		}
+		if !strings.Contains(out, "<path>") {
+			t.Fatalf("no placeholder: %s", out)
+		}
+	}
+	if out := r.clean(`open C:\data\x.db: access denied`); out != "open <path>: access denied" {
+		t.Fatalf("the error text after the path should stay: %q", out)
+	}
+}
