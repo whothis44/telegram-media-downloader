@@ -136,6 +136,7 @@ func RunMigrations(ctx context.Context, db *sql.DB) (int, error) {
 		return 0, err
 	}
 	// registered: the generation whose file is in the catalogue (0: unknown).
+	// No upgrade is needed for staged files journaled with registered=0: local staging was never released before this column.
 	var registeredColumn int
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('tgdl_message_generations') WHERE name='registered'`).Scan(&registeredColumn); err != nil {
 		return 0, err

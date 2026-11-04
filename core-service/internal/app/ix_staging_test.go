@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -83,5 +84,95 @@ func TestIxStagingAlerts(t *testing.T) {
 	}
 	if !keys["staging:full"] || !keys["staging:stuck"] || !keys["staging:failing"] || len(keys) != 3 {
 		t.Fatalf("alerts: %v", keys)
+	}
+}
+
+// A group purged while its download waits in the staging folder: the staged
+// file and its journal entry go with it, and the mover neither catalogues
+// it nor downloads it again.
+func TestIxPurgeRemovesTheGroupsStagedFiles(t *testing.T) {
+	stage := t.TempDir()
+	a, ctx := ix8App(t, map[string]any{"stageDir": stage})
+	transport, got := lowqTransport()
+	msg := &tg.Message{ID: 11, Date: 1700000000, PeerID: &tg.PeerChannel{ChannelID: 123}, Media: &tg.MessageMediaDocument{Document: &tg.Document{ID: 78, Size: 64, DCID: 2, AccessHash: 1, FileReference: []byte{1},
+		MimeType: "video/mp4", Attributes: []tg.DocumentAttributeClass{&tg.DocumentAttributeFilename{FileName: "b.mp4"}, &tg.DocumentAttributeVideo{W: 10, H: 10}}}}}
+	work := lowqWork(t, a, msg, 64)
+	if err := os.WriteFile(filepath.Join(a.downloadsDir, "G"), []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.ixIngestWork(ixWithRequeue(ctx, work, msg), work, msg, transport); err != nil {
+		t.Fatal(err)
+	}
+	var path string
+	if err := a.db.Reader.QueryRow(`SELECT path FROM tgdl_stage_moves`).Scan(&path); err != nil {
+		t.Fatal(err)
+	}
+	local := filepath.Join(stage, download.StageFolder, filepath.FromSlash(path))
+	if _, err := os.Stat(local); err != nil {
+		t.Fatal(err)
+	}
+	token, err := a.sessions.Create(ctx, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := requestPurge(a, token, "POST", "/api/groups/"+lowqGroup+"/delete-files", "{}"); w.Code != 200 {
+		t.Fatalf("purge: %d %s", w.Code, w.Body.String())
+	}
+	a.purgeWG.Wait()
+	assertPurgeDone(t, a, "group:"+lowqGroup)
+	for _, table := range []string{"tgdl_stage_moves", "tgdl_stage_followers", "tgdl_work", "tgdl_message_generations"} {
+		var n int
+		if err := a.db.Reader.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&n); err != nil || n != 0 {
+			t.Errorf("%s after the purge: %d %v", table, n, err)
+		}
+	}
+	if _, err := os.Stat(local); !os.IsNotExist(err) {
+		t.Fatalf("staged file kept after the purge: %v", err)
+	}
+	if err := os.Remove(filepath.Join(a.downloadsDir, "G")); err != nil {
+		t.Fatal(err)
+	}
+	a.library.MoveStaged(ctx)
+	var n int
+	if err := a.db.Reader.QueryRow(`SELECT (SELECT COUNT(*) FROM downloads)+(SELECT COUNT(*) FROM tgdl_work)`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("purged download came back: %d %v", n, err)
+	}
+	if len(got()) != 1 {
+		t.Fatalf("downloads from Telegram: %v", got())
+	}
+}
+
+// The mover found a staged file missing after its group was purged (its
+// journal entry still read): the message is not queued again.
+func TestIxLostStagedFileOfAPurgedGroupIsNotQueuedAgain(t *testing.T) {
+	stage := t.TempDir()
+	a, ctx := ix8App(t, map[string]any{"stageDir": stage})
+	transport, _ := lowqTransport()
+	msg := &tg.Message{ID: 12, Date: 1700000000, PeerID: &tg.PeerChannel{ChannelID: 123}, Media: &tg.MessageMediaDocument{Document: &tg.Document{ID: 79, Size: 64, DCID: 2, AccessHash: 1, FileReference: []byte{1},
+		MimeType: "video/mp4", Attributes: []tg.DocumentAttributeClass{&tg.DocumentAttributeFilename{FileName: "c.mp4"}, &tg.DocumentAttributeVideo{W: 10, H: 10}}}}}
+	work := lowqWork(t, a, msg, 64)
+	if err := os.WriteFile(filepath.Join(a.downloadsDir, "G"), []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.ixIngestWork(ixWithRequeue(ctx, work, msg), work, msg, transport); err != nil {
+		t.Fatal(err)
+	}
+	var item string
+	if err := a.db.Reader.QueryRow(`SELECT item FROM tgdl_stage_moves`).Scan(&item); err != nil {
+		t.Fatal(err)
+	}
+	var it download.Item
+	if err := json.Unmarshal([]byte(item), &it); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Writer.Exec(`DELETE FROM tgdl_work; DELETE FROM tgdl_message_generations`); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.ixStagedLost(ctx, it); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := a.db.Reader.QueryRow(`SELECT COUNT(*) FROM tgdl_work`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("a purged message was queued again: %d %v", n, err)
 	}
 }
