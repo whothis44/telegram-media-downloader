@@ -420,12 +420,13 @@ var ixEngineWorkers = func(a *App, ctx context.Context) int {
 // ixDeadlineKeepBusy: while files are set aside for files not queued yet,
 // workers that would have nothing to do take set-aside files after all,
 // smallest first, so that downloads never stop while the rescans read
-// chats holding only big files. Only as many go as there are idle workers,
-// so that the smaller files the rescans bring find workers free. Those not
-// taken by the next step are set aside again (they are pending and
-// unpaused); the big-file lane (engine.BigFileLane) still limits the
-// biggest. acctClause and args are ixDeadlineStep's: now, then the
-// working accounts.
+// chats holding only big files. They go only while fewer than half of the
+// workers have a file (busy, or ready for them), and only up to that half,
+// so that the smaller files the rescans bring find workers free: a
+// set-aside file can take an hour. Those not taken by the next step are
+// set aside again (they are pending and unpaused); the big-file lane
+// (engine.BigFileLane) still limits the biggest. acctClause and args are
+// ixDeadlineStep's: now, then the working accounts.
 func (a *App) ixDeadlineKeepBusy(ctx context.Context, acctClause string, args []any) error {
 	workers := ixEngineWorkers(a, ctx)
 	if workers <= 0 {
@@ -436,7 +437,7 @@ func (a *App) ixDeadlineKeepBusy(ctx context.Context, acctClause string, args []
 		FROM tgdl_work WHERE status IN ('pending','processing')`+acctClause, args...).Scan(&ready, &busy); err != nil {
 		return err
 	}
-	need := workers - ready - busy
+	need := (workers+1)/2 - ready - busy
 	if need <= 0 {
 		return nil
 	}
