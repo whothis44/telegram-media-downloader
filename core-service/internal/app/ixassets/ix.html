@@ -101,6 +101,19 @@ function banner() {
   let h = '';
   const acct = s.account || {};
   const fz = s.freeze || {};
+  // Read-only archive (ix_gone.go): the other account banners no longer apply.
+  const ro = s.readonly || {};
+  if (ro.gone) {
+    return `<div class="status bad"><b>Telegram account gone: the archive is read-only now.</b> ${ro.reason === 'date' ? 'The deletion date has passed.' : `Telegram said ${esc(ro.code)}.`} The app has stopped all Telegram work (downloads, rescans, checks) and does not try the session again. Everything saved keeps working: the media browser, search, recognition, faces, the index copy and the nightly backups. See docs/archive-after-deletion.md. <button class="mini" data-act="readonly-clear">Try Telegram again</button></div>`;
+  }
+  // The day before the deletion date (ix_final.go).
+  const fin = (s.backup && s.backup.final) || {};
+  if (fin.window) {
+    const run = fin.run || {};
+    const errs = [run.exportError, run.backupError].filter(Boolean);
+    const ran = run.finishedAt ? `A last index copy and backup were made ${esc(fmtTime(run.finishedAt))}${errs.length ? ` <span class="bad">(not everything worked: ${esc(errs.join('; '))})</span>` : ''}.` : run.startedAt ? 'A last index copy and backup are being made now.' : 'A last index copy and backup will be made in the next few minutes.';
+    h += `<div class="status bad"><b>Telegram deletes this account in less than a day.</b> Keep the app running until then: it keeps saving messages and files for as long as Telegram lets it. ${ran} Also copy the app's data folder <code>${esc(s.backup.dataDir || '')}</code> somewhere safe: it holds the session, the secret key that opens it, and the database.</div>`;
+  }
   if (fz.until) {
     const days = Math.max(0, Math.floor((fz.until * 1000 - Date.now()) / 86400000));
     h += `<div class="status bad"><b>Telegram will delete this account on ${esc(new Date(fz.until * 1000).toLocaleString())} — ${days} day(s) left</b> unless an appeal is accepted${fz.appealUrl ? ` (<a href="${esc(fz.appealUrl)}" target="_blank" rel="noopener">appeal</a>)` : ''}. Rescans now take private chats before public ones. <b>Never log this account out of the app:</b> a frozen account cannot sign in again. <button class="mini" data-act="freeze-check">Check again</button></div>`;
@@ -113,6 +126,20 @@ function banner() {
 }
 
 // ---------------- Overview ----------------
+// The nightly backup of the session and the database (ix_backup.go).
+function viewBackup() {
+  const b = state.status.backup; if (!b) return '';
+  const st = b.status || {};
+  let line;
+  if (st.running) line = '<span class="muted">Making a backup now…</span>';
+  else if (!st.finishedAt) line = '<span class="muted">No backup made yet.</span>';
+  else if (st.ok) line = `<span class="ok">OK</span> — last backup ${esc(fmtTime(st.finishedAt))}, ${fmtSize(st.bytes)} (database ${fmtSize(st.dbBytes)}, ${fmtNum(st.sessions)} session file(s)); ${fmtNum(st.kept)} nightly cop${st.kept === 1 ? 'y' : 'ies'} kept.${st.sessions ? '' : ' <span class="warn">No Telegram session file was found to copy.</span>'}`;
+  else line = `<span class="bad">Failed</span> ${esc(fmtTime(st.finishedAt))}: ${esc(st.error)}.${st.lastOkAt ? ` The last good backup is from ${esc(fmtTime(st.lastOkAt))} (${fmtSize(st.lastOkBytes)}).` : ' There is no good backup yet.'}`;
+  return `<div class="card"><h2>Backup of the session and database</h2><div>${line}</div>
+<div class="muted">${b.enabled ? `Made every night after the index copy, into <code>${esc(b.dir || '?')}</code>; the last ${fmtNum(b.keep)} nights are kept.` : 'The nightly backup is turned off (Settings).'} Each copy is checked (sizes, checksums, and SQLite's integrity check on the database copy). The session files stay encrypted: restoring them also needs the app's secret key, <code>secret.key</code> in the data folder <code>${esc(b.dataDir || '?')}</code>, which is never copied there. Keep a copy of that folder somewhere safe too.</div>${b.dirError ? `<div class="bad">${esc(b.dirError)}</div>` : ''}
+<div class="btns"><button class="b" data-act="backup-now" ${st.running ? 'disabled' : ''}>Back up now</button></div></div>`;
+}
+
 function viewDeadline() {
   const d = state.status.deadline; if (!d) return '';
   const days = (sec) => (sec / 86400).toFixed(1);
@@ -149,6 +176,7 @@ function viewOverview() {
 ${ex.running ? `<div class="muted">${esc(ex.progress || 'Working…')}</div>` : ''}
 ${ex.finishedAt && !ex.running ? `<div class="muted">Last written ${esc(fmtTime(ex.finishedAt))}${ex.error ? ` — <span class="bad">failed: ${esc(ex.error)}</span>` : ` (${fmtNum(ex.files)} files)`}.</div>` : ''}
 </div>`;
+  h += viewBackup();
   h += viewDeadline();
   h += viewDownloads();
   h += viewKeeping();
@@ -426,7 +454,9 @@ ${state.diag ? `<textarea id="diag" readonly style="width:100%;min-height:260px;
 <label><input type="checkbox" data-set="exportEnabled" ${s.exportEnabled ? 'checked' : ''}> Write a copy of the index every night</label>
 <div class="btns">At <input class="t" data-set-text="exportTime" value="${esc(s.exportTime)}" style="width:80px"> (24-hour, this computer's time)</div>
 <div class="btns">Folder: <input class="t" data-set-text="exportDir" value="${esc(s.exportDir)}" placeholder="${esc(state.status.exportDir || '')}" style="flex:1;min-width:240px"></div>
-<div class="muted">Leave the folder empty to use a folder next to your downloads folder. It can't be inside the downloads folder.</div></div>
+<div class="muted">Leave the folder empty to use a folder next to your downloads folder. It can't be inside the downloads folder.</div>
+<label><input type="checkbox" data-set="backupEnabled" ${s.backupOff ? '' : 'checked'}> Also back up the Telegram session and the database every night, into a folder next to the index copy${state.status.backup && state.status.backup.dir ? ` (<code>${esc(state.status.backup.dir)}</code>)` : ''}. The last 7 nights are kept.</label>
+<div class="muted">The session files are copied as they are, still encrypted. The key that opens them (<code>secret.key</code> in the app's data folder) is never copied there, so restoring also needs the app's secret key from its data folder: keep a copy of that folder somewhere safe. Saved with the Save settings button below.</div></div>
 <div class="card"><h2>Account safety</h2>
 <label>Pace of rescans: <select class="t" data-set-select="pace"><option value="normal" ${s.pace === 'normal' ? 'selected' : ''}>Normal</option><option value="gentle" ${s.pace === 'gentle' ? 'selected' : ''}>Gentle (pauses more often, smaller download batches)</option></select></label>
 <div class="btns">Quiet hours (no new group starts): <input class="t" data-set-text="quietStart" value="${esc(s.quietStart)}" placeholder="22:00" style="width:80px"> to <input class="t" data-set-text="quietEnd" value="${esc(s.quietEnd)}" placeholder="07:00" style="width:80px"> <span class="muted">empty = none</span></div>
@@ -581,6 +611,11 @@ $app.addEventListener('click', async (ev) => {
       state.dlMsg = r.ok ? `${fmtNum(r.data.retried)} file(s) put back in the queue.` : 'Could not retry: ' + errText(r);
       load(); break;
     }
+    case 'readonly-clear': {
+      if (!confirm('Leave read-only mode and let the app connect to Telegram again? This only helps if the account still works (for example after an accepted appeal). If Telegram still refuses, the archive goes back to read-only.')) break;
+      const r = await api('POST', '/api/ix/readonly/clear'); if (!r.ok) state.error = errText(r); load(); break;
+    }
+    case 'backup-now': { const r = await api('POST', '/api/ix/backup'); if (!r.ok) state.error = errText(r); load(); break; }
     case 'export': { const r = await api('POST', '/api/ix/export'); if (!r.ok) state.error = errText(r); load(); break; }
     case 'q-start': case 'q-pause': case 'q-clear-finished': case 'q-clear': {
       if (act === 'q-clear' && !confirm('Remove every group from the queue? A group being rescanned now is kept.')) break;

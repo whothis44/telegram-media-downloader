@@ -28,6 +28,7 @@ func registerIxRoutes(mux *http.ServeMux, a *App) {
 	mux.Handle("POST /api/ix/dups/retry", a.requireAdmin(http.HandlerFunc(a.handleIxDupsRetry)))
 	registerIxDockerRoutes(mux, a)
 	registerIxBrowseRoutes(mux, a)
+	registerIxBackupRoutes(mux, a)
 }
 
 type ixGroupStatus struct {
@@ -189,6 +190,8 @@ func (a *App) handleIxStatus(w http.ResponseWriter, r *http.Request) {
 		"mlStart":   a.ixMLStartStatusNow(),
 		"deadline":  a.ixDeadlineEstimate(ctx, false),
 		"pictures":  a.ixMediaStatus(),
+		"backup":    a.ixBackupOverview(ctx),
+		"readonly":  a.ixGoneState(),
 	}
 	if exportErr != nil {
 		out["exportDirError"] = exportErr.Error()

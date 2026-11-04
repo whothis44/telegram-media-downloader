@@ -28,7 +28,12 @@ func (a *App) startMonitor(ctx context.Context) error {
 	return a.startTelegramEngine(ctx, true)
 }
 
-func (a *App) startTelegramEngine(ctx context.Context, observe bool) error {
+func (a *App) startTelegramEngine(ctx context.Context, observe bool) (err error) {
+	// Read-only archive (ix_gone.go): no Telegram connection once the account is gone.
+	if a.ixIsGone() {
+		return errIxReadOnly
+	}
+	defer func() { a.ixNoteEngine(err) }()
 	if a.purgePending() {
 		return errors.New("a purge must finish before the monitor can start")
 	}
@@ -224,6 +229,7 @@ func (a *App) ingestWork(ctx context.Context, work *engine.Work, message *tg.Mes
 	return err
 }
 func (a *App) monitorEvent(state string, err error) {
+	a.ixNoteEngine(err)
 	var cause any
 	if err != nil {
 		cause = err.Error()
@@ -302,6 +308,9 @@ func (a *App) scheduleMonitorRestart() {
 // monitorShouldRestart: the operator left monitoring on and it is still
 // stopped on an error (not stopped by hand or already running again).
 func (a *App) monitorShouldRestart() bool {
+	if a.ixIsGone() {
+		return false // read-only archive: the session is dead
+	}
 	cfg, err := a.config.Load(a.ctx)
 	if err != nil {
 		return false

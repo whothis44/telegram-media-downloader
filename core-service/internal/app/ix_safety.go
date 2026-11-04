@@ -23,6 +23,9 @@ type ixSettings struct {
 	ExportEnabled bool   `json:"exportEnabled"` // write the static index every night
 	ExportTime    string `json:"exportTime"`    // HH:MM, local time of the server
 	ExportDir     string `json:"exportDir"`     // empty: next to the downloads folder
+	// BackupOff turns off the nightly backup of the Telegram session(s) and
+	// the database next to the index copy (ix_backup.go); on by default.
+	BackupOff     bool   `json:"backupOff"`
 	PauseOnFreeze bool   `json:"pauseOnFreeze"` // stop starting rescans when Telegram reports the account frozen
 	QuietStart    string `json:"quietStart"`    // HH:MM; no new rescans start between QuietStart and QuietEnd
 	QuietEnd      string `json:"quietEnd"`
@@ -253,6 +256,9 @@ func (a *App) ixRunSafety(ctx context.Context) {
 
 // ixHold explains why no new rescan may start right now ("" = go ahead).
 func (a *App) ixHold(ctx context.Context) string {
+	if why := a.ixGoneHold(); why != "" {
+		return why
+	}
 	acct := a.ixAccount()
 	if acct.Deactivated {
 		return "Paused: Telegram reports this account is logged out or deactivated (" + acct.LastError + ")."
@@ -268,6 +274,7 @@ func (a *App) ixHold(ctx context.Context) string {
 }
 
 func ixParseSettings(body map[string]any, s ixSettings) (ixSettings, error) {
+	s = ixParseBackupSettings(body, s)
 	if v, ok := body["exportEnabled"].(bool); ok {
 		s.ExportEnabled = v
 	}

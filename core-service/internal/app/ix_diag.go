@@ -121,6 +121,7 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 		line("freeze: none reported (checked %s)%s", ixAgo(fz.CheckedAt, now), map[bool]string{true: " · last check failed: " + r.clean(fz.Error), false: ""}[fz.Error != ""])
 	}
 	line("hold: %s", r.clean(a.ixHold(ctx)))
+	line("%s", r.clean(a.ixGoneDiag(now)))
 	line("\n[rescan queue]")
 	if st, err := a.ixLoadQueue(ctx); err == nil {
 		count := map[string]int{}
@@ -225,6 +226,7 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 	box.mu.Unlock()
 	ex := a.ixExportStatus()
 	line("export: last %s · error: %s", ixAgo(ex.FinishedAt, now), r.clean(ex.Error))
+	line("%s", a.ixBackupDiag(ctx, now, r.clean))
 	line("\n[messages]")
 	var msgs, groups, gone int
 	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*), COUNT(DISTINCT group_id) FROM ix_messages`).Scan(&msgs, &groups)
