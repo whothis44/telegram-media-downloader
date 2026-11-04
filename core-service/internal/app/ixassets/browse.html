@@ -318,20 +318,19 @@ function cardHTML(c, key) {
         <button data-act="collect">Add to a collection…</button>
         <button data-act="tie">${S.tieFrom ? 'Put in the same set as the post chosen' : 'Put in the same set as another post…'}</button></span></span></div></div></div>`;
 }
+// The feed, or (for "more like this" and a subject) /similar with the same
+// views, filters and pages.
 function feedURL() {
-  if (S.like || S.thing) {
-    const p = new URLSearchParams({ limit: '240' });
-    if (S.like) p.set('like', S.like); else p.set('thing', S.thing);
-    for (const k of ['group', 'category']) if (S[k]) p.set(k, S[k]);
-    if (S.type === 'photo' || S.type === 'video') p.set('type', S.type);
-    return '/api/ix/browse/similar?' + p;
-  }
   const p = new URLSearchParams({ view: S.view, sort: S.sort === 'best' ? 'new' : S.sort, cursor: String(S.cursor), limit: S.view === 'media' ? '120' : '48' });
-  for (const k of ['group', 'category', 'q', 'type', 'status']) if (S[k]) p.set(k, S[k]);
-  if (S.q) { p.set('match', S.match); if (S.sort === 'best') p.set('rank', 'relevance'); }
+  for (const k of ['group', 'category', 'type', 'status']) if (S[k]) p.set(k, S[k]);
   if (S.dups) p.set('dups', '1');
   if (S.collection) p.set('collection', String(S.collection));
   if (S.person) p.set('person', String(S.person));
+  if (S.like || S.thing) {
+    if (S.like) p.set('like', S.like); else p.set('thing', S.thing);
+    return '/api/ix/browse/similar?' + p;
+  }
+  if (S.q) { p.set('q', S.q); p.set('match', S.match); if (S.sort === 'best') p.set('rank', 'relevance'); }
   return '/api/ix/browse/feed?' + p;
 }
 async function loadMore() {
@@ -347,7 +346,7 @@ async function loadMore() {
   S.cursor = r.data.next; S.done = !r.data.next;
   const what = { families: 'originals', sets: 'sets', posts: 'posts', media: 'pictures and videos' }[S.view];
   if (S.like || S.thing) {
-    $('#feed-note').innerHTML = (S.like ? 'Most like the chosen ' + esc(S.likeName) : 'Pictures showing “' + esc(S.thing) + '”') + ', best first (' + r.data.total + ') · <button class="link" id="like-clear">back to browsing</button>';
+    $('#feed-note').innerHTML = esc(r.data.total.toLocaleString() + ' ' + what) + (S.like ? ' with pictures most like the chosen ' + esc(S.likeName) : ' with pictures showing “' + esc(S.thing) + '”') + ', best first' + searchNote(r.data.search || {}) + ' · <button class="link" id="like-clear">back to browsing</button>';
     $('#like-clear').onclick = () => { S.like = ''; S.thing = ''; resetFeed(); };
   } else if (S.q) {
     $('#feed-note').innerHTML = esc(r.data.total.toLocaleString() + ' ' + what) + ' match “' + esc(S.q) + '”' + searchNote(r.data.search || {});
@@ -360,9 +359,9 @@ async function loadMore() {
 // What a search found, after the count.
 function searchNote(s) {
   const parts = [];
-  if (s.match === 'looks') parts.push('by what the pictures show');
+  if (s.match === 'looks' && !S.like && !S.thing) parts.push('by what the pictures show');
   else if (s.match === 'words') parts.push('by their words');
-  if (s.looks !== undefined && s.match !== 'words') parts.push(s.looks ? s.looks.toLocaleString() + ' picture(s) look like it' : 'no picture stands out as looking like it');
+  if (s.looks !== undefined && s.match !== 'words' && !S.thing) parts.push(s.looks ? s.looks.toLocaleString() + ' picture(s) look like it' : 'no picture stands out as looking like it');
   if (s.weak) parts.push('the closest pictures are added as weak matches');
   if (s.pinned) parts.push('the caption that matches best comes first');
   if (s.looksError) parts.push('<span class="warn">looks: ' + esc(s.looksError) + '</span>');
@@ -371,7 +370,7 @@ function searchNote(s) {
 function resetFeed() {
   S.cursor = 0; S.done = false; S.cards = [];
   S.showSim = !!(S.like || S.thing || (S.q && S.match !== 'words'));
-  $('#feed').innerHTML = ''; $('#feed').className = 'grid' + (S.view === 'media' || S.like || S.thing ? ' media' : '');
+  $('#feed').innerHTML = ''; $('#feed').className = 'grid' + (S.view === 'media' ? ' media' : '');
   loadMore();
 }
 new IntersectionObserver((e) => { if (e[0].isIntersecting && S.tab === 'browse') loadMore(); }, { rootMargin: '800px' }).observe($('#sentinel'));

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"sync"
 	"testing"
 )
@@ -447,6 +448,77 @@ func TestIxTextInPicturesAndSpeechIsIndexed(t *testing.T) {
 	// Words that are not a full-text query still search.
 	if keys := a.ixMediaTextKeys(ctx, "ix_ocr", `"`); keys != nil {
 		t.Fatalf("a lone quote: %v", keys)
+	}
+}
+
+// ---------- more like this, Things: pages ----------
+
+func TestIxMoreLikeThisAndThingsArePaged(t *testing.T) {
+	a, ctx, m, _ := ixLooksScene(t, map[string]any{"mlThings": "x9\ns9"})
+	similar := func(v url.Values) map[string]any {
+		return ixGetJSON(t, a.handleIxSimilar, "/api/ix/browse/similar", v)
+	}
+	// Twelve pictures like x0 (x1–x6, y1–y6), five at a time, best first,
+	// none twice, never x0 itself.
+	seen := map[string]bool{}
+	last := 2.0
+	cursor := "0"
+	pages := 0
+	for {
+		res := similar(url.Values{"like": {"x0"}, "view": {"media"}, "limit": {"5"}, "cursor": {cursor}})
+		if res["total"].(float64) != 12 {
+			t.Fatalf("total %v", res["total"])
+		}
+		for _, c := range ixFound(res) {
+			if c.key == "x0" || seen[c.key] || c.key[0] != 'x' && c.key[0] != 'y' || c.sim > last || c.why != "looks" || c.weak {
+				t.Fatalf("page %d: %+v", pages, c)
+			}
+			seen[c.key], last = true, c.sim
+		}
+		pages++
+		next := int(res["next"].(float64))
+		if next == 0 {
+			break
+		}
+		cursor = strconv.Itoa(next)
+	}
+	if pages != 3 || len(seen) != 12 {
+		t.Fatalf("pages %d, files %d", pages, len(seen))
+	}
+	// Found once, kept for the next pages.
+	if n := len(a.ixSimilarBox().saved); n != 1 {
+		t.Fatalf("kept searches: %d", n)
+	}
+	// Every view and filter: originals, one chat, dates.
+	if res := similar(url.Values{"like": {"x0"}, "view": {"families"}}); res["total"].(float64) != 2 {
+		t.Fatalf("originals like x0: %v", res["total"])
+	}
+	if got := ixFound(similar(url.Values{"like": {"x0"}, "view": {"posts"}, "group": {"E"}})); len(got) != 1 || got[0].group != "E" {
+		t.Fatalf("in E: %+v", got)
+	}
+	if got := ixFound(similar(url.Values{"like": {"x0"}, "view": {"posts"}, "from": {"55"}})); len(got) != 1 || got[0].group != "E" {
+		t.Fatalf("from 55: %+v", got)
+	}
+	// A subject: its pictures, as many as its count.
+	res := similar(url.Values{"thing": {"x9"}, "view": {"media"}, "limit": {"100"}})
+	if res["total"].(float64) != 13 || len(ixFound(res)) != 13 {
+		t.Fatalf("x9: %v", res["total"])
+	}
+	if res := similar(url.Values{"thing": {"s9"}, "view": {"posts"}}); res["total"].(float64) != 3 {
+		t.Fatalf("posts showing s9: %v", res["total"])
+	}
+	// The store grows: searched again.
+	s := &a.ixMLBox().store
+	s.mu.Lock()
+	q, _ := ixQuantise(ixSceneSim("x0"))
+	s.putLocked("new", q)
+	s.mu.Unlock()
+	similar(url.Values{"like": {"x0"}, "view": {"media"}})
+	if n := len(a.ixSimilarBox().saved); n != 5 { // all, in E, x9, s9, all again
+		t.Fatalf("kept searches after the store grew: %d", n)
+	}
+	if _, err := a.ixSimilarList(ctx, m, "nope", "", "", "", ""); err == nil {
+		t.Fatal("a file never looked at was searched")
 	}
 }
 
