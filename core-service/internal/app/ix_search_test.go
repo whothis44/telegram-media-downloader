@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // ---------- fixtures ----------
@@ -380,6 +381,49 @@ func TestIxOneSearchBoxFindsWordsAndLooks(t *testing.T) {
 	res = ixGetJSON(t, a.handleIxBrowseFeed, "/api/ix/browse/feed", url.Values{"q": {"xylophone"}, "view": {"posts"}})
 	if cards := ixFound(res); len(cards) != 7 || cards[0].group != "G" {
 		t.Fatalf("newest first: %+v", cards)
+	}
+}
+
+func TestIxSearchDoesNotWaitForASlowRecognitionService(t *testing.T) {
+	asked := 0
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		asked++
+		mu.Unlock()
+		select { // loading its model, for longer than a search waits
+		case <-r.Context().Done():
+		case <-time.After(3 * time.Second):
+		}
+	}))
+	defer srv.Close()
+	old := ixQueryWait
+	ixQueryWait = 200 * time.Millisecond
+	defer func() { ixQueryWait = old }()
+	a, ctx := ix8App(t, map[string]any{"mlUrl": srv.URL})
+	m := ixSetScene()
+	a.ixModelBox().model = m
+	ixWordsScene(t, a, ctx, m)
+	// Nothing looked at yet: the service is not even asked.
+	a.ixMLBox().store.loaded = true
+	a.ixMLBox().store.model = a.ixMLClientNow(ctx).model
+	res := ixGetJSON(t, a.handleIxBrowseFeed, "/api/ix/browse/feed", url.Values{"q": {"xylophone"}, "view": {"posts"}, "rank": {"relevance"}})
+	mu.Lock()
+	n := asked
+	mu.Unlock()
+	if n != 0 || len(ixFound(res)) != 4 {
+		t.Fatalf("asked %d, found %+v", n, ixFound(res))
+	}
+	// Pictures looked at, the service slow: the words, without waiting.
+	ixTestStore(t, a, ctx, ixSceneKeys(m), nil)
+	start := time.Now()
+	res = ixGetJSON(t, a.handleIxBrowseFeed, "/api/ix/browse/feed", url.Values{"q": {"xylophone"}, "view": {"posts"}, "rank": {"relevance"}})
+	if took := time.Since(start); took > 2*time.Second {
+		t.Fatalf("waited %v", took)
+	}
+	s := res["search"].(map[string]any)
+	if e, _ := s["looksError"].(string); !strings.Contains(e, "did not answer in time") || len(ixFound(res)) != 4 {
+		t.Fatalf("search info %v, found %+v", s, ixFound(res))
 	}
 }
 

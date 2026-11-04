@@ -126,6 +126,23 @@ func ixMatchMode(want string, recognition bool) string {
 func (a *App) ixHybridSearch(ctx context.Context, m *ixModel, f ixFeedQuery) *ixRank {
 	mode := ixMatchMode(f.Match, a.ixMLClientNow(ctx) != nil)
 	info := map[string]any{"match": mode}
+	// What pictures show is looked up while the words are.
+	type looksAnswer struct {
+		lk  ixLooks
+		err error
+	}
+	var looksCh chan looksAnswer
+	if mode != "words" {
+		typ := f.Type
+		if typ != "photo" && typ != "video" {
+			typ = ""
+		}
+		looksCh = make(chan looksAnswer, 1)
+		go func() {
+			lk, err := a.ixLooksFor(ctx, m, f.Q, ixLooksDepth, ixMLFilter(m, f.Group, f.Category, typ))
+			looksCh <- looksAnswer{lk, err}
+		}()
+	}
 	var lists []*ixList
 	var pinned []int32
 	if mode != "looks" {
@@ -151,12 +168,9 @@ func (a *App) ixHybridSearch(ctx context.Context, m *ixModel, f ixFeedQuery) *ix
 	strong := 0
 	var weak []int32
 	sims := map[int32]float32{}
-	if mode != "words" {
-		typ := f.Type
-		if typ != "photo" && typ != "video" {
-			typ = ""
-		}
-		lk, err := a.ixLooksFor(ctx, m, f.Q, ixLooksDepth, ixMLFilter(m, f.Group, f.Category, typ))
+	if looksCh != nil {
+		ans := <-looksCh
+		lk, err := ans.lk, ans.err
 		if err != nil {
 			info["looksError"] = err.Error()
 		} else {

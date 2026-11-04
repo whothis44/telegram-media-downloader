@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Search in the browser: one box for words (captions, text in pictures,
@@ -181,6 +182,9 @@ const (
 	ixLooksDepth = 200 // pictures taken into the ranking
 )
 
+// ixQueryWait: how long a search waits for a description's embedding.
+var ixQueryWait = 15 * time.Second
+
 // ixQueryVecs caches the embeddings of typed descriptions (model|text).
 type ixQueryVecs struct {
 	mu   sync.Mutex
@@ -253,8 +257,18 @@ func (a *App) ixLooksFor(ctx context.Context, m *ixModel, text string, n int, ke
 	if err := box.store.load(ctx, a.db.Reader, c.model); err != nil {
 		return ixLooks{}, err
 	}
-	q, err := a.ixQueryVector(ctx, c, text)
+	if box.store.size() == 0 {
+		return ixLooks{cutoff: 2}, nil // nothing looked at yet: no need to ask
+	}
+	// A search does not wait long for the service (unreachable, or loading
+	// its model): the words are shown without it.
+	qctx, cancel := context.WithTimeout(ctx, ixQueryWait)
+	defer cancel()
+	q, err := a.ixQueryVector(qctx, c, text)
 	if err != nil {
+		if ctx.Err() == nil && qctx.Err() != nil {
+			err = errors.New("the image recognition service did not answer in time (it may be starting); try again in a moment")
+		}
 		return ixLooks{}, err
 	}
 	want := max(n, ixWeakFloor)
