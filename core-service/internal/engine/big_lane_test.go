@@ -208,7 +208,9 @@ func TestClaimFindingNothingIsCheap(t *testing.T) {
 			}
 		}
 		// Walking the 50,000 rows took some 16 ms a claim; generous for -race.
-		if per := time.Since(start) / 20; per > 5*time.Millisecond {
+		per := time.Since(start) / 20
+		t.Logf("%d account(s): %v a claim finding nothing", len(accounts), per)
+		if per > 5*time.Millisecond {
 			t.Fatalf("%d account(s): a claim finding nothing took %v", len(accounts), per)
 		}
 	}

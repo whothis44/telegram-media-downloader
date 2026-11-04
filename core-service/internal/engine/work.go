@@ -17,7 +17,10 @@ import (
 	"github.com/gotd/td/tg"
 )
 
-type WorkStore struct{ writer, reader *sql.DB }
+type WorkStore struct {
+	writer, reader *sql.DB
+	emptyClaims    atomic.Int64 // claims that found nothing to take
+}
 
 var errFiltered = errors.New("queued message no longer matches download filters")
 var ErrFiltered = errFiltered
@@ -238,6 +241,7 @@ func (s *WorkStore) Claim(ctx context.Context, accounts []string, now time.Time,
 	w := new(Work)
 	if err := row.Scan(&w.ID, &w.AccountID, &w.GroupID, &w.GroupName, &w.MessageID, &w.Generation, &w.MediaType, &w.FileName, &w.FileSize, &w.body, &w.Attempts, &w.CreatedAt, &w.ForceRefresh, &w.Origin); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
+			s.emptyClaims.Add(1)
 			return nil, nil
 		}
 		return nil, err

@@ -562,3 +562,58 @@ func TestScalerHalvesOnceForAPacedAccountsWait(t *testing.T) {
 		t.Fatalf("a paced account's wait should halve the workers once: %v", status)
 	}
 }
+
+// Idle workers look at an empty queue less and less often, and a wake
+// still brings them back at once: one wake reaches every idle worker
+// while there is work for them.
+func TestIdleWorkersBackOffAndWakeTogether(t *testing.T) {
+	oldPoll, oldMax := workerIdlePoll, workerIdlePollMax
+	workerIdlePoll, workerIdlePollMax = 10*time.Millisecond, 400*time.Millisecond
+	t.Cleanup(func() { workerIdlePoll, workerIdlePollMax = oldPoll, oldMax })
+	ctx := context.Background()
+	s := testStore(t)
+	factory := func(AccountConfig, *telegram.UpdateState, func(context.Context, tg.UpdatesClass) error, func(int64)) (Account, error) {
+		return &readyAccount{}, nil
+	}
+	filter := func(context.Context, string, *tg.Message, tg.UpdatesClass) (Target, bool, error) {
+		return Target{}, true, nil
+	}
+	var started atomic.Int64
+	release := make(chan struct{})
+	sink := func(ctx context.Context, _ *Work, _ *tg.Message, _ telegram.MediaDownloader) error {
+		started.Add(1)
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return nil
+	}
+	c := New(s.writer, s.reader, t.TempDir(), factory, filter, sink, nil)
+	if err := c.Start(ctx, ctx, []AccountConfig{{ID: "one"}}, 4, 1); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Stop(ctx)
+	defer close(release)
+	time.Sleep(1200 * time.Millisecond)
+	// Polling every 10 ms would be some 480 claims; backing off, about 36.
+	if n := s.emptyClaims.Load(); n > 60 {
+		t.Fatalf("4 idle workers made %d claims in 1.2 s", n)
+	}
+	for i := 1; i <= 3; i++ {
+		if _, _, err := s.Enqueue(ctx, "one", Target{}, testMessage(i, 1, int64(i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run, err := c.queueRun()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.wake(run)
+	deadline := time.Now().Add(150 * time.Millisecond)
+	for started.Load() < 3 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if n := started.Load(); n != 3 {
+		t.Fatalf("%d of 3 files started soon after one wake", n)
+	}
+}
