@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"image"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -417,5 +419,53 @@ func TestIxPreviewsAllAccountFallbackAndChatWideErrors(t *testing.T) {
 	a.ixPreviewAllRound(ctx)
 	if len(r.asked) != 5 {
 		t.Fatalf("after the time: %v", r.asked)
+	}
+}
+
+// A kept preview goes once its file is downloaded, and nothing is fetched
+// while the data folder's disk is nearly full.
+func TestIxPreviewsAllDiskAndDownloadedFiles(t *testing.T) {
+	a, ctx := ixTestApp(t)
+	ixAllDeadline(t, a, ctx)
+	pic1, pic2 := ixTestPhoto(1, ixTestChannel, 1301, 500), ixTestPhoto(2, ixTestChannel, 1302, 400)
+	ixTestArchive(t, a, pic1)
+	r := &ixAllReader{preview: ixTestJPEG(t, image.NewRGBA(image.Rect(0, 0, 32, 24)), 80)}
+	ixAllUse(t, r, 0)
+	free := int64(4 << 30)
+	saved := ixPreviewAllFree
+	ixPreviewAllFree = func(string) (int64, bool) { return free, true }
+	t.Cleanup(func() { ixPreviewAllFree = saved })
+	a.ixPreviewAllRound(ctx)
+	if p := a.ixPreviewAllNow(); len(r.asked) != 0 || !strings.Contains(p.Why, "free") {
+		t.Fatalf("fetched with 4 GB free: %v %+v", r.asked, p)
+	}
+	free = 50 << 30
+	a.ixPreviewAllRound(ctx)
+	if len(r.asked) != 1 || ixCopyPreviewURL(ixAllIdent(pic1)) == "" {
+		t.Fatalf("with room: asked %v", r.asked)
+	}
+	var rel string
+	if err := a.db.Reader.QueryRow(`SELECT path FROM ix_copy_thumb WHERE ident=?`, ixAllIdent(pic1)).Scan(&rel); err != nil || rel == "" {
+		t.Fatalf("kept: %q %v", rel, err)
+	}
+	file := filepath.Join(a.ixPreviewDir(), filepath.FromSlash(rel))
+	if _, err := os.Stat(file); err != nil {
+		t.Fatal(err)
+	}
+	// The file is downloaded: its kept preview goes (once), nothing is asked.
+	ixTestSave(t, a, pic1, "c/p1.jpg", ixSixtyFour("f"))
+	ixTestArchive(t, a, pic2)
+	a.ixPreviewAllRound(ctx)
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Fatalf("the preview of a downloaded file is still there: %v", err)
+	}
+	if ixCopyPreviewURL(ixAllIdent(pic1)) != "" {
+		t.Fatal("the browser is still given the preview")
+	}
+	if len(r.asked) != 2 || r.asked[1] != 1302 {
+		t.Fatalf("asked %v", r.asked)
+	}
+	if p := a.ixPreviewAllNow(); p.Known != 1 || p.Fetched != 1 {
+		t.Fatalf("counts: %+v", p)
 	}
 }

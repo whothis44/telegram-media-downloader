@@ -63,7 +63,13 @@ Each backup folder holds:
 | `manifest.json` | Size and SHA-256 of every file in the folder |
 | `README.txt` | These steps, in short |
 
-The downloaded files themselves are not in the backup; they stay in your downloads folder.
+The downloaded files themselves are not in the backup; they stay in your downloads folder. Neither is the
+`ixpreviews` folder in the data folder: the 320 px previews Telegram keeps of photos and videos not downloaded
+(about 20 KB each), which the browser shows for those files and the copy check looks at. A preview is removed
+once its file is downloaded, and none are fetched while the data folder's disk has less than 5 GB free. They are
+fetched again from Telegram if lost, which only works while the account still answers: after the deletion date a
+lost `ixpreviews` folder means Telegram's tiny blurred previews again. To keep them, copy the folder along with
+the rest of the data folder.
 
 To restore:
 

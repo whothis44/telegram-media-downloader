@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/botnick/telegram-media-downloader/core-service/internal/diskfree"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/telegram"
 	"github.com/gotd/td/tg"
 )
@@ -43,6 +46,12 @@ import (
 // running). An answer about the whole chat (CHANNEL_PRIVATE, FROZEN_*,
 // CHAT_*) leaves the chat's other files alone for ixPreviewAllChatSkip
 // rather than asking for each of them; one chat never ends the round.
+//
+// A kept preview goes once its file is downloaded (the browser then shows
+// the file's own thumbnail), and the pass fetches nothing while the data
+// folder's disk has less than ixPreviewAllMinFree free. The previews are
+// in dataDir/ixpreviews; they are not in the backups (fetched again if
+// lost).
 
 const (
 	ixPreviewAllBatch      = 100 // files per round, then the order is read again
@@ -50,7 +59,13 @@ const (
 	ixPreviewAllPremiumMin = time.Minute
 	ixPreviewAllGapMax     = 16 // times ixPreviewAllGap, after speed-limit waits
 	ixPreviewAllChatSkip   = 6 * time.Hour
+	ixPreviewAllMinFree    = 5 << 30 // free space the data folder's disk keeps
+	ixPreviewAllDropBatch  = 500     // kept previews of downloaded files removed per round, at most
 )
+
+// ixPreviewAllFree is the free space on the disk holding dir (replaceable
+// in tests).
+var ixPreviewAllFree = diskfree.Free
 
 var (
 	// ixPreviewAllGap is the least time between two requests of the pass
@@ -439,10 +454,46 @@ func (a *App) ixPreviewAllKeep(ctx context.Context, j ixPreviewAllJob, data []by
 	return a.ixPreviewSave(ctx, f, data, w, h, "", nil, "")
 }
 
+// ixPreviewAllDropDownloaded removes the kept previews of files now
+// downloaded: the browser shows the file's own thumbnail then. The row
+// stays (path emptied), with what the copy check learnt from it.
+func (a *App) ixPreviewAllDropDownloaded(ctx context.Context) {
+	rows, err := a.db.Reader.QueryContext(ctx, `SELECT t.ident, t.path FROM ix_copy_thumb t WHERE t.path<>''
+		AND EXISTS (SELECT 1 FROM downloads d WHERE d.telegram_media_kind=substr(t.ident,1,instr(t.ident,':')-1)
+			AND d.telegram_media_id=substr(substr(t.ident,instr(t.ident,':')+1),1,instr(substr(t.ident,instr(t.ident,':')+1),':')-1)
+			AND d.file_path IS NOT NULL AND d.file_path<>'' AND (d.status IS NULL OR d.status='completed'))
+		LIMIT ?`, ixPreviewAllDropBatch)
+	if err != nil {
+		return
+	}
+	type kept struct{ ident, path string }
+	var drop []kept
+	for rows.Next() {
+		var k kept
+		if rows.Scan(&k.ident, &k.path) == nil {
+			drop = append(drop, k)
+		}
+	}
+	rows.Close()
+	for _, k := range drop {
+		if ctx.Err() != nil {
+			return
+		}
+		if _, err := a.db.Writer.ExecContext(ctx, `UPDATE ix_copy_thumb SET path='', bytes=0 WHERE ident=? AND path=?`, k.ident, k.path); err != nil {
+			return
+		}
+		ixPreviewKnown.Delete(k.ident)
+		if k.path == ixNormPath(k.path) && !strings.Contains(k.path, "..") {
+			_ = os.Remove(filepath.Join(a.ixPreviewDir(), filepath.FromSlash(k.path)))
+		}
+	}
+}
+
 // ixPreviewAllRound fetches the previews of up to ixPreviewAllBatch files
 // and says how long to wait before the next round.
 func (a *App) ixPreviewAllRound(ctx context.Context) time.Duration {
 	defer a.ixPreviewAllMeasure(ctx)
+	a.ixPreviewAllDropDownloaded(ctx)
 	if a.ixIsGone() {
 		a.ixPreviewAllSetWhy("read-only archive: nothing is asked of Telegram")
 		return 15 * time.Minute
@@ -457,6 +508,10 @@ func (a *App) ixPreviewAllRound(ctx context.Context) time.Duration {
 	b.mu.Unlock()
 	if d := time.Until(until); d > 0 {
 		return d
+	}
+	if free, ok := ixPreviewAllFree(a.dataDir); ok && free < ixPreviewAllMinFree {
+		a.ixPreviewAllSetWhy(fmt.Sprintf("paused: less than %d GB free on the data folder's disk", ixPreviewAllMinFree>>30))
+		return 30 * time.Minute
 	}
 	jobs, err := a.ixPreviewAllJobs(ctx, ixPreviewAllBatch)
 	if err != nil {

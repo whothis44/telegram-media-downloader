@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/botnick/telegram-media-downloader/core-service/internal/diskfree"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/telegram"
 )
 
@@ -88,7 +89,7 @@ type stageState struct {
 // go on past the space allowed (see WaitStageRoom).
 const stageFreeReserve int64 = 50 << 30
 
-// stageFreeHook replaces diskFree in tests.
+// stageFreeHook replaces diskfree.Free in tests.
 var stageFreeHook atomic.Pointer[func(string) (int64, bool)]
 
 // stageFreeSpace is the free space on the disk holding dir.
@@ -96,7 +97,7 @@ func stageFreeSpace(dir string) (int64, bool) {
 	if f := stageFreeHook.Load(); f != nil {
 		return (*f)(dir)
 	}
-	return diskFree(dir)
+	return diskfree.Free(dir)
 }
 
 // errStageLater: the move waits for another download of the same message
