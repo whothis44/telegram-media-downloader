@@ -29,7 +29,7 @@ func TestIxQueuedCopiesWaitForTheBest(t *testing.T) {
 		}
 	}
 	// Held copies do not count towards a backfill's queue limit.
-	if n := a.ixHeldWaiting(ctx); n != 2 {
+	if n := a.ixWaitingApart(ctx); n != 2 {
 		t.Fatalf("held waiting: %d", n)
 	}
 	// The best copy is saved: the others now wait as copies of that file.

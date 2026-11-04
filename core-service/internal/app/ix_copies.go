@@ -47,6 +47,9 @@ CREATE TABLE IF NOT EXISTS ix_copy_hold ( -- more about held queue items (ix_hel
 	checked_at   INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS ix_copy_hold_of ON ix_copy_hold(of_work) WHERE of_work<>0;
+-- saved files by size: exact re-uploads are looked for by it (ix_held.go, ix_copies_ml.go)
+CREATE INDEX IF NOT EXISTS ix_downloads_size ON downloads(file_size) WHERE status='completed';
+CREATE INDEX IF NOT EXISTS ix_downloads_tg_size ON downloads(telegram_media_size) WHERE status='completed';
 CREATE TABLE IF NOT EXISTS ix_copy_thumb ( -- Telegram's small previews of queued files
 	ident      TEXT    PRIMARY KEY, -- the file's Telegram identity (kind:id:size)
 	group_id   TEXT    NOT NULL DEFAULT '',

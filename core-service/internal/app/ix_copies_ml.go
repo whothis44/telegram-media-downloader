@@ -389,6 +389,7 @@ func (a *App) ixPreviewCandidates(ctx context.Context, model string, n int) ([]i
 		WHERE w.status='pending' AND w.ttl_seconds=0 AND length(w.body)>0
 		AND ((w.media_type='video' AND w.file_size>=?) OR (w.media_type='photo' AND w.file_size>=?))
 		AND w.id NOT IN (SELECT work_id FROM ix_held WHERE released_at=0 AND reason<>'')
+		AND w.id NOT IN (SELECT work_id FROM ix_lowq WHERE state IN ('saved','released'))
 		ORDER BY w.file_size>=524288000 DESC, COALESCE(g.username,'')='' DESC, w.file_size DESC, w.id LIMIT 2000`, ixHoldMinSize, ixPreviewMinPicture)
 	if err != nil {
 		return nil, err
@@ -424,9 +425,11 @@ func (a *App) ixPreviewCandidates(ctx context.Context, model string, n int) ([]i
 			continue
 		}
 		// An exact re-upload is checked by its bytes when it downloads.
-		var same int
-		_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM downloads WHERE status='completed' AND (file_size=? OR telegram_media_size=?) LIMIT 1`, f.Size, f.Size).Scan(&same)
-		if same > 0 {
+		// (Both sizes are indexed: ix_downloads_size, ix_downloads_tg_size.)
+		var same bool
+		_ = a.db.Reader.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM downloads WHERE file_size=? AND status='completed')
+			OR EXISTS (SELECT 1 FROM downloads WHERE telegram_media_size=? AND status='completed')`, f.Size, f.Size).Scan(&same)
+		if same {
 			continue
 		}
 		j.f = f
@@ -438,6 +441,9 @@ func (a *App) ixPreviewCandidates(ctx context.Context, model string, n int) ([]i
 // ixPreviewRound fetches, looks at and compares the previews of a few
 // queued files.
 func (a *App) ixPreviewRound(ctx context.Context) error {
+	if a.ixIsGone() {
+		return nil // read-only: nothing may talk to Telegram, and that is no error
+	}
 	s := a.ixLoadSettings(ctx)
 	c := a.ixMLClientNow(ctx)
 	if s.CopyThumbsOff || !s.HoldLikely || c == nil {

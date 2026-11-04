@@ -570,6 +570,7 @@ func TestIxDeadlineRespectsPeopleAndOtherAccounts(t *testing.T) {
 	old := now.Add(-time.Hour).UnixMilli()
 	_, _ = a.db.Writer.Exec(`UPDATE tgdl_work SET updated_at=? WHERE status='completed'`, old)
 	_, _ = a.db.Writer.Exec(`UPDATE ix_deferred SET deferred_at=?`, old)
+	ixTestNoBytesFor(a, time.Hour)
 	_ = a.ixDeadlineStep(ctx)
 	if paused(other) || !a.ixDeadlineSuspended(ctx, now) {
 		t.Fatal("a stalled queue was not let go")

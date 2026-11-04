@@ -21,7 +21,8 @@ import (
 // alternative of at least 480p (or, without sizes, the smallest above a
 // quarter of the bytes) is saved first as the message's file, if it is at
 // most 40% of the original's bytes. The original stays queued as an
-// upgrade that goes after everything else, held copies included. When it
+// upgrade that goes after everything else, held copies included, and
+// before confirmed copies (ix_order.go). When it
 // arrives and is verified, it replaces the lower quality (which is then
 // removed, unless the setting to keep it is on).
 //
@@ -295,10 +296,14 @@ func (a *App) ixRunLowq(ctx context.Context) {
 	}
 }
 
-// ixLowqStep lets the originals go once nothing else is waiting: no file
-// the engine could take now, none set aside by the deadline order, no held
-// copy still to be released.
+// ixLowqStep lets the originals go once every stage before them is done
+// (ix_order.go): no file the engine could take now, none set aside by the
+// deadline order, no held copy still to be released. Confirmed copies go
+// after them.
 func (a *App) ixLowqStep(ctx context.Context) error {
+	if a.ixIsGone() {
+		return nil // read-only: nothing downloads any more, so there is no order to keep
+	}
 	now := time.Now().UnixMilli()
 	rows, err := a.db.Reader.QueryContext(ctx, `SELECT group_id, message_id FROM ix_lowq WHERE state IN ('saved','released')`)
 	if err != nil {
@@ -332,17 +337,13 @@ func (a *App) ixLowqStep(ctx context.Context) error {
 	s := a.ixLoadSettings(ctx)
 	limit := 10
 	if s.LowqFirst {
-		var waiting int
-		if err := a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM tgdl_work WHERE status='pending' AND paused=0 AND retry_at<=?`, now).Scan(&waiting); err != nil {
+		// After normal work, files set aside by the deadline order and
+		// held copies; before confirmed copies (ix_order.go).
+		o, err := a.ixOrderNow(ctx)
+		if err != nil {
 			return err
 		}
-		waiting += a.ixDeferredWaiting(ctx)
-		if !s.HoldForever {
-			var held int
-			_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM ix_held h JOIN tgdl_work w ON w.id=h.work_id WHERE h.released_at=0 AND h.reason<>'' AND w.status='pending'`).Scan(&held)
-			waiting += held
-		}
-		if waiting > 0 {
+		if !o.clearBefore(ixStageLowq) {
 			return nil
 		}
 	} else {
