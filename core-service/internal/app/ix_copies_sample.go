@@ -471,10 +471,12 @@ func (a *App) ixSampleCheck(ctx context.Context, r ixCopyReader, msg *tg.Message
 	// The check's clock: its own time (not the waits for parts) and the
 	// time in all.
 	started := time.Now()
-	clockDone := make(chan struct{})
-	defer close(clockDone)
+	tick, own, all := ixSampleClockTick, ixSampleTimeout, ixSampleHardTimeout
+	clockDone, clockGone := make(chan struct{}), make(chan struct{})
+	defer func() { close(clockDone); <-clockGone }()
 	go func() {
-		t := time.NewTicker(ixSampleClockTick)
+		defer close(clockGone)
+		t := time.NewTicker(tick)
 		defer t.Stop()
 		for {
 			select {
@@ -483,11 +485,11 @@ func (a *App) ixSampleCheck(ctx context.Context, r ixCopyReader, msg *tg.Message
 			case <-ctx.Done():
 				return
 			case now := <-t.C:
-				switch all := now.Sub(started); {
-				case all > ixSampleHardTimeout:
+				switch spent := now.Sub(started); {
+				case spent > all:
 					cancel(errIxSampleHardLimit)
 					return
-				case all-file.waitedNow(now) > ixSampleTimeout:
+				case spent-file.waitedNow(now) > own:
 					cancel(errIxSampleTimeout)
 					return
 				}
