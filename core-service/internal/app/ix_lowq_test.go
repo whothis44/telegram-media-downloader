@@ -336,12 +336,23 @@ func TestIxStagedDownloadArrivesThroughTheApp(t *testing.T) {
 	if err != nil || !rec.Staged {
 		t.Fatalf("not staged: %+v %v", rec, err)
 	}
+	// Waiting to be copied, unless the app's own mover was quicker.
 	if st := a.ixStagingStatus(ctx); !st.On || st.Waiting != 1 {
-		t.Fatalf("status: %+v", st)
+		var moved int
+		_ = a.db.Reader.QueryRow(`SELECT COUNT(*) FROM downloads WHERE file_path=?`, rec.Path).Scan(&moved)
+		if !st.On || st.Waiting != 0 || moved != 1 {
+			t.Fatalf("status: %+v", st)
+		}
 	}
-	a.library.MoveStaged(ctx)
+	// The app's own mover may have looked first, while the download still
+	// held its locks, and put the move off for a while (errStageLater): bring
+	// it forward and move it here.
 	var n int
-	_ = a.db.Reader.QueryRow(`SELECT COUNT(*) FROM downloads WHERE file_path=?`, rec.Path).Scan(&n)
+	for try := 0; try < 3 && n != 1; try++ {
+		_, _ = a.db.Writer.Exec(`UPDATE tgdl_stage_moves SET next_at=0 WHERE state='waiting'`)
+		a.library.MoveStaged(ctx)
+		_ = a.db.Reader.QueryRow(`SELECT COUNT(*) FROM downloads WHERE file_path=?`, rec.Path).Scan(&n)
+	}
 	if n != 1 {
 		t.Fatal("not catalogued after the move")
 	}
