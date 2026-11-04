@@ -180,7 +180,7 @@ func claimFilter(accounts []string, now time.Time, manualOnly bool) (string, []a
 	if manualOnly {
 		origin, sOrigin = " AND origin<>'live'", " AND s.origin<>'live'"
 	}
-	where := `status='pending' AND paused=0 AND (SELECT paused FROM tgdl_queue_state WHERE id=1)=0 AND account_id IN (` + marks + `) AND retry_at<=?` + origin
+	where := `status='pending' AND paused=0 AND (SELECT paused FROM tgdl_queue_state WHERE id=1)=0 AND +account_id IN (` + marks + `) AND retry_at<=?` + origin
 	if n := BigFileLane(); n > 0 {
 		where += ` AND (ttl_seconds>0 OR file_size<? OR (SELECT COUNT(*) FROM tgdl_work b WHERE b.status='processing' AND b.file_size>=? AND b.ttl_seconds=0)
 	 < CASE WHEN EXISTS (SELECT 1 FROM tgdl_work s WHERE s.status='pending' AND s.paused=0 AND s.account_id IN (` + marks + `) AND s.retry_at<=?` + sOrigin + `
