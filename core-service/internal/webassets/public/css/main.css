@@ -848,6 +848,30 @@ html.theme-light .status-chip .status-chip-val {
         display: none;
     }
 }
+/* What downloads are doing: a dot in the verdict's colour; the word turns
+   red only when something needs a look. */
+.status-dl-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--tg-green, #4fae4e);
+}
+#status-dl-chip[data-verdict='filling'] .status-dl-dot {
+    background: var(--tg-blue, #2aabee);
+}
+#status-dl-chip[data-verdict='speed-limited'] .status-dl-dot,
+#status-dl-chip[data-verdict='paused'] .status-dl-dot {
+    background: var(--tg-orange, #ff9800);
+}
+#status-dl-chip[data-verdict='readonly'] .status-dl-dot {
+    background: #8b9baa;
+}
+#status-dl-chip[data-verdict='stalled'] .status-dl-dot {
+    background: var(--tg-red, #e53935);
+}
+#status-dl-chip[data-verdict='stalled'] #status-dl-word {
+    color: var(--tg-red, #e53935) !important;
+}
 
 /* Engine/queue/maintenance pills + status colours */
 html.theme-light .bg-tg-blue\/10 {
