@@ -28,9 +28,14 @@ import (
 // One error is not enough: gotd connections to another data centre (file
 // downloads) can answer AUTH_KEY_UNREGISTERED for a while after a reconnect
 // or an authorization export, while the account is fine. So before the mode
-// starts, a cheap call on the account's main connection (the freeze check,
-// help.getAppConfig) must fail the same way; while the engine is running
-// and that call works, the errors are ignored. When no such call can be
+// starts, a cheap call that needs a logged-in session, on the account's main
+// connection (users.getUsers for the account itself; see
+// telegram.Account.SessionCheck), must fail the same way; while the engine
+// is running and that call works, the errors are ignored. (The freeze
+// check, help.getAppConfig, proves nothing here: Telegram answers it on a
+// connection that is not logged in.) A frozen account is not gone: it may
+// still make that call, and a FROZEN_* answer comes only to a logged-in
+// session, so it counts as working. When no such call can be
 // made (the engine is down, as when the main connection itself failed), the
 // error must have repeated: on at least ixGoneItems different items (queue
 // items, backfills, engine runs) over at least ixGoneSpan.
@@ -60,19 +65,32 @@ var (
 )
 
 // ixGoneProbe asks Telegram on the account's main connection whether the
-// session still works (the freeze check: a cheap call). errIxNoProbe: no
-// call could be made.
+// session still works, with a call only a logged-in session can make. nil:
+// it works; an error ixDeactivatedRe matches: it is gone; errIxNoProbe: no
+// call could be made, or the answer says neither.
 var ixGoneProbe = func(a *App, ctx context.Context) error {
 	if a.monitor == nil || a.monitor.RequireRunning() != nil {
 		return errIxNoProbe
 	}
-	if err := a.ixCheckFreeze(ctx); err != nil {
-		if ixDeactivatedRe.MatchString(err.Error()) {
-			return err
-		}
-		return fmt.Errorf("%w: %v", errIxNoProbe, err)
+	session, err := a.monitor.OpenHistory(ctx, "")
+	if err == nil {
+		err = session.SessionCheck()
+		session.Close()
 	}
-	return nil
+	return ixGoneProbeAnswer(err)
+}
+
+// ixGoneProbeAnswer reads the answer to the live check.
+func ixGoneProbeAnswer(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case ixDeactivatedRe.MatchString(err.Error()):
+		return err
+	case ixFrozenRe.MatchString(err.Error()):
+		return nil // frozen, but logged in: the account is there
+	}
+	return fmt.Errorf("%w: %v", errIxNoProbe, err)
 }
 
 var errIxNoProbe = errors.New("no live check of the Telegram session could be made")

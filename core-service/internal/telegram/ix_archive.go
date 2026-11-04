@@ -7,6 +7,7 @@ import (
 
 	gotd "github.com/gotd/td/telegram"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 )
 
 // Archive additions: the account's freeze state, messages read by ID (to
@@ -34,6 +35,22 @@ func (a *Account) FreezeState(ctx context.Context) (FreezeState, error) {
 		return FreezeState{}, errors.New("Telegram sent no app configuration")
 	}
 	return freezeFromConfig(cfg.Config), nil
+}
+
+// SessionCheck makes a call that only an authorized session can make, to
+// tell a working session from a dead one (help.getAppConfig, the freeze
+// check, also answers a connection that is not logged in): users.getUsers
+// for the account itself, and updates.getState should a frozen account be
+// refused that one (FROZEN_METHOD_INVALID). nil: the session is logged in.
+// A dead session gets AUTH_KEY_UNREGISTERED, USER_DEACTIVATED,
+// SESSION_REVOKED or the like.
+func (a *Account) SessionCheck(ctx context.Context) error {
+	_, err := a.API().UsersGetUsers(ctx, []tg.InputUserClass{&tg.InputUserSelf{}})
+	if err == nil || !tgerr.Is(err, "FROZEN_METHOD_INVALID") {
+		return err
+	}
+	_, err = a.API().UpdatesGetState(ctx)
+	return err
 }
 
 func freezeFromConfig(v tg.JSONValueClass) FreezeState {

@@ -384,41 +384,97 @@ func TestIxGoneNeedsTheMainConnectionToAgree(t *testing.T) {
 }
 
 // The live check through the engine: a running account whose main
-// connection answers keeps the engine running despite download errors.
+// connection answers a call that needs a logged-in session keeps the engine
+// running despite download errors; a frozen account counts as answering.
+// The freeze check (help.getAppConfig, answered without a login too) is
+// not the live check: a dead session that still answers it is gone.
 func TestIxGoneLiveCheckKeepsAWorkingEngineRunning(t *testing.T) {
-	var freeze atomic.Int64
-	factory := func(_ engine.AccountConfig, _ *telegram.UpdateState, handler func(context.Context, tg.UpdatesClass) error, _ func(int64)) (engine.Account, error) {
-		return &ixAliveAccount{fixtureAccount: fixtureAccount{handle: handler}, freeze: &freeze}, nil
+	for _, tc := range []struct {
+		name   string
+		answer error
+		gone   bool
+	}{
+		{"logged in", nil, false},
+		{"frozen", errors.New("rpc error code 420: FROZEN_METHOD_INVALID"), false},
+		{"dead session that still gets the app configuration", errors.New("rpc error code 401: AUTH_KEY_UNREGISTERED"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var freeze, checks atomic.Int64
+			factory := func(_ engine.AccountConfig, _ *telegram.UpdateState, handler func(context.Context, tg.UpdatesClass) error, _ func(int64)) (engine.Account, error) {
+				return &ixAliveAccount{fixtureAccount: fixtureAccount{handle: handler}, freeze: &freeze, checks: &checks, answer: tc.answer}, nil
+			}
+			ctx := context.Background()
+			a, err := newConfiguredTestApp(ctx, Config{DataDir: t.TempDir(), AccountFactory: factory})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer a.Close()
+			configureMonitor(t, a)
+			if err := os.MkdirAll(a.downloadsDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if rec := monitorRequest(t, a, "/api/monitor/start"); rec.Code != 200 {
+				t.Fatalf("start=%d %s", rec.Code, rec.Body.String())
+			}
+			if err := a.ixCheckFreeze(ctx); err != nil {
+				t.Fatalf("freeze check: %v", err)
+			}
+			now := time.Now()
+			for i := 0; i < 5; i++ {
+				ixGoneWorkError(t, a, 300+i, "rpc error code 401: AUTH_KEY_UNREGISTERED", now.Add(-time.Duration(30-5*i)*time.Minute))
+			}
+			a.ixGoneStep(ctx, now)
+			if a.ixIsGone() != tc.gone || checks.Load() != 1 {
+				t.Fatalf("gone %v, live checks %d", a.ixIsGone(), checks.Load())
+			}
+			if tc.gone {
+				if st := a.ixGoneState(); st.Code != "AUTH_KEY_UNREGISTERED" {
+					t.Fatalf("state: %+v", st)
+				}
+				return
+			}
+			if st, _ := a.monitor.Status(ctx); st["state"] != "running" {
+				t.Fatalf("engine %v", st["state"])
+			}
+		})
 	}
-	ctx := context.Background()
-	a, err := newConfiguredTestApp(ctx, Config{DataDir: t.TempDir(), AccountFactory: factory})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer a.Close()
-	configureMonitor(t, a)
-	if err := os.MkdirAll(a.downloadsDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if rec := monitorRequest(t, a, "/api/monitor/start"); rec.Code != 200 {
-		t.Fatalf("start=%d %s", rec.Code, rec.Body.String())
-	}
-	now := time.Now()
-	for i := 0; i < 5; i++ {
-		ixGoneWorkError(t, a, 300+i, "rpc error code 401: AUTH_KEY_UNREGISTERED", now.Add(-time.Duration(30-5*i)*time.Minute))
-	}
-	a.ixGoneStep(ctx, now)
-	if a.ixIsGone() || freeze.Load() != 1 {
-		t.Fatalf("gone %v, live checks %d", a.ixIsGone(), freeze.Load())
-	}
-	if st, _ := a.monitor.Status(ctx); st["state"] != "running" {
-		t.Fatalf("engine %v", st["state"])
+}
+
+func TestIxGoneProbeAnswer(t *testing.T) {
+	for in, want := range map[string]string{
+		"": "alive",
+		"rpc error code 401: AUTH_KEY_UNREGISTERED": "gone",
+		"rpc error code 401: SESSION_REVOKED":       "gone",
+		"rpc error code 400: USER_DEACTIVATED_BAN":  "gone",
+		"rpc error code 420: FROZEN_METHOD_INVALID": "alive",
+		"context deadline exceeded":                 "unknown",
+	} {
+		var err error
+		if in != "" {
+			err = errors.New(in)
+		}
+		got := ixGoneProbeAnswer(err)
+		switch want {
+		case "alive":
+			if got != nil {
+				t.Errorf("%q: %v", in, got)
+			}
+		case "gone":
+			if got == nil || errors.Is(got, errIxNoProbe) || !ixDeactivatedRe.MatchString(got.Error()) {
+				t.Errorf("%q: %v", in, got)
+			}
+		default:
+			if !errors.Is(got, errIxNoProbe) {
+				t.Errorf("%q: %v", in, got)
+			}
+		}
 	}
 }
 
 type ixAliveAccount struct {
 	fixtureAccount
-	freeze *atomic.Int64
+	freeze, checks *atomic.Int64
+	answer         error // to the session check
 }
 
 func (a *ixAliveAccount) RecoveryDialogs(context.Context, bool) ([]telegram.Dialog, error) {
@@ -433,7 +489,13 @@ func (a *ixAliveAccount) HistoryPage(context.Context, telegram.Dialog, telegram.
 	return telegram.HistoryPage{}, nil
 }
 
+// FreezeState answers, as help.getAppConfig does even without a login.
 func (a *ixAliveAccount) FreezeState(context.Context) (telegram.FreezeState, error) {
 	a.freeze.Add(1)
 	return telegram.FreezeState{}, nil
+}
+
+func (a *ixAliveAccount) SessionCheck(context.Context) error {
+	a.checks.Add(1)
+	return a.answer
 }
