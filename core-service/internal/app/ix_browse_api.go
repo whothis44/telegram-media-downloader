@@ -83,6 +83,8 @@ type ixJItem struct {
 	Sim      float32  `json:"sim,omitempty"`      // likeness (image recognition), 0 when not compared
 	Fixed    bool     `json:"fixed,omitempty"`    // a person placed it
 	OtherSet int32    `json:"otherSet,omitempty"` // elsewhere: that set's ID + 1
+	// Not downloaded, but Telegram's preview is kept (Thumb).
+	PreviewOnly bool `json:"previewOnly,omitempty"`
 }
 
 type ixJPost struct {
@@ -140,6 +142,9 @@ func (m *ixModel) jitem(ii int32) ixJItem {
 		j.Thumb = "/api/thumbs/" + strconv.FormatInt(it.ID, 10)
 	default:
 		j.Thumb = "/api/ix/preview?group=" + url.QueryEscape(it.Group) + "&msg=" + strconv.Itoa(it.Msg)
+		if u := ixCopyPreviewURL(it.Ident); u != "" && it.Key == "" {
+			j.Thumb, j.PreviewOnly = u, true // Telegram's 320 px preview, kept (ix_copies_ml.go)
+		}
 	}
 	if it.Path != "" {
 		j.Src = ixPathURL(it.Path)

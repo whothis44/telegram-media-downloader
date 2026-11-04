@@ -255,7 +255,9 @@ type ixCopiesKnown struct {
 type ixCopiesInfo struct {
 	Queue     ixCopiesQueue `json:"queue"`
 	Known     ixCopiesKnown `json:"known"`
-	Previews  int64         `json:"previews"` // Telegram previews kept for files not downloaded
+	Previews  int64         `json:"previews"`  // Telegram previews kept for files not downloaded
+	Threshold float64       `json:"threshold"` // likeness of previews that makes a probable copy
+	Calib     *ixCopyCalib  `json:"calibration,omitempty"`
 	At        int64         `json:"at,omitempty"`
 }
 
@@ -284,7 +286,7 @@ func (a *App) ixCopiesNow() ixCopiesInfo {
 // ixCopiesMeasure measures the queue now, with the last survey of the
 // messages, and keeps the result.
 func (a *App) ixCopiesMeasure(ctx context.Context) ixCopiesInfo {
-	info := ixCopiesInfo{At: time.Now().UnixMilli()}
+	info := ixCopiesInfo{Threshold: a.ixCopyThreshold(ctx), Calib: a.ixCopyCalibLast(ctx), At: time.Now().UnixMilli()}
 	info.Queue = a.ixCopiesQueueNow(ctx)
 	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM ix_copy_thumb WHERE path<>''`).Scan(&info.Previews)
 	box := a.ixCopies()
@@ -495,6 +497,7 @@ func ixSavedCopyOf(saved []ixSavedVideo, f ixCopyFacts) int {
 // ixRunCopies keeps the measurement current and runs the wider checks:
 // previews compared by recognition, and the first part of big held videos.
 func (a *App) ixRunCopies(ctx context.Context) {
+	a.ixLoadPreviewIdents(ctx)
 	wait := 90 * time.Second
 	for {
 		select {
@@ -542,6 +545,8 @@ func registerIxCopiesRoutes(mux *http.ServeMux, a *App) {
 	mux.Handle("GET /api/ix/copies", h(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, a.ixCopiesMeasure(r.Context()))
 	}))
+	mux.Handle("GET /api/ix/copies/preview", h(a.handleIxCopyPreview))
+	mux.Handle("POST /api/ix/copies/calibrate", h(a.handleIxCopyCalibrate))
 }
 
 // ixCopiesDiag is the diagnostics report's part: numbers only.

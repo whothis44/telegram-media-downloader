@@ -519,7 +519,11 @@ func (a *App) ixHeldTriage(ctx context.Context) error {
 					return err
 				}
 			case q.holdable():
-				ok, err := a.ixHoldWork(ctx, q.f, "queued", "", "", best.f.ID, 0, "looks like a copy of a queued file")
+				sim := 0.0 // likeness of the previews, when recognition looked at both
+				if !ixCheapSame(q.f, best.f) {
+					sim = ixCosine(q.f.Vec, best.f.Vec)
+				}
+				ok, err := a.ixHoldWork(ctx, q.f, "queued", "", "", best.f.ID, sim, "looks like a copy of a queued file")
 				if err != nil {
 					return err
 				}
