@@ -87,6 +87,8 @@ async function load() {
     state.status = r.data; state.error = '';
   } else state.error = 'Could not load: ' + errText(r);
   render();
+  // A start under way (from the button or when the archive started): follow it.
+  if (r.ok && r.data.mlStart && r.data.mlStart.running && !mlStartTimer) watchMLStart();
 }
 
 function groups() { return ((state.status && state.status.groups) || []).filter((g) => g.configured).sort((a, b) => natural(a.name, b.name)); }
@@ -381,6 +383,39 @@ function viewSearch() {
 }
 
 // ---------------- Settings ----------------
+// Starting the recognition services (Docker): the latest progress seen.
+const mlStartNow = () => state.mlStart || (state.status && state.status.mlStart) || {};
+function mlStartHtml() {
+  const st = mlStartNow();
+  if (!st.startedAt) return '';
+  const word = { running: 'running', started: 'started', missing: 'not installed', error: 'could not start' };
+  let h = st.running ? `<div>${esc(st.step || 'Starting…')}</div>`
+    : st.error ? `<div class="bad">${esc(st.error)}</div>`
+      : `<div class="muted">Last start: ${esc(fmtTime(st.finishedAt))}${st.auto ? ' (when the archive started)' : ''}</div>`;
+  for (const c of st.containers || []) {
+    const good = c.state === 'running' || c.state === 'started';
+    h += `<div>${esc(c.service)} (${esc(c.name)}): <span class="${good ? 'ok' : 'bad'}">${esc(word[c.state] || c.state)}</span>${c.message ? ' · ' + esc(c.message) : ''}</div>`;
+  }
+  return h;
+}
+let mlStartTimer = 0;
+// While a start is under way, only its lines are redrawn (not the settings
+// being edited); the whole page reloads once it is done.
+function watchMLStart() {
+  clearTimeout(mlStartTimer);
+  mlStartTimer = setTimeout(async () => {
+    const r = await api('GET', '/api/ix/ml/start');
+    if (r.ok && r.data) state.mlStart = r.data;
+    const st = mlStartNow();
+    const box = document.getElementById('ml-start');
+    if (box) box.innerHTML = mlStartHtml();
+    const btn = $app.querySelector('[data-act="ml-start"]');
+    if (btn) { btn.disabled = !!st.running; btn.textContent = st.running ? 'Starting…' : 'Start the recognition services'; }
+    if (r.ok && st.running) { watchMLStart(); return; }
+    if (!r.ok) state.mlMsg = 'Could not follow the start: ' + errText(r);
+    mlStartTimer = 0; state.mlStart = null; load();
+  }, 1500);
+}
 function viewSettings() {
   const s = state.status.settings;
   return `<div class="card"><h2>Diagnostics report</h2>
@@ -423,10 +458,13 @@ ${(() => {
   const line = (label, x) => x && x.on ? `<div>${label}: ${fmtNum(x.done || 0)} done, ${fmtNum(x.pending || 0)} to go${x.failed ? ', ' + fmtNum(x.failed) + ' unreadable' : ''}${x.lastError ? ` · <span class="bad">${esc(x.lastError)}</span>` : ''}</div>` : '';
   return `<div>${m.reachable ? '<span class="ok">Connected.</span>' : `<span class="bad">${esc(m.lastError || 'Not checked yet.')}</span>`} What pictures show: ${fmtNum(m.embedded || 0)} looked at, ${fmtNum(m.pending || 0)} to go${m.failed ? ', ' + fmtNum(m.failed) + ' unreadable' : ''}${m.running ? ' · working' : ''}.</div>${line('Text in pictures', t.text)}${line('Faces', t.faces)}`;
 })()}
-<div class="btns"><button class="b primary" data-act="set-save">Save settings</button><button class="b" data-act="ml-check">Check the connection</button></div>
+<div class="btns">Docker containers: image recognition <input class="t" data-set-text="mlContainer" value="${esc(s.mlContainer || 'immich-ml')}" placeholder="immich-ml" style="width:140px"> speech to text <input class="t" data-set-text="sttContainer" value="${esc(s.sttContainer || 'speaches')}" placeholder="speaches" style="width:140px"></div>
+<label><input type="checkbox" data-set="mlAutoStart" ${s.mlAutoStart ? 'checked' : ''}> Start them when the archive starts (Docker Desktop first, if it isn't running), and again every 30 minutes while they don't answer.</label>
+<div class="btns"><button class="b primary" data-act="set-save">Save settings</button><button class="b" data-act="ml-check">Check the connection</button>${(() => { const busy = mlStartNow().running; return `<button class="b" data-act="ml-start" ${busy ? 'disabled' : ''}>${busy ? 'Starting…' : 'Start the recognition services'}</button>`; })()}</div>
+<div id="ml-start">${mlStartHtml()}</div>
 ${state.mlMsg ? `<div class="muted">${esc(state.mlMsg)}</div>` : ''}</div>
 <div class="card"><h2>Speech to text (optional)</h2>
-<div class="muted">Writes out what is said in voice notes, audio and videos, so the search finds it and the browser shows it next to the file. It uses a Whisper server (speaches) in a second Docker container on this PC; nothing is sent anywhere else. Many languages are recognised on their own. Only the first 90 minutes of a recording are written out. Instructions: docs/image-recognition.md.</div>
+<div class="muted">Writes out what is said in voice notes, audio and videos, so the search finds it and the browser shows it next to the file. It uses a Whisper server (speaches) in a second Docker container on this PC; nothing is sent anywhere else. Many languages are recognised on their own. Only the first 90 minutes of a recording are written out. Instructions: docs/image-recognition.md. “Start the recognition services”, under Image recognition, starts this container too.</div>
 <div class="btns">Address: <input class="t" data-set-text="sttUrl" value="${esc(s.sttUrl || '')}" placeholder="http://127.0.0.1:8000 (empty = off)" style="flex:1;min-width:240px"></div>
 <div class="btns">Model: <input class="t" data-set-text="sttModel" value="${esc(s.sttModel || '')}" placeholder="Systran/faster-whisper-large-v3" style="flex:1;min-width:240px"></div>
 ${(() => { const x = (state.status.ml || {}).speech || {}; if (!x.on) return ''; return `<div>${x.reachable ? '<span class="ok">Connected.</span>' : `<span class="bad">${esc(x.lastError || 'Not checked yet.')}</span>`} ${fmtNum(x.done || 0)} written out, ${fmtNum(x.pending || 0)} to go${x.failed ? ', ' + fmtNum(x.failed) + ' unreadable' : ''}.</div>`; })()}
@@ -605,6 +643,12 @@ $app.addEventListener('click', async (ev) => {
       const r = await api('POST', '/api/ix/ml/check');
       state.mlMsg = r.ok ? 'Image recognition works.' : 'Image recognition: ' + errText(r);
       load(); break;
+    }
+    case 'ml-start': {
+      state.mlMsg = '';
+      const r = await api('POST', '/api/ix/ml/start');
+      if (!r.ok) { state.mlMsg = 'Could not start the services: ' + errText(r); render(); break; }
+      state.mlStart = r.data.status; render(); watchMLStart(); break;
     }
     case 'stt-check': {
       state.sttMsg = 'Checking (the first time, the service downloads its model, about 3 GB: this can take a while)…'; render();

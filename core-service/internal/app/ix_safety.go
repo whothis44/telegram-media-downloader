@@ -47,9 +47,9 @@ type ixSettings struct {
 	STTModel      string `json:"sttModel"`      // its model; empty: ixSTTDefaultModel
 	// The Docker containers of the two services (see ix_docker.go), and
 	// whether the archive starts them when it starts.
-	MLContainer  string `json:"mlContainer"`
-	STTContainer string `json:"sttContainer"`
-	MLAutoStart  bool   `json:"mlAutoStart"`
+	MLContainer   string `json:"mlContainer"`
+	STTContainer  string `json:"sttContainer"`
+	MLAutoStart   bool   `json:"mlAutoStart"`
 	DeadlineOrder string `json:"deadlineOrder"` // auto (when the backup would not finish before deletion), on, off
 	// DownloadPacing lets the download pacer set how many file parts are in
 	// flight (ix.9); off goes back to how ix.8 downloaded.

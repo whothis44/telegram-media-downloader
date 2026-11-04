@@ -105,6 +105,24 @@ The archive then looks at each distinct picture once, in the background. Duplica
 When idle for 5 minutes, the service frees the memory its models use. To stop it: `docker stop immich-ml`; to
 start it again: `docker start immich-ml`.
 
+### Starting the services without PowerShell
+
+Both containers are made with `--restart unless-stopped`, so they start by themselves whenever Docker does. What
+usually stops them is that Docker Desktop isn't running after the PC restarts. Three ways to deal with it:
+
+- **The button.** In **Archive → Settings → Image recognition**, press **Start the recognition services**. The
+  archive starts Docker Desktop if it isn't running (and waits up to 3 minutes for it), then starts each container
+  that is stopped: `immich-ml` when image recognition has an address, `speaches` when speech to text has one. It
+  then says, for each one, whether it was already running, was started, or isn't installed (then follow the steps
+  above to install it). If you named your containers differently, enter the names under **Docker containers**.
+- **Start them when the archive starts** (off by default). The archive does the same by itself a few seconds after
+  it starts, and again at most every 30 minutes while a service doesn't answer.
+- **Docker's own setting.** In Docker Desktop, tick Settings → General → **Start Docker Desktop when you sign in to
+  your computer**. Docker then starts with Windows and brings the containers up with it, without the archive.
+
+The archive only runs the `docker` program (and Docker Desktop) with fixed commands and the container names from
+Settings. It never runs anything else.
+
 ## What else the same service does
 
 Turn each of these on or off in **Archive → Settings → Image recognition**:
