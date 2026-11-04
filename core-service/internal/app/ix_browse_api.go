@@ -44,6 +44,7 @@ func registerIxBrowseRoutes(mux *http.ServeMux, a *App) {
 	mux.Handle("POST /api/ix/freeze/check", h(a.handleIxFreezeCheck))
 	mux.Handle("GET /api/ix/diagnostics", h(a.handleIxDiagnostics))
 	registerIxSetRoutes(mux, a)
+	registerIxAlbumRoutes(mux, a)
 	mux.Handle("GET /api/ix/browse/people", h(a.handleIxPeople))
 	mux.Handle("GET /api/ix/browse/person", h(a.handleIxPerson))
 	mux.Handle("POST /api/ix/browse/person/{id}", h(a.handleIxPersonChange))
@@ -85,6 +86,7 @@ type ixJItem struct {
 	OtherSet int32    `json:"otherSet,omitempty"` // elsewhere: that set's ID + 1
 	// Not downloaded, but Telegram's preview is kept (Thumb).
 	PreviewOnly bool `json:"previewOnly,omitempty"`
+	Inferred    bool `json:"inferred,omitempty"` // a lone file placed in the album beside it
 }
 
 type ixJPost struct {
@@ -136,7 +138,7 @@ func ixPathURL(rel string) string {
 
 func (m *ixModel) jitem(ii int32) ixJItem {
 	it := &m.Items[ii]
-	j := ixJItem{ID: it.ID, Key: it.Key, Type: it.Type, W: it.W, H: it.H, Dur: it.Dur, Size: it.Size, Status: it.Status, Group: it.Group, Msg: it.Msg, Name: it.Name}
+	j := ixJItem{ID: it.ID, Key: it.Key, Type: it.Type, W: it.W, H: it.H, Dur: it.Dur, Size: it.Size, Status: it.Status, Group: it.Group, Msg: it.Msg, Name: it.Name, Inferred: it.Placed}
 	switch {
 	case it.Thumb && it.Key != "":
 		j.Thumb = "/api/ix/thumb?key=" + url.QueryEscape(it.Key)
@@ -310,6 +312,7 @@ type ixFeedQuery struct {
 	Status     string
 	Collection int64
 	Person     []int64 // all of them in one post (person=1,7)
+	Unique     bool    // only posts with a file no other chat has
 	From, To   int64
 	Cursor     int
 	Limit      int
@@ -321,7 +324,7 @@ type ixFeedQuery struct {
 func ixParseFeed(r *http.Request) ixFeedQuery {
 	q := r.URL.Query()
 	f := ixFeedQuery{View: q.Get("view"), Group: q.Get("group"), Category: q.Get("category"), Type: q.Get("type"), Sort: q.Get("sort"), Q: strings.TrimSpace(q.Get("q")),
-		Dups: q.Get("dups") == "1", Status: q.Get("status"), Match: q.Get("match"), Rank: q.Get("rank") == "relevance"}
+		Dups: q.Get("dups") == "1", Status: q.Get("status"), Match: q.Get("match"), Rank: q.Get("rank") == "relevance", Unique: q.Get("unique") == "1"}
 	f.Collection, _ = strconv.ParseInt(q.Get("collection"), 10, 64)
 	for _, v := range strings.Split(q.Get("person"), ",") {
 		if id, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil && id > 0 && len(f.Person) < 4 {
@@ -359,6 +362,9 @@ func (m *ixModel) postMatches(pi int32, f ixFeedQuery, hits map[int32]bool) bool
 		return false
 	}
 	if f.Dups && (p.Family < 0 || len(m.Families[p.Family].Posts) < 2) {
+		return false
+	}
+	if f.Unique && !m.ixPostOnlyHere(pi) {
 		return false
 	}
 	if f.Type == "album" && len(p.Items) < 2 {

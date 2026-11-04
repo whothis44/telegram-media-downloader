@@ -118,7 +118,7 @@ func (a *App) handleIxBrowseSet(w http.ResponseWriter, r *http.Request) {
 		}
 		fams = append(fams, f)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"set": card, "anchor": s.Anchor, "items": items, "families": fams, "from": from, "next": ixNextPage(to, len(s.Families)), "totalFamilies": len(s.Families), "compared": a.ixEmbSim() != nil})
+	writeJSON(w, http.StatusOK, map[string]any{"set": card, "anchor": s.Anchor, "items": items, "families": fams, "from": from, "next": ixNextPage(to, len(s.Families)), "totalFamilies": len(s.Families), "compared": a.ixEmbSim() != nil, "looseSim": m.LooseSim})
 }
 
 func (a *App) handleIxSetPost(w http.ResponseWriter, r *http.Request) {

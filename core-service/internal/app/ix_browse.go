@@ -26,7 +26,8 @@ import (
 // family, so overlapping albums merge. Anything else starts a family.
 // Clusters seen in more than 50 posts across more than 10 chats (logos,
 // stickers, promo cards) are "generic" and ignored, so they cannot weld
-// unrelated posts together.
+// unrelated posts together; a popular album's files, which travel with
+// the same siblings each time, are not (ix_generic.go).
 
 const (
 	ixGenericPosts  = 50
@@ -52,6 +53,7 @@ type ixMItem struct {
 	Thumb   bool   // the picture index made a grid thumbnail
 	Ident   string // not downloaded: Telegram's file identity (kind:id:size)
 	Post    int32
+	Placed  bool // a lone file placed in the album beside it (ix_orphans.go)
 }
 
 type ixMPost struct {
@@ -114,6 +116,13 @@ type ixModel struct {
 	PersonName   map[int64]string
 	PersonHidden map[int64]bool // hidden people (a presenter, a cartoon) do not tie sets together
 	FamSet       []int32        // family -> set (-1: none)
+
+	// Albums, lone files and overlapping chats (ix_albums.go and siblings).
+	EmbSim     func(a, b string) (float32, bool) // image embeddings alone (nil: off)
+	LooseSim   float32                           // likeness below which a one-off file is unlike a set
+	Soft       []ixSoftPair                      // look-alike pairs nobody has decided, and clips
+	SameAlbums []ixAlbumSug                      // albums that look the same, for review
+	Overlap    *ixOverlap                        // which chats repeat which
 }
 
 type ixModelBox struct {
@@ -216,12 +225,12 @@ func (a *App) ixRunBrowse(ctx context.Context) {
 		box.mu.Lock()
 		m := box.model
 		box.mu.Unlock()
-		if m != nil && a.ixModelStamp(ctx) == m.Stamp {
-			continue
+		if m == nil || a.ixModelStamp(ctx) != m.Stamp {
+			if _, err := a.ixRebuildModel(ctx); err != nil && ctx.Err() == nil {
+				a.ixLog("browser index: %v", err)
+			}
 		}
-		if _, err := a.ixRebuildModel(ctx); err != nil && ctx.Err() == nil {
-			a.ixLog("browser index: %v", err)
-		}
+		a.ixLoneRun(ctx, a.ixModelLast(), time.Minute) // lone files that look like an album (ix_lone.go)
 	}
 }
 
@@ -418,12 +427,23 @@ func (a *App) ixBuildModel(ctx context.Context) (*ixModel, error) {
 		}
 		return orphan[i].item.Msg < orphan[j].item.Msg
 	})
+	// Unless it sits inside an album of its chat (ix_orphans.go).
+	near, nearDone := a.ixOrphanNear(ctx)
+	placer := newIxOrphanPlacer(m, near, a.ixOrphansOut(ctx))
 	for _, f := range orphan {
+		if pi := placer.place(f.item.Group, f.item.Msg, f.created); pi >= 0 {
+			f.item.Placed = true
+			addItem(&m.Posts[pi], f.item)
+			ixPlaceInAlbum(m, pi, f.item.Msg)
+			m.ByMsg[f.item.Group+":"+strconv.Itoa(f.item.Msg)] = pi
+			continue
+		}
 		pi := int32(len(m.Posts))
 		m.Posts = append(m.Posts, ixMPost{Idx: pi, Group: f.item.Group, Msg: f.item.Msg, Msgs: []int{f.item.Msg}, Date: f.created, Origin: f.created, Family: -1, Orphan: true})
 		m.ByMsg[f.item.Group+":"+strconv.Itoa(f.item.Msg)] = pi
 		addItem(&m.Posts[pi], f.item)
 	}
+	nearDone()
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
@@ -513,12 +533,16 @@ func (a *App) ixBuildModel(ctx context.Context) (*ixModel, error) {
 			}
 		}
 		c.Posts, c.Chats = len(posts), len(chats)
-		c.Generic = c.Posts > ixGenericPosts && c.Chats > ixGenericChats
 	}
+	ixMarkGeneric(m) // logos and stickers, told from popular albums (ix_generic.go)
 	ixAssignFamilies(m)
 	m.Suggest = ixContentSuggestions(m)
+	m.Overlap = ixComputeOverlap(m)
 	a.ixLoadPeople(ctx, m)
-	ixAssignSets(m, a.ixLoadSetFixes(ctx), ixSetLikeness(m, a.ixEmbSim()))
+	m.EmbSim = a.ixEmbSim()
+	m.Soft = a.ixLoadSoftPairs(ctx)
+	ixAssignSets(m, a.ixLoadSetFixes(ctx), ixSetLikeness(m, m.EmbSim))
+	m.SameAlbums = ixSameAlbums(m, a.ixAlbumDecided(ctx), nil)
 	m.Built = time.Now()
 	m.Took = time.Since(start)
 	return m, nil

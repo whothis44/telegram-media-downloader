@@ -42,7 +42,7 @@ func ixNowMs() int64 { return time.Now().UnixMilli() }
 const (
 	ixSetMaxShare = 50   // a file in more families than this links nothing
 	ixSetTieW     = 10.0 // weight of a tie a person made
-	ixSetLooseSim = 0.62 // cosine below which a one-off file is unlike the set's core
+	ixSetLooseSim = 0.62 // cosine below which a one-off file is unlike the set's core (when the model's own bar cannot be measured)
 )
 
 type ixSetItem struct {
@@ -70,6 +70,7 @@ type ixSetFixes struct {
 	alone map[string]bool              // post ref -> taken out of any set
 	ties  [][2]string                  // post refs tied together
 	item  map[string]map[string]string // set anchor -> file key -> in/out
+	apart [][2]string                  // post refs whose albums a person said differ: look-alikes never link them
 }
 
 func (a *App) ixLoadSetFixes(ctx context.Context) ixSetFixes {
@@ -102,6 +103,7 @@ func (a *App) ixLoadSetFixes(ctx context.Context) ixSetFixes {
 		}
 		rows.Close()
 	}
+	a.ixLoadAlbumFixes(ctx, &f)
 	return f
 }
 
@@ -328,6 +330,17 @@ func ixAssignSets(m *ixModel, fixes ixSetFixes, sim func(a, b string) (float32, 
 			}
 		}
 	}
+	// Look-alike pairs nobody has decided link families too, more weakly
+	// (ix_shoots.go), except albums a person said differ.
+	apart := map[[2]int32]bool{}
+	for _, t := range fixes.apart {
+		if a, ok := famOfPost[t[0]]; ok {
+			if b, ok := famOfPost[t[1]]; ok {
+				apart[ixFamPair(a, b)] = true
+			}
+		}
+	}
+	ixAddSoftLinks(m, holders, alone, apart, weights)
 	for _, t := range fixes.ties {
 		a, okA := famOfPost[t[0]]
 		b, okB := famOfPost[t[1]]
@@ -406,6 +419,8 @@ func ixAssignSets(m *ixModel, fixes ixSetFixes, sim func(a, b string) (float32, 
 		}
 		return out
 	}
+	cores := make([][]string, len(m.Sets))           // each set's core files
+	fixes1 := make([]map[string]string, len(m.Sets)) // each set's placements by a person
 	for si := range m.Sets {
 		s := &m.Sets[si]
 		chats, posts := map[string]bool{}, 0
@@ -465,6 +480,13 @@ func ixAssignSets(m *ixModel, fixes ixSetFixes, sim func(a, b string) (float32, 
 			}
 			s.Items = append(s.Items, it)
 		}
+		cores[si], fixes1[si] = core, fixed
+	}
+	// The bar for "loose" follows the model in use: how close core files are
+	// to one another (ix_loose.go).
+	m.LooseSim = ixLooseThreshold(m.EmbSim, cores)
+	for si := range m.Sets {
+		s, core, fixed := &m.Sets[si], cores[si], fixes1[si]
 		// One-offs unlike every core file are loose, when pictures can be
 		// compared.
 		if sim != nil && len(core) > 0 {
@@ -485,7 +507,7 @@ func ixAssignSets(m *ixModel, fixes ixSetFixes, sim func(a, b string) (float32, 
 				}
 				if compared {
 					it.Sim = best
-					if best < ixSetLooseSim {
+					if best < m.LooseSim {
 						it.Role = "loose"
 					}
 				}

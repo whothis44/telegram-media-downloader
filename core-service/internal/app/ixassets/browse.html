@@ -21,7 +21,7 @@ aside{border-right:1px solid var(--line);padding:10px 8px 40px;overflow:auto;max
 aside h3{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin:12px 8px 4px}
 .side-item{display:flex;justify-content:space-between;gap:6px;padding:4px 8px;border-radius:7px;cursor:pointer;font-size:13.5px;word-break:break-word}
 .side-item:hover{background:var(--soft)}.side-item.on{background:var(--accent);color:var(--accent-fg)}.side-item .c{color:var(--muted);font-size:12px;white-space:nowrap}.side-item.on .c{color:var(--accent-fg)}
-.side-item.cat{font-weight:600}
+.side-item.cat{font-weight:600}.side-item .ov{color:var(--muted);font-size:11px;margin-left:5px;cursor:help;white-space:nowrap}.side-item.on .ov{color:var(--accent-fg)}
 main{padding:10px 16px 60px;min-width:0}
 .bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}
 input.t,select.t{padding:6px 9px;border-radius:8px;border:1px solid var(--line);background:var(--soft);font-size:14px}
@@ -57,7 +57,7 @@ button.b:disabled{opacity:.5;cursor:default}button.link{border:0;background:none
 .tile .lab.r{left:auto;right:5px}.tile .lab.t{bottom:auto;top:5px}
 .tile .lab.like{left:auto;right:5px;bottom:27px;cursor:pointer;display:none;font-size:13px;padding:0 7px}.tile:hover .lab.like,.tile:focus .lab.like{display:block}
 @media (hover:none){.tile .lab.like{display:block}}
-.tile .lab.new{background:var(--new)}.tile .lab.held{background:#9a6700}.tile .lab.miss{background:#a4262c}
+.tile .lab.placed{background:#2f6f8f}.tile .lab.new{background:var(--new)}.tile .lab.held{background:#9a6700}.tile .lab.miss{background:#a4262c}
 .tile.held img,.tile.missing img{filter:blur(1.5px) grayscale(.3);opacity:.75}
 .tile .doc{display:flex;align-items:center;justify-content:center;height:100%;padding:8px;text-align:center;font-size:12px;color:var(--muted);word-break:break-all}
 .more{padding:6px 10px;font-size:12.5px;color:var(--muted)}
@@ -133,6 +133,7 @@ mark{background:#fff1a8;color:#111}
         <select class="t" id="sort"><option value="best" hidden>Best match first</option><option value="new">Newest first</option><option value="old">Oldest first</option></select>
         <label class="chk"><input type="checkbox" id="dups"> Only reposted</label>
         <span class="chk" title="Posted on or after the first day, and on or before the last (either can be left empty)">From <input class="t" type="date" id="from"> to <input class="t" type="date" id="to"></span>
+        <label class="chk" title="Posts with at least one file no other chat has"><input type="checkbox" id="uniq"> Not in other chats</label>
       </div>
       <div id="feed-note" class="muted" style="margin-bottom:8px"></div>
       <div id="feed" class="grid"></div>
@@ -147,10 +148,12 @@ mark{background:#fff1a8;color:#111}
         <button class="b" id="chat-newer">Load newer</button>
       </div>
       <div id="chat-info" class="note" hidden></div>
+      <div id="chat-overlap" class="note" hidden></div>
       <div class="chat" id="chat"></div>
     </section>
     <section id="v-review" hidden>
-      <p class="note">These pairs look alike but did not pass the automatic checks. Decide once and the browser remembers it. Keys: <b>1</b> same, keep left · <b>2</b> same, keep right · <b>S</b> same · <b>N</b> different · <b>→</b> skip. Nothing is deleted either way.</p>
+      <div class="seg" id="review-modes" style="margin-bottom:10px"><button data-rm="pairs" class="on">Look-alike pairs</button><button data-rm="albums">Same albums<span class="n" id="n-rv-albums"></span></button><button data-rm="lone">Lone files<span class="n" id="n-rv-lone"></span></button></div>
+      <p class="note" id="review-note">These pairs look alike but did not pass the automatic checks. Decide once and the browser remembers it. Keys: <b>1</b> same, keep left · <b>2</b> same, keep right · <b>S</b> same · <b>N</b> different · <b>→</b> skip. Nothing is deleted either way.</p>
       <div id="review"></div>
     </section>
     <section id="v-organise" hidden>
@@ -218,6 +221,7 @@ async function loadInfo() {
   $('#n-review').textContent = r.data.review ? r.data.review : '';
   renderSide();
   fillSelects();
+  loadOverlap();
 }
 function renderSide() {
   const info = S.info; if (!info) return;
@@ -228,7 +232,7 @@ function renderSide() {
   for (const cat of Object.keys(byCat).sort()) {
     const n = byCat[cat].reduce((a, g) => a + g.posts, 0);
     h += `<div class="side-item cat ${S.category === cat && !S.group ? 'on' : ''}" data-cat="${esc(cat)}"><span>${esc(cat)}</span><span class="c">${n.toLocaleString()}</span></div>`;
-    for (const g of byCat[cat]) h += `<div class="side-item ${S.group === g.id ? 'on' : ''}" data-group="${esc(g.id)}" style="padding-left:18px"><span>${esc(g.name)}</span><span class="c">${g.posts.toLocaleString()}</span></div>`;
+    for (const g of byCat[cat]) h += `<div class="side-item ${S.group === g.id ? 'on' : ''}" data-group="${esc(g.id)}" style="padding-left:18px"><span>${esc(g.name)}${overlapMark(g.id)}</span><span class="c">${g.posts.toLocaleString()}</span></div>`;
   }
   if (info.collections && info.collections.length) {
     h += `<h3>Collections</h3>`;
@@ -243,6 +247,7 @@ function renderSide() {
   tabOn('#tab-things', ml.enabled, 'What the pictures show, from a list of subjects', 'Image recognition is off: turn it on in Archive → Settings → Image recognition');
   tabOn('#tab-people', facesOn, 'Faces found in the pictures and videos, grouped by person', 'Faces are off: turn them on in Archive → Settings → Image recognition');
   h += `<h3>Index</h3><div class="muted" style="padding:0 8px">${(info.sets || 0).toLocaleString()} sets · ${info.families.toLocaleString()} originals · ${info.repostPosts.toLocaleString()} reposts folded in · ${info.mergedAlbums.toLocaleString()} merged albums · ${info.held} held back · ${info.missing.toLocaleString()} not downloaded<br>Pictures indexed: ${info.media.done.toLocaleString()} / ${info.media.total.toLocaleString()} · videos: ${info.videos.done.toLocaleString()} / ${info.videos.total.toLocaleString()}${mlLine}<br><button class="link" id="rebuild">Rebuild now</button></div>`;
+  h += overlapSideHTML();
   $('#side').innerHTML = h;
   $$('#side .side-item').forEach((el) => el.addEventListener('click', () => {
     S.group = el.dataset.group || ''; S.category = el.dataset.cat || ''; S.collection = Number(el.dataset.coll || 0);
@@ -313,6 +318,7 @@ function tileHTML(it, i, cardKey) {
   if (it.status === 'held') labs.push(`<span class="lab t held">waiting · likely copy</span>`);
   if (it.status === 'missing') labs.push(`<span class="lab t miss">not downloaded</span>`);
   if (it.previewOnly) labs.push(`<span class="lab t" title="Telegram's small preview is kept; the file is not downloaded">preview only</span>`);
+  if (it.inferred) labs.push(`<span class="lab t placed" title="Its message was not saved, but it sits inside this album">probably in this album</span>`);
   if (it.sim && S.showSim) labs.push(`<span class="lab sim" title="Likeness (image recognition)">${Math.round(it.sim * 100)}%</span>`);
   if (it.key && (it.type === 'photo' || it.type === 'video') && S.info && S.info.ml && S.info.ml.enabled) labs.push(`<span class="lab like" role="button" data-like="${esc(it.key)}" data-like-type="${esc(it.type)}" title="More like this">≈</span>`);
   const inner = (it.type === 'photo' || it.type === 'video' || it.status !== 'ok')
@@ -376,6 +382,7 @@ function feedURL() {
   const p = new URLSearchParams({ view: S.view, sort: S.sort === 'best' ? 'new' : S.sort, cursor: String(S.cursor), limit: S.view === 'media' ? '120' : '48' });
   for (const k of ['group', 'category', 'type', 'status']) if (S[k]) p.set(k, S[k]);
   if (S.dups) p.set('dups', '1');
+  if (S.unique) p.set('unique', '1');
   if (S.from) p.set('from', String(S.from));
   if (S.to) p.set('to', String(S.to));
   if (S.collection) p.set('collection', String(S.collection));
@@ -552,6 +559,7 @@ async function openItem(items, i) {
     ${x.key ? `<dt>File</dt><dd class="muted">${esc(x.key.startsWith('h:') ? 'SHA-256 ' + x.key.slice(2, 18) + '…' : x.key)}</dd>` : ''}</dl>
     <button class="link" data-open-chat="${esc(d.post.group)}:${d.post.msg}">Open in its chat</button>`;
   if (d.generic) h += `<p class="muted">This file appears in many unrelated posts (a logo or sticker), so it does not link posts together.</p>`;
+  h += placedNoteHTML(x);
   if (d.copies.length > 1) {
     h += `<b>${d.copies.length} copies in the archive</b>`;
     for (const c of d.copies) h += `<div class="copy"><img src="${esc(c.thumb)}" alt=""><div><b>${esc(c.groupName)}</b> · ${fmtDay(c.date)}${c.canon ? ' · <span class="ok">shown</span>' : ''}<br><span class="muted">${c.w ? c.w + '×' + c.h + ' · ' : ''}${fmtSize(c.size)} · ${esc(roleText[c.role] || c.role)}</span>
@@ -739,7 +747,7 @@ function switchTab(tab) {
   for (const v of ['browse', 'chat', 'review', 'organise', 'people', 'things', 'entities']) $('#v-' + v).hidden = v !== tab;
   if (tab === 'people') loadPeople();
   if (tab === 'things') loadThings();
-  if (tab === 'review') loadReview();
+  if (tab === 'review') { loadReview(); loadReviewCounts(); }
   if (tab === 'organise') loadOrganise();
   if (tab === 'entities') loadEntities();
   if (tab === 'chat' && !$('#chat-group').value && S.group) { $('#chat-group').value = S.group; openChat(S.group); }
@@ -754,6 +762,7 @@ async function openChatAt(group, msg) {
 }
 async function openChat(group, where = {}, highlight = 0) {
   C.group = group; C.msgs = []; C.highlight = highlight; $('#chat').innerHTML = '';
+  showChatOverlap(group);
   if (!group) return;
   await fetchChat(where, 'replace');
 }
@@ -818,6 +827,7 @@ $('#chat-date').addEventListener('change', () => { const v = $('#chat-date').val
 // ---------- review ----------
 const R = { pairs: [], i: 0 };
 async function loadReview() {
+  if (R.mode && R.mode !== 'pairs') { loadReviewExtra(); return; }
   const r = await api('GET', '/api/ix/browse/review');
   if (!r.ok) { $('#review').textContent = errText(r); return; }
   R.pairs = r.data.pairs; R.i = 0; renderReview();
@@ -835,6 +845,7 @@ function renderReview() {
   $$('#review [data-d]').forEach((b) => b.onclick = () => decide(b.dataset.d));
 }
 async function decide(d) {
+  if (R.mode && R.mode !== 'pairs') { reviewExtraKey(d); return; }
   const p = R.pairs[R.i]; if (!p) return;
   if (d !== 'skip') {
     const body = { a: p.a.key, b: p.b.key, decision: d === 'n' ? 'different' : 'same' };
@@ -913,6 +924,143 @@ async function openEntity(kind, value) {
   const mark = (t) => value ? esc(t).split(esc(value)).join(`<mark>${esc(value)}</mark>`) : esc(t);
   showDialog(value, `<p class="muted">${esc(kindName[kind] || kind)} · in ${e.count} message(s) across ${e.chats} chat(s)${e.count > r.data.hits.length ? ' · the first ' + r.data.hits.length + ' are listed' : ''}</p>` +
     r.data.hits.map((h) => `<div class="appear"><div><span class="muted">${fmtDate(h.date)}</span></div><div><b>${esc(h.groupName)}</b> · <button class="link" data-open-chat="${esc(h.group)}:${h.msg}">open in chat</button><div style="white-space:pre-wrap;word-break:break-word">${mark(h.text)}</div></div></div>`).join(''));
+}
+
+// ---------- albums: lone files, same albums, chat overlap ----------
+// A lone file shown in the album beside it can be taken out (and put back).
+function placedNoteHTML(x) {
+  if (!x.inferred) return '';
+  return `<p class="muted">This file's message was not saved, but it sits between messages of this album, so it is shown as probably part of it. <button class="link" data-placed="${esc(x.group)}:${x.msg}" data-placed-do="out">Not part of this album</button></p>`;
+}
+document.addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-placed]'); if (!b) return;
+  const [g, m] = b.dataset.placed.split(/:(?=[^:]*$)/);
+  const out = b.dataset.placedDo === 'out';
+  const r = await api('POST', '/api/ix/browse/orphan', { group: g, msg: Number(m), decision: out ? 'out' : 'auto' });
+  if (!r.ok) { toast(errText(r)); return; }
+  toast(out ? 'Noted: it stands alone. The browser updates in a moment.' : 'Back to automatic.');
+  b.dataset.placedDo = out ? 'auto' : 'out'; b.textContent = out ? 'Undo' : 'Not part of this album';
+});
+
+// The Review tab's other queues: lone files that look like an album, and
+// albums that look the same.
+const RX = { list: [], i: 0, pairsNote: '' };
+const reviewNotes = {
+  lone: 'Each of these files was posted on its own, but image recognition finds it very like the files of one album (and much less like any other). Keys: <b>S</b> yes, it belongs with this album · <b>N</b> no · <b>→</b> skip. Yes puts the post in the album\'s set; nothing is moved or deleted.',
+  albums: 'These albums were posted separately, often in different chats, but their files look the same (re-encoded, cropped or watermarked copies). One answer settles every matching pair. Keys: <b>S</b> the same album · <b>N</b> different · <b>→</b> skip. Nothing is deleted either way.',
+};
+$('#review-modes').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-rm]'); if (!b) return;
+  if (!RX.pairsNote) RX.pairsNote = $('#review-note').innerHTML;
+  R.mode = b.dataset.rm;
+  $$('#review-modes button').forEach((x) => x.classList.toggle('on', x === b));
+  $('#review-note').innerHTML = R.mode === 'pairs' ? RX.pairsNote : reviewNotes[R.mode];
+  loadReview();
+});
+async function loadReviewCounts() {
+  const [lone, albums] = await Promise.all([api('GET', '/api/ix/browse/review/lone'), api('GET', '/api/ix/browse/review/albums')]);
+  const n = (r, k) => (r.ok && r.data && r.data[k] ? r.data[k].length : 0);
+  $('#n-rv-lone').textContent = n(lone, 'lone') || ''; $('#n-rv-albums').textContent = n(albums, 'albums') || '';
+}
+async function loadReviewExtra() {
+  const r = await api('GET', '/api/ix/browse/review/' + R.mode);
+  if (!r.ok) { $('#review').textContent = errText(r); return; }
+  RX.list = r.data[R.mode] || []; RX.i = 0; renderReviewExtra();
+}
+function renderReviewExtra() {
+  const x = RX.list[RX.i];
+  if (!x) { $('#review').innerHTML = `<p class="muted">Nothing left to review${RX.list.length ? ' in this batch' : ''}.</p>`; loadReviewCounts(); return; }
+  const head = `<p class="muted">${RX.i + 1} of ${RX.list.length} in this batch</p>`;
+  if (R.mode === 'lone') {
+    const k = registerSet(x.album.items);
+    $('#review').innerHTML = head + `<h3 style="font-size:15px;margin:0 0 6px">Does this file belong with this album?</h3><p class="muted" style="margin:0 0 8px">${esc(x.why)}</p>
+      <div class="pair">${sideHTML(x.file, x.where, x.date)}<div class="side">${mosaicHTML(x.album.items, k)}<div class="m"><b>${esc(x.album.groupName)}</b> · ${fmtDay(x.album.date)} · ${x.albumFiles} file(s)${x.album.posts > 1 ? ' · ' + x.album.posts + ' posts' : ''}</div></div></div>
+      <div class="row" style="margin-top:10px"><button class="b primary" data-dx="s">S · Yes, it belongs with it</button><button class="b danger" data-dx="n">N · No</button><button class="b" data-dx="skip">→ Skip</button></div>`;
+  } else {
+    const ka = registerSet(x.a.items), kb = registerSet(x.b.items);
+    const side = (c, k, n) => `<div class="side">${mosaicHTML(c.items, k)}<div class="m"><b>${esc(c.groupName)}</b> · ${fmtDay(c.date)} · ${n} file(s)${c.posts > 1 ? ' · ' + c.posts + ' posts' : ''}</div></div>`;
+    $('#review').innerHTML = head + `<h3 style="font-size:15px;margin:0 0 6px">Are these two albums the same?</h3><p class="muted" style="margin:0 0 8px">${esc(x.why)}${x.matched ? ' · yes marks ' + x.matched + ' matching pair(s) as the same file' : ''}</p>
+      <div class="pair">${side(x.a, ka, x.aFiles)}${side(x.b, kb, x.bFiles)}</div>
+      <div class="row" style="margin-top:10px"><button class="b primary" data-dx="s">S · The same album</button><button class="b danger" data-dx="n">N · Different</button><button class="b" data-dx="skip">→ Skip</button></div>`;
+  }
+  $$('#review [data-dx]').forEach((b) => b.onclick = () => reviewExtraKey(b.dataset.dx));
+}
+async function reviewExtraKey(d) {
+  const x = RX.list[RX.i]; if (!x) return;
+  if (d === '1' || d === '2') d = 's';
+  if (d !== 'skip') {
+    const yes = d === 's';
+    const body = R.mode === 'lone' ? { post: x.post, decision: yes ? 'yes' : 'no' } : { a: x.a.group + ':' + x.a.msg, b: x.b.group + ':' + x.b.msg, decision: yes ? 'same' : 'different' };
+    const r = await api('POST', '/api/ix/browse/review/' + R.mode, body);
+    if (!r.ok) { toast(errText(r)); return; }
+  }
+  RX.i++; renderReviewExtra();
+}
+
+// Which chats repeat which: a mark per chat in the sidebar, a line above
+// a chat being read, and a ranked list of what each chat adds.
+const OV = { chats: {}, cover: [], loaded: 0 };
+const pct = (x) => Math.round((x || 0) * 100) + '%';
+async function loadOverlap() {
+  if (S.info && OV.loaded === S.info.built) return;
+  const r = await api('GET', '/api/ix/browse/overlap');
+  if (!r.ok) return;
+  OV.chats = {}; for (const c of r.data.chats || []) OV.chats[c.group] = c;
+  OV.cover = r.data.cover || []; OV.loaded = S.info ? S.info.built : 0;
+  renderSide();
+}
+function overlapSummary(c) {
+  if (!c) return '';
+  const parts = [];
+  if (c.top && c.top.share >= 0.05) parts.push(`${pct(c.top.share)} of this chat is also in ${c.top.name || 'another chat'}; ${c.top.name || 'that chat'} had it first ${pct(c.top.theyFirst)} of the time.`);
+  const kind = { mirror: `A mirror of ${c.withName || 'another chat'}: nearly everything is in both.`, reposter: `Mostly reposts ${c.withName || 'another chat'}.`, variety: 'A variety chat: most of it comes from several other chats.', unique: 'Mostly its own content.' }[c.class];
+  if (kind) parts.push(kind);
+  parts.push(`${c.unique.toLocaleString()} of its ${c.files.toLocaleString()} files are in no other chat${c.files - c.unique > 0 ? '; of the rest, it posted ' + pct(c.firstOf) + ' before any other chat' : ''}.`);
+  return parts.join(' ');
+}
+function overlapMark(group) {
+  const c = OV.chats[group]; if (!c || c.files < 5) return '';
+  const sym = { mirror: '⧉', reposter: '⧉', variety: '◇', unique: '★' }[c.class] || '·';
+  return `<span class="ov" data-overlap="${esc(group)}" title="${esc(overlapSummary(c))} Click for details.">${sym} ${pct(c.elsewhere)}</span>`;
+}
+function overlapSideHTML() {
+  if (!Object.keys(OV.chats).length) return '';
+  return `<h3>Chat overlap</h3><div class="muted" style="padding:0 8px">The share by each chat is how much of it is also in other chats (⧉ mostly one other chat, ◇ many, ★ mostly its own).<br><button class="link" id="overlap-all">What each chat adds</button></div>`;
+}
+$('#side').addEventListener('click', (e) => {
+  const m = e.target.closest('[data-overlap]');
+  if (m) { e.stopPropagation(); openOverlap(m.dataset.overlap); return; }
+  if (e.target.closest('#overlap-all')) { e.stopPropagation(); openOverlapAll(); }
+}, true);
+async function openOverlap(group) {
+  const r = await api('GET', '/api/ix/browse/overlap?group=' + encodeURIComponent(group));
+  if (!r.ok) { toast(errText(r)); return; }
+  const c = r.data.chat, rows = r.data.with || [];
+  let h = `<p>${esc(overlapSummary(c))}</p>${c.unique ? `<p><button class="link" data-ov-unique="${esc(group)}">Show the posts with files no other chat has</button></p>` : ''}`;
+  h += rows.length ? `<table><tr><th>Also in</th><th class="n">Files in both</th><th class="n">Of this chat</th><th class="n">Of that chat</th><th>Who had it first</th></tr>${rows.map((x) => `<tr><td>${esc(x.name || x.group)}</td><td class="n">${x.shared.toLocaleString()}</td><td class="n">${pct(x.share)}</td><td class="n">${pct(x.theirShare)}</td><td>${x.theyFirst > x.weFirst ? 'that chat, ' + pct(x.theyFirst) : x.weFirst > x.theyFirst ? 'this chat, ' + pct(x.weFirst) : 'even'}</td></tr>`).join('')}</table>` : '<p class="muted">No file of this chat is in any other chat.</p>';
+  showDialog(c.name, h);
+}
+async function openOverlapAll() {
+  await loadOverlap();
+  const cover = OV.cover, all = cover.length ? cover[cover.length - 1].total : 0;
+  const kindText = { mirror: 'mirror', reposter: 'reposter', variety: 'variety', unique: 'mostly its own', mixed: 'mixed' };
+  let h = `<p class="muted">Chats in the order that adds the most files not already seen: the first chat brings the most, each next one what it adds to those above. Chats near the end add little that the others do not already have. ${all.toLocaleString()} distinct files in all (copies counted once; logos and stickers left out).</p>`;
+  h += `<table><tr><th>#</th><th>Chat</th><th>Kind</th><th class="n">Adds</th><th class="n">Its files</th><th class="n">Seen so far</th><th>Mostly also in</th></tr>${cover.map((s, i) => { const c = OV.chats[s.group] || {}; return `<tr><td>${i + 1}</td><td><button class="link" data-ov-chat="${esc(s.group)}">${esc(s.name || s.group)}</button></td><td>${esc(kindText[c.class] || '')}</td><td class="n">${s.adds.toLocaleString()}</td><td class="n">${s.files.toLocaleString()}</td><td class="n">${all ? pct(s.total / all) : ''}</td><td>${c.top ? esc(c.top.name || c.top.group) + ' (' + pct(c.top.share) + ')' : ''}</td></tr>`; }).join('')}</table>`;
+  showDialog('What each chat adds', h);
+}
+document.addEventListener('click', (e) => {
+  const u = e.target.closest('[data-ov-unique]');
+  if (u) { S.group = u.dataset.ovUnique; S.category = ''; S.collection = 0; S.unique = true; $('#uniq').checked = true; dlg.close(); switchTab('browse'); renderSide(); resetFeed(); return; }
+  const c = e.target.closest('[data-ov-chat]');
+  if (c) openOverlap(c.dataset.ovChat);
+});
+$('#uniq').addEventListener('change', () => { S.unique = $('#uniq').checked; resetFeed(); });
+async function showChatOverlap(group) {
+  const el = $('#chat-overlap'); el.hidden = true; el.innerHTML = '';
+  if (!group) return;
+  if (!OV.chats[group]) await loadOverlap();
+  const c = OV.chats[group]; if (!c || C.group !== group) return;
+  el.innerHTML = esc(overlapSummary(c)) + ` <button class="link" data-ov-chat="${esc(group)}">details</button>`; el.hidden = false;
 }
 
 loadInfo().then(resetFeed);
