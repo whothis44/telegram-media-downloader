@@ -189,6 +189,7 @@ func (a *App) handleIxStatus(w http.ResponseWriter, r *http.Request) {
 		"deadline":  a.ixDeadlineEstimate(ctx, false),
 		"pictures":  a.ixMediaStatus(),
 		"backup":    a.ixBackupOverview(ctx),
+		"readonly":  a.ixGoneState(),
 	}
 	if exportErr != nil {
 		out["exportDirError"] = exportErr.Error()

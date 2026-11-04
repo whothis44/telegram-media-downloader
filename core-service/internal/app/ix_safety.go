@@ -251,6 +251,9 @@ func (a *App) ixRunSafety(ctx context.Context) {
 
 // ixHold explains why no new rescan may start right now ("" = go ahead).
 func (a *App) ixHold(ctx context.Context) string {
+	if why := a.ixGoneHold(); why != "" {
+		return why
+	}
 	acct := a.ixAccount()
 	if acct.Deactivated {
 		return "Paused: Telegram reports this account is logged out or deactivated (" + acct.LastError + ")."

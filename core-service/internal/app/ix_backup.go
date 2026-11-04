@@ -589,6 +589,7 @@ func ixParseBackupSettings(body map[string]any, s ixSettings) ixSettings {
 
 func registerIxBackupRoutes(mux *http.ServeMux, a *App) {
 	mux.Handle("POST /api/ix/backup", a.requireAdmin(http.HandlerFunc(a.handleIxBackup)))
+	mux.Handle("POST /api/ix/readonly/clear", a.requireAdmin(http.HandlerFunc(a.handleIxGoneClear)))
 }
 
 func (a *App) handleIxBackup(w http.ResponseWriter, r *http.Request) {

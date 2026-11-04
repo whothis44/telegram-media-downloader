@@ -99,6 +99,11 @@ function banner() {
   let h = '';
   const acct = s.account || {};
   const fz = s.freeze || {};
+  // Read-only archive (ix_gone.go): the other account banners no longer apply.
+  const ro = s.readonly || {};
+  if (ro.gone) {
+    return `<div class="status bad"><b>Telegram account gone: the archive is read-only now.</b> ${ro.reason === 'date' ? 'The deletion date has passed.' : `Telegram said ${esc(ro.code)}.`} The app has stopped all Telegram work (downloads, rescans, checks) and does not try the session again. Everything saved keeps working: the media browser, search, recognition, faces, the index copy and the nightly backups. See docs/archive-after-deletion.md. <button class="mini" data-act="readonly-clear">Try Telegram again</button></div>`;
+  }
   // The day before the deletion date (ix_final.go).
   const fin = (s.backup && s.backup.final) || {};
   if (fin.window) {
@@ -567,6 +572,10 @@ $app.addEventListener('click', async (ev) => {
       const r = await api('POST', '/api/ix/downloads/retry');
       state.dlMsg = r.ok ? `${fmtNum(r.data.retried)} file(s) put back in the queue.` : 'Could not retry: ' + errText(r);
       load(); break;
+    }
+    case 'readonly-clear': {
+      if (!confirm('Leave read-only mode and let the app connect to Telegram again? This only helps if the account still works (for example after an accepted appeal). If Telegram still refuses, the archive goes back to read-only.')) break;
+      const r = await api('POST', '/api/ix/readonly/clear'); if (!r.ok) state.error = errText(r); load(); break;
     }
     case 'backup-now': { const r = await api('POST', '/api/ix/backup'); if (!r.ok) state.error = errText(r); load(); break; }
     case 'export': { const r = await api('POST', '/api/ix/export'); if (!r.ok) state.error = errText(r); load(); break; }
