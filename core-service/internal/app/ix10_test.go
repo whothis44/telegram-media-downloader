@@ -103,3 +103,24 @@ func TestIxReportHidesWindowsPathsWithSpaces(t *testing.T) {
 		t.Fatalf("the error text after the path should stay: %q", out)
 	}
 }
+
+func TestIxRescanListCountsFilesStillToDownload(t *testing.T) {
+	a, ctx := ix8App(t, nil)
+	now := time.Now().UnixMilli()
+	for i, row := range []struct {
+		group, status string
+		paused        int
+	}{{"-1001", "pending", 0}, {"-1001", "processing", 0}, {"-1001", "pending", 1}, {"-1001", "completed", 0}, {"-1002", "completed", 0}} {
+		if _, err := a.db.Writer.Exec(`INSERT INTO tgdl_work(account_id,group_id,group_name,message_id,version,identity,media_type,file_name,file_size,body,status,origin,created_at,updated_at,paused)
+			VALUES('acc',?,'G',?,1,?,'video','f',1,X'',?,'history',?,?,?)`, row.group, i+1, fmt.Sprint(i), row.status, now, now, row.paused); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := a.ixQueueLeft(ctx)
+	if g := got["-1001"]; g.Left != 2 || g.Apart != 1 {
+		t.Fatalf("-1001: %+v", g)
+	}
+	if g, ok := got["-1002"]; ok {
+		t.Fatalf("a group with nothing left: %+v", g)
+	}
+}
