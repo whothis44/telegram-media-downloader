@@ -226,3 +226,40 @@ func TestIxUnqueuedFilesOfPublicChatsAndHeldQueues(t *testing.T) {
 		t.Fatal("a files pass held by the pause on freeze counted")
 	}
 }
+
+// Big files the lane holds back are not work the idle workers could take:
+// with a dozen big explicit requests queued (the deadline order never sets
+// those aside), set-aside small files must still go to the idle workers.
+func TestIxKeepBusyCountsOnlyWhatTheLaneLetsGo(t *testing.T) {
+	ixTestWorkers(t, 24)
+	ixTestLane(t, 2)
+	a, ctx := ix8App(t, map[string]any{"deadlineOrder": "on"})
+	for i := 1; i <= 15; i++ {
+		ixOldQueueRow(t, a, "-1003", i, 1<<30+int64(i)<<20)
+	}
+	if _, err := a.db.Writer.Exec(`UPDATE tgdl_work SET origin='url' WHERE group_id='-1003'`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 200; i++ {
+		ixOldQueueRow(t, a, "-1001", i, 200<<20)
+	}
+	ixTestBackfill(t, a, ctx, "-1002") // a private chat's files still to come
+	if err := a.ixDeadlineStep(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Half the workers (12): 2 big files the lane lets go, 10 small ones
+	// (the lane then lets 2 more big files go, nothing smaller being left).
+	if n := a.ixDeferredWaiting(ctx); n != 190 {
+		t.Fatalf("still set aside: %d (want 190)", n)
+	}
+	if big, small := ixTestClaim(t, a, 24); big != 4 || small != 10 {
+		t.Fatalf("24 workers took %d big and %d small files", big, small)
+	}
+	// The next step lets no more go: half the workers have a file.
+	if err := a.ixDeadlineStep(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if big, small := ixTestClaim(t, a, 24); big != 0 || small != 0 {
+		t.Fatalf("then: %d big and %d small", big, small)
+	}
+}

@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/botnick/telegram-media-downloader/core-service/internal/engine"
 )
 
 // Racing the deletion date. When Telegram has set one, the archive
@@ -421,7 +423,8 @@ var ixEngineWorkers = func(a *App, ctx context.Context) int {
 // workers that would have nothing to do take set-aside files after all,
 // smallest first, so that downloads never stop while the rescans read
 // chats holding only big files. They go only while fewer than half of the
-// workers have a file (busy, or ready for them), and only up to that half,
+// workers have a file (busy, or one they could take now: ixClaimableNow),
+// and only up to that half,
 // so that the smaller files the rescans bring find workers free: a
 // set-aside file can take an hour. Those not taken by the next step are
 // set aside again (they are pending and unpaused); the big-file lane
@@ -432,9 +435,8 @@ func (a *App) ixDeadlineKeepBusy(ctx context.Context, acctClause string, args []
 	if workers <= 0 {
 		workers = 25
 	}
-	var ready, busy int
-	if err := a.db.Reader.QueryRowContext(ctx, `SELECT COALESCE(SUM(status='pending' AND paused=0 AND retry_at<=?),0), COALESCE(SUM(status='processing'),0)
-		FROM tgdl_work WHERE status IN ('pending','processing')`+acctClause, args...).Scan(&ready, &busy); err != nil {
+	ready, busy, err := a.ixClaimableNow(ctx, acctClause, args)
+	if err != nil {
 		return err
 	}
 	need := (workers+1)/2 - ready - busy
@@ -473,6 +475,36 @@ func (a *App) ixDeadlineKeepBusy(ctx context.Context, acctClause string, args []
 		return err
 	}
 	return tx.Commit()
+}
+
+// ixClaimableNow counts the files a worker could take now (ready) and the
+// files downloading (busy), of the accounts in acctClause (args: now, then
+// the accounts, as ixDeadlineStep's). A big file (engine.BigFileSize or
+// more) counts as ready only while the big-file lane has a free place: the
+// others wait for it whatever the number of idle workers, so counting them
+// (an explicit request for a dozen big files, which the deadline order
+// never sets aside) would leave the workers idle with files set aside.
+// The lane's places are those it has while smaller files are claimable
+// (engine.BigFileLane), the ones it keeps once set-aside files go.
+func (a *App) ixClaimableNow(ctx context.Context, acctClause string, args []any) (ready, busy int, err error) {
+	var small, big int
+	q := `SELECT COALESCE(SUM(status='pending' AND paused=0 AND retry_at<=? AND (file_size<? OR ttl_seconds>0)),0),
+		COALESCE(SUM(status='pending' AND paused=0 AND retry_at<=? AND file_size>=? AND ttl_seconds=0),0),
+		COALESCE(SUM(status='processing'),0)
+		FROM tgdl_work WHERE status IN ('pending','processing')` + acctClause
+	qargs := append([]any{args[0], engine.BigFileSize, args[0], engine.BigFileSize}, args[1:]...)
+	if err = a.db.Reader.QueryRowContext(ctx, q, qargs...).Scan(&small, &big, &busy); err != nil {
+		return 0, 0, err
+	}
+	if lane := engine.BigFileLane(); lane > 0 {
+		// The lane counts every account's big files (engine.claimFilter).
+		var running int
+		if err = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM tgdl_work WHERE status='processing' AND file_size>=? AND ttl_seconds=0`, engine.BigFileSize).Scan(&running); err != nil {
+			return 0, 0, err
+		}
+		big = min(big, max(0, lane-running))
+	}
+	return small + big, busy, nil
 }
 
 // ixEngineRun is the engine's run (engine.Controller.Running); replaceable
