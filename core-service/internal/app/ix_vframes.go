@@ -117,64 +117,87 @@ var ixGrabFrame = func(ctx context.Context, full string, at float64, width, qual
 // wrong length), the very first frame is tried before giving up.
 func ixVideoFramesAt(ctx context.Context, full string, times []float64, width, quality int) ([]ixMLFrame, error) {
 	var out []ixMLFrame
-	triedStart := false
+	err := ixVideoFramesEach(ctx, full, times, width, quality, func(f ixMLFrame) error {
+		out = append(out, f)
+		return nil
+	})
+	return out, err
+}
+
+// ixVideoFramesEach is ixVideoFramesAt handing each frame on as soon as it
+// is read.
+func ixVideoFramesEach(ctx context.Context, full string, times []float64, width, quality int, each func(ixMLFrame) error) error {
+	got, triedStart := 0, false
 	grab := func(at float64) error {
+		clock := ixMLClock(ctx, ixStFFmpeg)
 		pic, err := ixGrabFrame(ctx, full, at, width, quality)
+		clock()
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		if errors.Is(err, ixErrNoFFmpeg) {
 			return err
 		}
-		if err == nil && len(pic) > 0 {
-			out = append(out, ixMLFrame{AtMs: int64(math.Round(at * 1000)), Pic: pic})
+		if err != nil || len(pic) == 0 {
+			return nil
 		}
-		return nil
+		got++
+		return each(ixMLFrame{AtMs: int64(math.Round(at * 1000)), Pic: pic})
 	}
 	for _, at := range times {
 		triedStart = triedStart || at == 0
 		if err := grab(at); err != nil {
-			return nil, err
+			return err
 		}
 	}
-	if len(out) == 0 && !triedStart {
+	if got == 0 && !triedStart {
 		if err := grab(0); err != nil {
-			return nil, err
+			return err
 		}
 	}
-	if len(out) == 0 {
-		return nil, errors.New("no frame could be read from the video")
+	if got == 0 {
+		return errors.New("no frame could be read from the video")
 	}
-	return out, nil
+	return nil
 }
 
 // ixMLVideoFrames is what is sent for a video: its frames, with their
 // times.
 func (a *App) ixMLVideoFrames(ctx context.Context, it *ixMItem) ([]ixMLFrame, error) {
+	var out []ixMLFrame
+	err := a.ixMLVideoFramesEach(ctx, it, func(f ixMLFrame) error {
+		out = append(out, f)
+		return nil
+	})
+	return out, err
+}
+
+func (a *App) ixMLVideoFramesEach(ctx context.Context, it *ixMItem, each func(ixMLFrame) error) error {
 	if ixMLPicturesHook != nil { // tests: pictures without times
 		pics, err := ixMLPicturesHook(a, ctx, it)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		times := ixMLFrameTimes(it.Dur)
-		out := make([]ixMLFrame, len(pics))
 		for i, p := range pics {
 			at := int64(i) * 1000
 			if len(pics) == len(times) {
 				at = int64(math.Round(times[i] * 1000))
 			}
-			out[i] = ixMLFrame{AtMs: at, Pic: p}
+			if err := each(ixMLFrame{AtMs: at, Pic: p}); err != nil {
+				return err
+			}
 		}
-		return out, nil
+		return nil
 	}
 	full, err := a.ixMLVideoPath(it)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if !ixHaveFFmpeg() {
-		return nil, ixErrNoFFmpeg
+		return ixErrNoFFmpeg
 	}
-	return ixVideoFramesAt(ctx, full, ixMLFrameTimes(it.Dur), 512, 3)
+	return ixVideoFramesEach(ctx, full, ixMLFrameTimes(it.Dur), 512, 3, each)
 }
 
 func (a *App) ixMLVideoPath(it *ixMItem) (string, error) {
@@ -194,22 +217,40 @@ func (a *App) ixMLVideoPath(it *ixMItem) (string, error) {
 // ixMLEmbedVideo looks at a video's frames, keeps the distinct ones, and
 // saves them and their mean.
 func (a *App) ixMLEmbedVideo(ctx context.Context, c *ixMLClient, it *ixMItem) error {
-	frames, err := a.ixMLVideoFrames(ctx, it)
-	if err != nil {
-		return a.ixMLReadErr(ctx, err)
+	// The next frame is read while the last one is looked at.
+	fctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	frames := make(chan ixMLFrame, 2)
+	var readErr error
+	go func() {
+		defer close(frames)
+		readErr = a.ixMLVideoFramesEach(fctx, it, func(f ixMLFrame) error {
+			select {
+			case frames <- f:
+				return nil
+			case <-fctx.Done():
+				return fctx.Err()
+			}
+		})
+	}()
+	fail := func(err error) error {
+		cancel()
+		for range frames {
+		}
+		return err
 	}
 	var sum, last []float32
 	var kept []ixMLFrameVec
-	for _, f := range frames {
+	for f := range frames {
 		v, err := c.embed(ctx, f.Pic, "")
 		if err != nil {
-			return ixMLFileErrOf(ctx, err)
+			return fail(ixMLFileErrOf(ctx, err))
 		}
 		if sum == nil {
 			sum = make([]float32, len(v))
 		}
 		if len(v) != len(sum) {
-			return ixMLFileErr{"embeddings of different sizes"}
+			return fail(ixMLFileErr{"embeddings of different sizes"})
 		}
 		for i := range v {
 			sum[i] += v[i]
@@ -220,6 +261,9 @@ func (a *App) ixMLEmbedVideo(ctx context.Context, c *ixMLClient, it *ixMItem) er
 		}
 		last = v
 		kept = append(kept, ixMLFrameVec{at: f.AtMs, vec: v})
+	}
+	if readErr != nil {
+		return a.ixMLReadErr(ctx, readErr)
 	}
 	if !ixNormalise(sum) {
 		return ixMLFileErr{"an empty embedding"}

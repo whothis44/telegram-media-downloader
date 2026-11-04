@@ -230,7 +230,7 @@ func (c *ixSTTClient) transcribe(ctx context.Context, audio []byte, seconds ...f
 		}
 		pw.CloseWithError(err)
 	}()
-	req, err := http.NewRequestWithContext(rctx, http.MethodPost, c.base+"/v1/audio/transcriptions", pr)
+	req, err := http.NewRequestWithContext(ixMLTraced(rctx), http.MethodPost, c.base+"/v1/audio/transcriptions", pr)
 	if err != nil {
 		pr.Close()
 		return ixTranscript{}, err
@@ -285,6 +285,7 @@ var ixSTTAudioHook = func(a *App, ctx context.Context, it *ixMItem) ([]byte, err
 var errIxNoAudio = errors.New("no sound track")
 
 func (a *App) ixSTTAudio(ctx context.Context, it *ixMItem) ([]byte, error) {
+	defer ixMLClock(ctx, ixStFFmpeg)()
 	rel := ixNormPath(it.Path)
 	if rel == "" {
 		return nil, errors.New("bad path")

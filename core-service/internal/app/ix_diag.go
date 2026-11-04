@@ -184,10 +184,13 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 	}
 	ml := a.ixMLStatusNow(ctx)
 	line("image recognition %s (model %s, Immich %s) · reachable %v · looked at %d · to go %d · unreadable %d · running %v · last error: %s", on(ml.Enabled), ml.Model, ml.Version, ml.Reachable, ml.Embedded, ml.Pending, ml.Failed, ml.Running, r.clean(ml.LastError))
-	for _, name := range []string{"faces", "text"} {
+	for _, name := range []string{"faces", "text", "frames"} {
 		t := ml.Tasks[name]
 		line("  %s %s · done %d · to go %d · unreadable %d · last error: %s", name, on(t.On), t.Done, t.Pending, t.Failed, r.clean(t.LastError))
 	}
+	atOnce, timing := a.ixMLPaceReport()
+	line("  files at once: %s", atOnce)
+	line("  ms per file: %s", timing)
 	line("speech to text %s · reachable %v · done %d · to go %d · unreadable %d · last error: %s", on(ml.Speech.On), ml.Speech.Reachable, ml.Speech.Done, ml.Speech.Pending, ml.Speech.Failed, r.clean(ml.Speech.LastError))
 	var people, faces, ungrouped int
 	_ = a.db.Reader.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM ix_people WHERE merged_into=0), COUNT(*), COALESCE(SUM(person=0),0) FROM ix_faces`).Scan(&people, &faces, &ungrouped)

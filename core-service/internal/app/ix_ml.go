@@ -108,7 +108,9 @@ func (a *App) ixMLClientNow(ctx context.Context) *ixMLClient {
 // the address that was checked.
 var ixMLHTTP = &http.Client{
 	Timeout: 10 * time.Minute,
-	Transport: &http.Transport{Proxy: nil, MaxIdleConns: 4, IdleConnTimeout: 30 * time.Second,
+	// Idle connections are kept for every file in flight (ixMLParMax),
+	// rather than opened again for each request.
+	Transport: &http.Transport{Proxy: nil, MaxIdleConns: 2 * ixMLParMax, MaxIdleConnsPerHost: ixMLParMax, IdleConnTimeout: 30 * time.Second,
 		// A local name could resolve to a public address: check the address
 		// actually connected to.
 		DialContext: (&net.Dialer{Timeout: 10 * time.Second, Control: func(_, address string, _ syscall.RawConn) error {
@@ -179,7 +181,7 @@ func (c *ixMLClient) predict(ctx context.Context, task map[string]any, image []b
 	if err := w.Close(); err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/predict", &body)
+	req, err := http.NewRequestWithContext(ixMLTraced(ctx), http.MethodPost, c.base+"/predict", &body)
 	if err != nil {
 		return nil, err
 	}
@@ -189,7 +191,9 @@ func (c *ixMLClient) predict(ctx context.Context, task map[string]any, image []b
 		return nil, ixMLUnreachable{err}
 	}
 	defer resp.Body.Close()
+	answer := ixMLClock(ctx, ixStAnswer)
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	answer()
 	if err != nil {
 		return nil, ixMLUnreachable{err}
 	}
@@ -307,6 +311,7 @@ type ixMLStatus struct {
 	Version   string                    `json:"immichVersion"`
 	Tasks     map[string]ixMLTaskStatus `json:"tasks"`
 	Speech    ixMLTaskStatus            `json:"speech"`
+	Par       map[string]int            `json:"par"` // files in flight at once, per task (ix_mlpace.go)
 }
 
 type ixMLTaskNote struct {
@@ -687,8 +692,11 @@ func (a *App) ixMLRound(ctx context.Context, c *ixMLClient, m *ixModel, n int) t
 	return a.ixMLRoundTask(ctx, a.ixClipTask(c), m, n)
 }
 
-// ixMLRoundTask does up to n files of one task and says when to try again.
+// ixMLRoundTask does up to n×par files of one task and says when to try
+// again.
 func (a *App) ixMLRoundTask(ctx context.Context, t *ixMLTask, m *ixModel, n int) time.Duration {
+	pace := a.ixMLPaceOf(t) // files at once, and where their time goes (ix_mlpace.go)
+	ctx = ixMLWithStats(ctx, pace.stats)
 	t.note(true, "")
 	r := &ixMLRun{failed: a.ixMLFailedKeys(ctx, t), tried: map[string]bool{}, noFFmpeg: !ixHaveFFmpeg()}
 	defer func() {
@@ -705,8 +713,8 @@ func (a *App) ixMLRoundTask(ctx context.Context, t *ixMLTask, m *ixModel, n int)
 			t.finish(ctx)
 		}
 	}()
-	for i := 0; i < n && ctx.Err() == nil; i++ {
-		worked, err := a.ixMLStep(ctx, t, m, r)
+	{
+		worked, err := a.ixMLFiles(ctx, t, m, r, pace, n*max(1, t.par))
 		var down ixMLUnreachable
 		switch {
 		case errors.Is(err, errIxMLOffline):
@@ -807,57 +815,90 @@ func ixMLWanted(m *ixModel, c int) (int32, bool) {
 	return cl.Canon, true
 }
 
-// ixMLStep does the next file of a task; false when none is left.
-func (a *App) ixMLStep(ctx context.Context, t *ixMLTask, m *ixModel, r *ixMLRun) (bool, error) {
-	items := a.ixMLNext(t, m, r, max(1, t.par))
-	if len(items) == 0 {
-		return false, nil
+// ixMLFiles does up to budget files of a task; false when none was left.
+// Files go through continuously, as many at a time as the task's pace
+// allows: the next file is started as soon as one ends, so reading files
+// (from the NAS, or frames out of videos) overlaps the requests of the
+// others and the graphics card is kept busy rather than waiting for the
+// slowest file of a batch.
+func (a *App) ixMLFiles(ctx context.Context, t *ixMLTask, m *ixModel, r *ixMLRun, pace *ixMLPace, budget int) (bool, error) {
+	type done struct {
+		it      *ixMItem
+		err     error
+		started time.Time
 	}
-	// A few files at a time: reading them (from the NAS, or frames out of
-	// videos) and the service's work overlap, so the graphics card is kept
-	// busy rather than waiting for each file in turn.
+	fctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	results := make(chan done)
 	box := a.ixMLBox()
-	box.mu.Lock()
-	box.running++
-	box.st.Running = true
-	box.mu.Unlock()
-	errs := make([]error, len(items))
-	var wg sync.WaitGroup
-	for i, it := range items {
-		wg.Add(1)
-		go func(i int, it *ixMItem) {
-			defer wg.Done()
-			errs[i] = t.run(ctx, it)
-		}(i, it)
-	}
-	wg.Wait()
-	box.mu.Lock()
-	box.running--
-	box.st.Running = box.running > 0
-	box.mu.Unlock()
+	inflight, started, dry := 0, 0, false
 	var first error
-	for i, it := range items {
+	pace.begin(time.Now())
+	defer func() {
+		if started > 0 {
+			box.mu.Lock()
+			box.running--
+			box.st.Running = box.running > 0
+			box.mu.Unlock()
+		}
+	}()
+	for {
+		for first == nil && !dry && started < budget && inflight < pace.size() && ctx.Err() == nil {
+			items := a.ixMLNext(t, m, r, 1)
+			if len(items) == 0 {
+				dry = true
+				break
+			}
+			if started == 0 {
+				box.mu.Lock()
+				box.running++
+				box.st.Running = true
+				box.mu.Unlock()
+			}
+			started++
+			inflight++
+			pace.launched(1)
+			go func(it *ixMItem, began time.Time) {
+				err := t.run(fctx, it)
+				pace.stats.ns[ixStFile].Add(int64(time.Since(began)))
+				pace.stats.files.Add(1)
+				results <- done{it, err, began}
+			}(items[0], time.Now())
+		}
+		if dry || started >= budget {
+			pace.starve()
+		}
+		if inflight == 0 {
+			break
+		}
+		x := <-results
+		inflight--
+		pace.finished(ctx, x.started, time.Now(), x.err)
 		var bad ixMLFileErr
-		switch err := errs[i]; {
+		switch err := x.err; {
 		case errors.As(err, &bad):
-			r.pending = append(r.pending, [2]string{it.Key, bad.msg})
+			r.pending = append(r.pending, [2]string{x.it.Key, bad.msg})
 			r.last = bad.msg
 		case err == nil:
 			r.ok = true
 		case first == nil:
 			first = err
+			var down ixMLUnreachable
+			if errors.Is(err, errIxMLOffline) || errors.As(err, &down) {
+				cancel() // the others would fail the same way
+			}
+		}
+		if first == nil && !r.ok && len(r.pending) >= ixMLStreak {
+			first = errIxMLStreak
+		}
+		if first == nil && r.ok {
+			a.ixMLFlush(ctx, t, r)
 		}
 	}
 	if first != nil {
 		return true, first
 	}
-	if !r.ok && len(r.pending) >= ixMLStreak {
-		return true, errIxMLStreak
-	}
-	if r.ok {
-		a.ixMLFlush(ctx, t, r)
-	}
-	return true, nil
+	return started > 0 && !dry, nil
 }
 
 // ixMLNext picks up to n files a task has still to do, walking the
@@ -1080,6 +1121,7 @@ func (a *App) ixMLPictures(ctx context.Context, it *ixMItem) ([][]byte, error) {
 
 func (a *App) ixMLPicturesFromDisk(ctx context.Context, it *ixMItem) ([][]byte, error) {
 	if it.Type == "photo" {
+		defer ixMLClock(ctx, ixStRead)()
 		if it.Thumb {
 			if data, err := os.ReadFile(filepath.Join(a.ixThumbDir(), filepath.FromSlash(ixThumbName(it.Key)))); err == nil && len(data) > 0 {
 				return [][]byte{data}, nil
@@ -1198,6 +1240,7 @@ func (a *App) ixMLStatusNow(ctx context.Context) ixMLStatus {
 		st.Tasks[k] = t
 	}
 	st.Speech.On = s.STTURL != ""
+	st.Par = a.ixMLPars()
 	return st
 }
 

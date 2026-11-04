@@ -240,6 +240,7 @@ func (a *App) ixMLFullPicture(ctx context.Context, it *ixMItem) ([][]byte, error
 	}
 	full := filepath.Join(a.downloadsDir, filepath.FromSlash(rel))
 	if it.Type == "photo" {
+		defer ixMLClock(ctx, ixStRead)()
 		data, err := os.ReadFile(full)
 		if err != nil {
 			return nil, errors.New("file not found")
@@ -336,6 +337,7 @@ func (a *App) ixFaceItem(ctx context.Context, c *ixMLClient, it *ixMItem) error 
 		box.faces.mu.Lock()
 		box.faces.addLocked(ids[i], qs[i], 0)
 		box.faces.mu.Unlock()
+		jpegClock := ixMLClock(ctx, ixStJPEG)
 		img, seen := decoded[&k.pic[0]]
 		if !seen {
 			img, _, _ = image.Decode(bytes.NewReader(k.pic))
@@ -344,6 +346,7 @@ func (a *App) ixFaceItem(ctx context.Context, c *ixMLClient, it *ixMItem) error 
 		if img != nil {
 			a.ixWriteFaceCrop(ids[i], img, k.f)
 		}
+		jpegClock()
 		if err := a.ixGroupFace(ctx, ids[i], qs[i]); err != nil {
 			return err
 		}

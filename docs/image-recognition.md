@@ -99,8 +99,36 @@ The archive then looks at each distinct picture once, in the background. Duplica
 - **What it covers:** what the picture shows, then faces and text, when those are on.
 - **When it runs:** it follows the duplicate-finding quiet hours, and pauses while the service is unreachable.
 - **Progress:** shown in Settings and in the browser's sidebar.
-- **How fast:** several files are sent at a time, so the card stays busy. Without a usable graphics card, expect
-  hours rather than minutes for tens of thousands of distinct pictures. Faces and text take longer than the rest.
+- **How fast:** several files are sent at a time, so the card stays busy. How many is found by measuring: the
+  archive tries one more at a time and keeps it only if more get done, and backs off at once when the service
+  fails or times out (1 to 16 per kind of work). Without a usable graphics card, expect hours rather than minutes
+  for tens of thousands of distinct pictures. Faces and text take longer than the rest.
+- **Videos:** a frame about every 5 seconds (3 to 12 per video) is looked at. The distinct frames are kept, with
+  where they are in the video, for finding a scene seen in one part of it. Videos looked at before this change are done again in the background, after everything
+  else. This is up to 12 pictures per video for the graphics card instead of 3.
+
+#### Keeping the graphics card busy
+
+The diagnostics report (background work) shows, per kind of work, how many files are sent at once and where the
+time of a file goes, in milliseconds: `read` (disk or NAS), `ffmpeg` (frames or sound out of videos), `jpeg`,
+`upload`, `server` (the service's own work) and `answer`.
+
+- If `read` or `ffmpeg` is larger than `server`, the card waits for the files, not the other way round. Settings of
+  the service will not help.
+- Immich's service runs requests on a pool of threads, `MACHINE_LEARNING_REQUEST_THREADS`. It defaults to the number
+  of processor cores, and Immich's docs say to start with this setting when changing how much it does at once. The
+  archive sends up to 16 files at once, so on a processor with fewer than 16 threads, raise it: add
+  `-e MACHINE_LEARNING_REQUEST_THREADS=16` before the image name in the `docker run` command above.
+- Leave `MACHINE_LEARNING_WORKERS` at 1 with one graphics card. Immich's docs advise against changing it unless
+  memory is abundant (each worker loads its own copy of the models); it is meant for several cards.
+- Leave `MACHINE_LEARNING_MODEL_INTER_OP_THREADS` and `..._INTRA_OP_THREADS` unset. In v2.7.5 they are only set
+  for the processor; on the graphics card they are left to the runtime unless you set them, and the docs do not say
+  that setting them helps there.
+- Immich's hardware-acceleration page notes that sending more at once raises use, but also graphics memory use.
+
+Sources: [environment variables](https://docs.immich.app/install/environment-variables),
+[hardware-accelerated machine learning](https://docs.immich.app/features/ml-hardware-acceleration), and Immich
+v2.7.5's `machine-learning/immich_ml/config.py`, `main.py` and `sessions/ort.py` (checked November 2026).
 
 When idle for 5 minutes, the service frees the memory its models use. To stop it: `docker stop immich-ml`; to
 start it again: `docker start immich-ml`.
