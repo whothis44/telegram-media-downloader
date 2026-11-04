@@ -12,15 +12,11 @@ import (
 	"math"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
-	"time"
-
-	"github.com/botnick/telegram-media-downloader/core-service/internal/seekbar"
 )
 
 // Faces and people (optional, off unless switched on). Immich's face model
@@ -256,32 +252,13 @@ func (a *App) ixMLFullPicture(ctx context.Context, it *ixMItem) ([][]byte, error
 	if _, err := os.Stat(full); err != nil {
 		return nil, errors.New("file not found")
 	}
-	bin := seekbar.FFmpegPath()
-	if bin == "" {
-		return nil, ixErrNoFFmpeg
+	frames, err := ixVideoFramesAt(ctx, full, ixVideoThreeTimes(it.Dur), 1280, 2) // ix_vframes.go
+	if err != nil {
+		return nil, err
 	}
-	times := []float64{1}
-	if it.Dur > 3 {
-		times = []float64{it.Dur * 0.2, it.Dur * 0.5, it.Dur * 0.8}
-	}
-	var out [][]byte
-	for _, at := range times {
-		fctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-		cmd := exec.CommandContext(fctx, bin, "-hide_banner", "-nostdin", "-loglevel", "error", "-ss", fmt.Sprintf("%.2f", at), "-i", full,
-			"-frames:v", "1", "-an", "-sn", "-dn", "-vf", "scale='min(1280,iw)':-2", "-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "2", "pipe:1")
-		var buf bytes.Buffer
-		cmd.Stdout = &buf
-		err := cmd.Run()
-		cancel()
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		if err == nil && buf.Len() > 0 {
-			out = append(out, buf.Bytes())
-		}
-	}
-	if len(out) == 0 {
-		return nil, errors.New("no frame could be read from the video")
+	out := make([][]byte, len(frames))
+	for i, f := range frames {
+		out[i] = f.Pic
 	}
 	return out, nil
 }

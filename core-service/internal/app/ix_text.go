@@ -496,5 +496,5 @@ func (a *App) handleIxExtra(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	ocr, speech := a.ixTextOf(ctx, key)
-	writeJSON(w, http.StatusOK, map[string]any{"faces": a.ixFacesOf(ctx, key), "text": ocr, "speech": speech})
+	writeJSON(w, http.StatusOK, map[string]any{"faces": a.ixFacesOf(ctx, key), "text": ocr, "speech": speech, "frames": a.ixVideoFrameTimes(ctx, key)})
 }

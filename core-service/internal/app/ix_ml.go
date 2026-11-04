@@ -16,7 +16,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -24,8 +23,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-
-	"github.com/botnick/telegram-media-downloader/core-service/internal/seekbar"
 )
 
 // Image recognition, optional and entirely on the user's own machines: the
@@ -570,20 +567,34 @@ func (a *App) ixRunML(ctx context.Context) {
 		}()
 		// Each kind of work takes its turn: what a picture shows first (it
 		// powers search and sets), then faces, then text.
-		wait = time.Minute
-		for _, t := range a.ixMLTasks(ctx, c, s) {
-			w := a.ixMLRoundTask(ctx, t, m, 500)
-			if w > time.Minute { // the service is down or failing: stop here
-				wait = w
-				break
-			}
-			if w < wait {
-				wait = w
-			}
-		}
+		wait = a.ixMLRoundAll(ctx, a.ixMLTasks(ctx, c, s), m)
 		close(stop)
 		a.ixMLCount(ctx, m)
 	}
+}
+
+// ixMLRoundAll gives each task its turn and says when to try again. A task
+// marked idle runs only when the tasks before it had nothing left.
+func (a *App) ixMLRoundAll(ctx context.Context, tasks []*ixMLTask, m *ixModel) time.Duration {
+	wait, busy := time.Minute, false
+	for _, t := range tasks {
+		if t.idle && busy {
+			continue
+		}
+		n := 500
+		if t.per > 0 {
+			n = t.per
+		}
+		w := a.ixMLRoundTask(ctx, t, m, n)
+		if w > time.Minute { // the service is down or failing: stop here
+			return w
+		}
+		busy = busy || w < time.Minute
+		if w < wait {
+			wait = w
+		}
+	}
+	return wait
 }
 
 // ixMLTask is one kind of work done once per distinct file.
@@ -598,6 +609,8 @@ type ixMLTask struct {
 	note     func(reachable bool, msg string)
 	finish   func(ctx context.Context) // after a round that did something
 	par      int                       // files at a time
+	per      int                       // steps per round, each up to par files (0: 500)
+	idle     bool                      // only when the tasks before it have nothing left
 }
 
 // ixMLTasks lists the image-recognition work that is switched on.
@@ -609,6 +622,7 @@ func (a *App) ixMLTasks(ctx context.Context, c *ixMLClient, s ixSettings) []*ixM
 	if s.MLText {
 		out = append(out, a.ixOCRTask(ctx, c))
 	}
+	out = append(out, a.ixVideoFramesTask(ctx, c)) // older videos, frame by frame (ix_vframes.go)
 	return out
 }
 
@@ -935,6 +949,9 @@ func (a *App) ixMLReadErr(ctx context.Context, err error) error {
 }
 
 func (a *App) ixMLEmbedItem(ctx context.Context, c *ixMLClient, it *ixMItem) error {
+	if it.Type == "video" {
+		return a.ixMLEmbedVideo(ctx, c, it) // frame by frame (ix_vframes.go)
+	}
 	pics, err := a.ixMLPictures(ctx, it)
 	if err != nil {
 		return a.ixMLReadErr(ctx, err)
@@ -961,9 +978,7 @@ func (a *App) ixMLEmbedItem(ctx context.Context, c *ixMLClient, it *ixMItem) err
 	if err := a.ixMLSave(ctx, c.model, it.Key, sum); err != nil {
 		return err
 	}
-	if it.Type == "photo" {
-		a.ixMLLookAlikes(ctx, it.Key)
-	}
+	a.ixMLLookAlikes(ctx, it.Key)
 	return nil
 }
 
@@ -1006,7 +1021,8 @@ func (a *App) ixMLFail(ctx context.Context, t *ixMLTask, key, why string) error 
 const ixMLLookAlikeSim = 0.975
 
 // ixMLLookAlikes queues the closest other pictures of a newly looked-at
-// picture for review.
+// picture for review; for a video, the closest other videos (by the mean of
+// their frames).
 func (a *App) ixMLLookAlikes(ctx context.Context, key string) {
 	if !a.ixLoadSettings(ctx).MLDupes {
 		return
@@ -1019,7 +1035,15 @@ func (a *App) ixMLLookAlikes(ctx context.Context, key string) {
 	if !ok {
 		return
 	}
-	cluster := m.Items[ii].Cluster
+	cluster, typ := m.Items[ii].Cluster, m.Items[ii].Type
+	least := float32(ixMLLookAlikeSim)
+	switch typ {
+	case "photo":
+	case "video":
+		least = ixMLLookAlikeVideoSim
+	default:
+		return
+	}
 	box := a.ixMLBox()
 	v := box.store.vector(key)
 	if v == nil {
@@ -1027,10 +1051,10 @@ func (a *App) ixMLLookAlikes(ctx context.Context, key string) {
 	}
 	hits := box.store.nearest(v, 3, func(k string) bool {
 		j, ok := m.ByKey[k]
-		return ok && m.Items[j].Type == "photo" && m.Items[j].Cluster != cluster
+		return ok && m.Items[j].Type == typ && m.Items[j].Cluster != cluster
 	}, key)
 	for _, h := range hits {
-		if h.Sim < ixMLLookAlikeSim {
+		if h.Sim < least {
 			break
 		}
 		ka, kb := key, h.Key
@@ -1042,14 +1066,16 @@ func (a *App) ixMLLookAlikes(ctx context.Context, key string) {
 }
 
 // ixMLPictures is what is sent for a file: a photo's grid thumbnail (or the
-// file itself), or three frames of a video, at a fifth, half and four
-// fifths of its length.
-var ixMLPicturesHook = func(a *App, ctx context.Context, it *ixMItem) ([][]byte, error) {
-	return a.ixMLPicturesFromDisk(ctx, it)
-}
+// file itself), or frames of a video (ixMLFrameTimes).
+//
+// ixMLPicturesHook replaces it in tests (nil: read from disk).
+var ixMLPicturesHook func(a *App, ctx context.Context, it *ixMItem) ([][]byte, error)
 
 func (a *App) ixMLPictures(ctx context.Context, it *ixMItem) ([][]byte, error) {
-	return ixMLPicturesHook(a, ctx, it)
+	if ixMLPicturesHook != nil {
+		return ixMLPicturesHook(a, ctx, it)
+	}
+	return a.ixMLPicturesFromDisk(ctx, it)
 }
 
 func (a *App) ixMLPicturesFromDisk(ctx context.Context, it *ixMItem) ([][]byte, error) {
@@ -1080,35 +1106,13 @@ func (a *App) ixMLPicturesFromDisk(ctx context.Context, it *ixMItem) ([][]byte, 
 		}
 		return [][]byte{data}, nil
 	}
-	if _, err := os.Stat(full); err != nil {
-		return nil, errors.New("file not found")
+	frames, err := a.ixMLVideoFrames(ctx, it)
+	if err != nil {
+		return nil, err
 	}
-	bin := seekbar.FFmpegPath()
-	if bin == "" {
-		return nil, ixErrNoFFmpeg
-	}
-	times := []float64{1}
-	if it.Dur > 3 {
-		times = []float64{it.Dur * 0.2, it.Dur * 0.5, it.Dur * 0.8}
-	}
-	var out [][]byte
-	for _, t := range times {
-		fctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-		cmd := exec.CommandContext(fctx, bin, "-hide_banner", "-nostdin", "-loglevel", "error", "-ss", fmt.Sprintf("%.2f", t), "-i", full,
-			"-frames:v", "1", "-an", "-sn", "-dn", "-vf", "scale='min(512,iw)':-2", "-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "3", "pipe:1")
-		var buf bytes.Buffer
-		cmd.Stdout = &buf
-		err := cmd.Run()
-		cancel()
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		if err == nil && buf.Len() > 0 {
-			out = append(out, buf.Bytes())
-		}
-	}
-	if len(out) == 0 {
-		return nil, errors.New("no frame could be read from the video")
+	out := make([][]byte, len(frames))
+	for i, f := range frames {
+		out[i] = f.Pic
 	}
 	return out, nil
 }
@@ -1121,11 +1125,11 @@ func (a *App) ixMLCount(ctx context.Context, m *ixModel) {
 	if c == nil {
 		c = &ixMLClient{model: ixMLModelOf(s)}
 	}
-	tasks := map[string]*ixMLTask{"clip": a.ixClipTask(c), "faces": a.ixFaceTask(ctx, c), "text": a.ixOCRTask(ctx, c)}
+	tasks := map[string]*ixMLTask{"clip": a.ixClipTask(c), "faces": a.ixFaceTask(ctx, c), "text": a.ixOCRTask(ctx, c), "frames": a.ixVideoFramesTask(ctx, c)}
 	if sc := a.ixSTTClientNow(ctx); sc != nil {
 		tasks["speech"] = a.ixSTTTask(ctx, sc)
 	}
-	on := map[string]bool{"clip": true, "faces": s.MLFaces, "text": s.MLText, "speech": s.STTURL != ""}
+	on := map[string]bool{"clip": true, "faces": s.MLFaces, "text": s.MLText, "speech": s.STTURL != "", "frames": s.MLURL != ""}
 	out := map[string]ixMLTaskStatus{}
 	for name, t := range tasks {
 		failed := a.ixMLFailedKeys(ctx, t)
