@@ -162,8 +162,14 @@ func TestIxFacesCountFilesNotFramesOrCopies(t *testing.T) {
 	}
 	ix10Scan(t, a, ctx, map[string][]string{"h3": {"H"}}, nil)
 	p := ix10People(t, a, ctx)
-	if len(p) != 1 || p[0].Faces != 4 {
+	if len(p) != 1 || p[0].Faces != 4 || p[0].Files != 3 { // h1 and h2 are one file
 		t.Fatalf("H: %+v", p)
+	}
+	// Faces kept only under the old best copy still find the file.
+	_, _ = a.db.Writer.Exec(`DELETE FROM ix_faces WHERE key='h2'`)
+	a.ixLoadPeople(ctx, m)
+	if keys := m.PersonKeys[p[0].ID]; !keys["h1"] || !keys["h2"] {
+		t.Fatalf("person keys: %v", keys)
 	}
 }
 

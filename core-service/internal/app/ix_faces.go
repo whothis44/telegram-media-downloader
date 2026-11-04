@@ -707,12 +707,20 @@ func (a *App) ixPeople(ctx context.Context) ([]ixPerson, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	// Files are counted once per cluster: faces stay stored under a copy
+	// that was the best copy before (a merge, a keeper, a better download),
+	// and that copy is the same file.
+	unit := a.ixFaceUnitOf()
 	out := []ixPerson{}
 	for _, r := range people {
 		if r.p.Faces == 0 {
 			continue
 		}
-		r.p.Files = len(r.keys)
+		units := map[string]bool{}
+		for k := range r.keys {
+			units[unit(k)] = true
+		}
+		r.p.Files = len(units)
 		switch {
 		case r.haveCover:
 			r.p.Cover = r.cover
@@ -865,6 +873,15 @@ func (a *App) ixLoadPeople(ctx context.Context, m *ixModel) {
 			m.PersonKeys[id] = map[string]bool{}
 		}
 		m.PersonKeys[id][key] = true
+		// Faces found on a copy that is no longer the best one still count
+		// for the file's best copy (the browser looks people up by it).
+		if ii, ok := m.ByKey[key]; ok && int(ii) < len(m.Items) {
+			if c := m.Items[ii].Cluster; c >= 0 && int(c) < len(m.Clusters) {
+				if ci := m.Clusters[c].Canon; ci >= 0 && int(ci) < len(m.Items) && m.Items[ci].Key != "" {
+					m.PersonKeys[id][m.Items[ci].Key] = true
+				}
+			}
+		}
 		m.PersonName[id] = name
 	}
 }
