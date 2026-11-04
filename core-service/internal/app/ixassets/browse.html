@@ -537,7 +537,7 @@ async function openItem(items, i) {
   const viewHTML = (x) => {
     if (x.status !== 'ok' && x.status !== 'subst' && x.like) return `<div style="color:#fff;text-align:center;padding:10px"><img src="${esc(x.like.thumb)}" style="max-height:60vh"><br>Not downloaded yet: this is the saved copy it most likely is.</div>`;
     if (!x.src) return x.previewOnly ? `<div style="color:#fff;text-align:center;padding:10px"><img src="${esc(x.thumb)}" alt="" style="min-width:320px"><br>Preview only: Telegram's small preview is kept, the file is not downloaded.</div>` : `<img src="${esc(x.thumb)}" alt="" style="min-width:200px;filter:blur(2px)">`;
-    if (x.type === 'video') return `<video src="${esc(x.src)}" controls autoplay playsinline preload="metadata"></video>`;
+    if (x.type === 'video') return `<video src="${esc(x.src)}${x.atMs ? '#t=' + (x.atMs / 1000).toFixed(1) : ''}" controls autoplay playsinline preload="metadata"></video>`;
     if (x.type === 'photo') return `<img src="${esc(x.src)}" alt="">`;
     if (x.type === 'audio' || x.type === 'voice') return `<audio src="${esc(x.src)}" controls></audio>`;
     return `<a href="${esc(x.src)}" style="color:#fff">Open ${esc(x.name || 'file')}</a>`;

@@ -70,3 +70,13 @@ func TestIxReportHasAnHourByHourRecordWithoutNames(t *testing.T) {
 		}
 	}
 }
+
+func TestIxVideosAreFoundByTheirBestFrame(t *testing.T) {
+	m := &ixModel{ByKey: map[string]int32{"pic": 0, "vid": 1, "other": 2}, Items: []ixMItem{{Cluster: 0}, {Cluster: 1}, {Cluster: 2}}}
+	hits := []ixEmbHit{{Key: "pic", Sim: 0.30}, {Key: "vid", Sim: 0.20}}
+	frames := []ixFrameHit{{Key: "vid", Sim: 0.40, AtMs: 35000}, {Key: "other", Sim: 0.25, AtMs: 5000}}
+	got := ixMergeFrameHits(m, hits, frames, 10)
+	if len(got) != 3 || got[0].Key != "vid" || got[0].Sim != 0.40 || got[0].AtMs != 35000 || got[1].Key != "pic" || got[2].Key != "other" || got[2].AtMs != 5000 {
+		t.Fatalf("merged: %+v", got)
+	}
+}

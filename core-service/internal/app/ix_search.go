@@ -160,7 +160,7 @@ func (s *ixEmbStore) scan(q []float32, k float64, n int, keep func(string) bool,
 		if keep != nil && !keep(s.keys[i]) {
 			continue
 		}
-		out.hits = append(out.hits, ixEmbHit{s.keys[i], c})
+		out.hits = append(out.hits, ixEmbHit{Key: s.keys[i], Sim: c})
 		if len(out.hits) > 2*n {
 			sort.Slice(out.hits, func(x, y int) bool { return out.hits[x].Sim > out.hits[y].Sim })
 			out.hits = out.hits[:n]
@@ -283,6 +283,11 @@ func (a *App) ixLooksFor(ctx context.Context, m *ixModel, text string, n int, ke
 		}
 		ask *= 2
 	}
+	// Videos are also found by their best frame, not only by the mean of
+	// their frames: a scene in one part of a video counts.
+	if fh := a.ixVideoFrameHits(ctx, q, want, keep); len(fh) > 0 {
+		hits = ixMergeFrameHits(m, hits, fh, want)
+	}
 	out := ixLooks{cutoff: sc.thr}
 	shown := 0
 	for _, h := range hits {
@@ -301,6 +306,29 @@ func (a *App) ixLooksFor(ctx context.Context, m *ixModel, text string, n int, ke
 	out.strong = max(shown, ixDistinctFiles(m, above))
 	out.hits = hits[:max(min(shown, n), min(len(hits), ixWeakFloor))]
 	return out, nil
+}
+
+// ixMergeFrameHits adds videos found by a frame to picture hits: a video
+// found both ways takes the better likeness (a frame usually beats the
+// mean), and keeps where in the video that frame is.
+func ixMergeFrameHits(m *ixModel, hits []ixEmbHit, frames []ixFrameHit, k int) []ixEmbHit {
+	at := make(map[string]int, len(hits))
+	out := append([]ixEmbHit(nil), hits...)
+	for i, h := range out {
+		at[h.Key] = i
+	}
+	for _, f := range frames {
+		if i, ok := at[f.Key]; ok {
+			if f.Sim > out[i].Sim {
+				out[i].Sim, out[i].AtMs = f.Sim, f.AtMs
+			}
+			continue
+		}
+		at[f.Key] = len(out)
+		out = append(out, ixEmbHit{Key: f.Key, Sim: f.Sim, AtMs: f.AtMs})
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Sim > out[j].Sim })
+	return ixUniqueHits(m, out, k)
 }
 
 // ---------- one hit per duplicate set ----------

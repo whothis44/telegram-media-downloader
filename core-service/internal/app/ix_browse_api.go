@@ -82,6 +82,7 @@ type ixJItem struct {
 	Like     *ixJItem `json:"like,omitempty"`     // held: the saved copy it probably is
 	Role     string   `json:"role,omitempty"`     // in a media set: core, member, loose, elsewhere
 	Sim      float32  `json:"sim,omitempty"`      // likeness (image recognition), 0 when not compared
+	AtMs     int64    `json:"atMs,omitempty"`     // a video found by one of its frames: where (ms)
 	Fixed    bool     `json:"fixed,omitempty"`    // a person placed it
 	OtherSet int32    `json:"otherSet,omitempty"` // elsewhere: that set's ID + 1
 	// Not downloaded, but Telegram's preview is kept (Thumb).

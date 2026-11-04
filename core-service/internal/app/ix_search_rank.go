@@ -95,6 +95,7 @@ type ixRank struct {
 	postWhy    map[int32]uint8
 	clusterWhy map[int32]uint8
 	sim        map[int32]float32 // set -> likeness to the description or the file
+	at         map[int32]int64   // set -> where in the video the best frame is (ms)
 	weakPost   map[int32]bool    // found only by a weak likeness
 	weakSet    map[int32]bool
 	byScore    bool // best first (otherwise by date, as browsing)
@@ -168,6 +169,7 @@ func (a *App) ixHybridSearch(ctx context.Context, m *ixModel, f ixFeedQuery) *ix
 	strong := 0
 	var weak []int32
 	sims := map[int32]float32{}
+	ats := map[int32]int64{}
 	if looksCh != nil {
 		ans := <-looksCh
 		lk, err := ans.lk, ans.err
@@ -182,6 +184,9 @@ func (a *App) ixHybridSearch(ctx context.Context, m *ixModel, f ixFeedQuery) *ix
 				}
 				c := m.Items[ii].Cluster
 				sims[c] = h.Sim
+				if h.AtMs > 0 {
+					ats[c] = h.AtMs
+				}
 				if h.Sim >= lk.cutoff {
 					looks.addCluster(m, c)
 				} else {
@@ -210,7 +215,7 @@ func (a *App) ixHybridSearch(ctx context.Context, m *ixModel, f ixFeedQuery) *ix
 		info["weak"] = looks.n - strong
 	}
 	r := &ixRank{post: map[int32]float64{}, cluster: map[int32]float64{}, postWhy: map[int32]uint8{}, clusterWhy: map[int32]uint8{},
-		sim: sims, weakPost: map[int32]bool{}, weakSet: map[int32]bool{}, byScore: f.Rank, info: info}
+		sim: sims, at: ats, weakPost: map[int32]bool{}, weakSet: map[int32]bool{}, byScore: f.Rank, info: info}
 	strongPost := map[int32]bool{}
 	for _, l := range lists {
 		for pi, rk := range l.post {
@@ -384,6 +389,7 @@ func (r *ixRank) decorate(m *ixModel, c *ixJCard, posts []int32, sets []int32) {
 				if s, ok := r.sim[m.Items[ii].Cluster]; ok {
 					c.Items[i].Sim = s
 				}
+				c.Items[i].AtMs = r.at[m.Items[ii].Cluster]
 			}
 		}
 	}

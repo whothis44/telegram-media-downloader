@@ -442,8 +442,9 @@ func (s *ixEmbStore) sim(a, b string) (float32, bool) {
 }
 
 type ixEmbHit struct {
-	Key string
-	Sim float32
+	Key  string
+	Sim  float32
+	AtMs int64 // for a video found by one of its frames: where (0 otherwise)
 }
 
 // nearest lists the stored files closest to q (a unit vector), best first.
@@ -471,7 +472,7 @@ func (s *ixEmbStore) nearest(q []float32, k int, keep func(string) bool, skip st
 		if keep != nil && !keep(key) {
 			continue
 		}
-		hits = append(hits, ixEmbHit{key, c})
+		hits = append(hits, ixEmbHit{Key: key, Sim: c})
 		if len(hits) > 2*k {
 			sort.Slice(hits, func(x, y int) bool { return hits[x].Sim > hits[y].Sim })
 			hits = hits[:k]
