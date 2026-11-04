@@ -27,6 +27,7 @@ func registerIxRoutes(mux *http.ServeMux, a *App) {
 	mux.Handle("GET /api/ix/dups", a.requireAdmin(http.HandlerFunc(a.handleIxDups)))
 	mux.Handle("POST /api/ix/dups/retry", a.requireAdmin(http.HandlerFunc(a.handleIxDupsRetry)))
 	registerIxBrowseRoutes(mux, a)
+	registerIxCopiesRoutes(mux, a)
 }
 
 type ixGroupStatus struct {
@@ -183,6 +184,7 @@ func (a *App) handleIxStatus(w http.ResponseWriter, r *http.Request) {
 		"downloads": a.ixDownloads(ctx),
 		"freeze":    a.ixFreeze(ctx),
 		"held":      a.ixHeldStatus(ctx),
+		"copies":    a.ixCopiesNow(),
 		"fixity":    a.ixFixityStatus(ctx),
 		"ml":        a.ixMLStatusNow(ctx),
 		"deadline":  a.ixDeadlineEstimate(ctx, false),

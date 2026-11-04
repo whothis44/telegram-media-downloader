@@ -207,8 +207,20 @@ ${(() => {
   if (d.errors && d.errors.length) {
     h += `<div class="list" style="margin-top:8px"><table><tr><th>Why files failed</th><th>Files</th></tr>${d.errors.map((e) => `<tr><td class="muted">${esc(e.error)}</td><td class="n">${fmtNum(e.count)}</td></tr>`).join('')}</table></div>`;
   }
+  h += viewCopies();
   h += `<div class="btns"><button class="b" data-act="dl-retry" ${d.failed && d.engineRunning ? '' : 'disabled'}>Retry all ${fmtNum(d.failed)} failed now</button>${state.dlMsg ? `<span class="muted">${esc(state.dlMsg)}</span>` : ''}</div></div>`;
   return h;
+}
+
+// Copies among what is left to download (ix_copies.go).
+function viewCopies() {
+  const c = state.status.copies;
+  if (!c || !c.queue) return '';
+  const q = c.queue, k = c.known || {};
+  const n = (x) => `<b>${fmtNum((x || {}).files || 0)}</b> (${fmtSize((x || {}).bytes || 0)})`;
+  let x = `<div style="margin-top:6px"><b>Copies in the queue:</b> of ${n(q.all)} queued, ${n(q.same)} are the same Telegram file as one saved or queued before (never downloaded twice) and ${n(q.held)} are probable copies held at the back: ${fmtNum((q.vsSaved || {}).files || 0)} of saved videos, ${fmtNum((q.vsQueued || {}).files || 0)} lesser copies of queued ones, ${fmtNum((q.recog || {}).files || 0)} found by image recognition; ${n(q.confirmed)} confirmed by their first frames.</div>`;
+  if (k.measured) x += `<div class="muted">Everything seen in messages and not downloaded: ${n(k.missing)}; ${n(k.same)} are the same Telegram file as another, ${n(k.held)} are held, and ${n(k.likely)} more videos look like copies (they will be held when queued).${c.previews ? ` ${fmtNum(c.previews)} Telegram preview(s) kept for files not downloaded.` : ''}</div>`;
+  return x;
 }
 
 // ---------------- Rescan ----------------

@@ -61,6 +61,9 @@ type ixSettings struct {
 	AlertEmailFrom   string `json:"alertEmailFrom"`
 	AlertEmailTo     string `json:"alertEmailTo"`
 	AlertNames       bool   `json:"alertNames"` // name the groups in alerts
+	// Copies (ix_copies.go). Both off by default means the recommended way.
+	ConfirmedGoEarly bool `json:"confirmedGoEarly"` // confirmed copies may go once the queue is empty, like other held copies
+	CopyThumbsOff    bool `json:"copyThumbsOff"`    // no Telegram previews fetched to compare by recognition
 }
 
 // public is the settings as the dashboard may see them.
@@ -390,5 +393,6 @@ func ixParseSettings(body map[string]any, s ixSettings) (ixSettings, error) {
 		}
 		s.Pace = v
 	}
+	ixParseCopySettings(body, &s)
 	return s, nil
 }
