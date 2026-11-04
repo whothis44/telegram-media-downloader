@@ -334,3 +334,140 @@ func TestHistoryCapIgnoresItemsWaitingApart(t *testing.T) {
 		t.Fatalf("backfill job=%+v pages=%d", j, pages.Load())
 	}
 }
+
+// A lesser copy whose better copy finished downloading but still sits in
+// the local staging folder (not in the catalogue yet) waits; once the file
+// is in the library it is checked against it.
+func TestIxHeldCopyWaitsForAStagedBetterCopy(t *testing.T) {
+	a, ctx := ixTestApp(t)
+	scene := ixTestStripped(t, ixTestScene(21, 40, 23))
+	v1 := ixTestVideo(1, 301, 50<<20, 60, 1280, 720, scene, 1700000000)
+	v2 := ixTestVideo(2, 302, 80<<20, 60.2, 1920, 1080, scene, 1700000100) // the best
+	id1, id2 := ixTestQueue(t, a, v1), ixTestQueue(t, a, v2)
+	if err := a.ixHeldStep(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if how, of := ixTestHow(a, id1); how != "queued" || of != id2 {
+		t.Fatalf("not held for the best: %q %d", how, of)
+	}
+	// Downloaded into the staging folder: completed, but no catalogue entry yet.
+	if _, err := a.db.Writer.Exec(`CREATE TABLE IF NOT EXISTS tgdl_stage_moves (path TEXT PRIMARY KEY NOT NULL, stage_dir TEXT NOT NULL, item TEXT NOT NULL,
+		generation INTEGER NOT NULL, identity TEXT NOT NULL, sha256 TEXT NOT NULL, size INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'waiting',
+		attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL DEFAULT 0, failing_since INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Writer.Exec(`INSERT INTO tgdl_stage_moves(path,stage_dir,item,generation,identity,sha256,size,created_at)
+		SELECT 'c/v2.mp4','/stage','x',1,identity,'00',file_size,1 FROM tgdl_work WHERE id=?`, id2); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = a.db.Writer.Exec(`UPDATE tgdl_work SET status='completed' WHERE id=?`, id2)
+	if err := a.ixHeldRecheck(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if how, _ := ixTestHow(a, id1); how != "queued" || !ixTestPaused(t, a, id1) {
+		t.Fatalf("let go while its better copy was still being moved: %q", how)
+	}
+	// In the library now.
+	_, _ = a.db.Writer.Exec(`DELETE FROM tgdl_stage_moves`)
+	ixTestSave(t, a, v2, "c/v2.mp4", "cc33")
+	if err := a.ixHeldRecheck(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if how, _ := ixTestHow(a, id1); how != "saved" || !ixTestPaused(t, a, id1) {
+		t.Fatalf("not checked against the saved file: %q", how)
+	}
+}
+
+// Sampling frames is for copies: originals waiting to replace a lower
+// quality are not checked.
+func TestIxSamplingLeavesOutLowerQualityOriginals(t *testing.T) {
+	a, ctx := ixTestApp(t)
+	scene := ixTestStripped(t, ixTestScene(31, 40, 23))
+	plain := ixTestQueue(t, a, ixTestVideo(1, 401, 300<<20, 600, 1280, 720, scene, 1700000000))
+	orig := ixTestQueue(t, a, ixTestVideo(2, 402, 400<<20, 900, 1280, 720, scene, 1700000100))
+	_, _ = a.db.Writer.Exec(`UPDATE tgdl_work SET paused=1 WHERE id=?`, orig)
+	ixTestLowq(t, a, orig)
+	jobs, err := a.ixSampleJobs(ctx, false, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 || jobs[0].work != plain {
+		t.Fatalf("jobs: %+v", jobs)
+	}
+}
+
+// Read-only (the account is gone): the copies, preview and sampling work
+// and the queue order steps do nothing, quietly.
+func TestIxReadOnlySkipsCopyWorkQuietly(t *testing.T) {
+	a, ctx := ixTestApp(t)
+	savedFake := ixSampleFake
+	ixSampleFake = true
+	opened := false
+	oldOpen := ixOpenCopyReader
+	ixOpenCopyReader = func(*App, context.Context, string) (ixCopyReader, error) {
+		opened = true
+		return nil, fmt.Errorf("no Telegram")
+	}
+	t.Cleanup(func() { ixSampleFake, ixOpenCopyReader = savedFake, oldOpen })
+	scene := ixTestStripped(t, ixTestScene(41, 40, 23))
+	big := ixTestQueue(t, a, ixTestVideo(1, 501, 300<<20, 600, 1280, 720, scene, 1700000000))
+	held := ixTestWork(t, a, "acc", "-1001", 2, "video", 20<<20, 1)
+	ixTestHold(t, a, held, "", 0)
+	a.ixSetGone(ctx, ixGoneInfo{Gone: true, Reason: "telegram"})
+	logLines := func() []ixLogLine {
+		rt := a.ix()
+		rt.mu.Lock()
+		defer rt.mu.Unlock()
+		return append([]ixLogLine(nil), rt.recent...)
+	}
+	before := len(logLines())
+	for i := 0; i < 3; i++ {
+		a.ixCopiesRound(ctx)
+		for _, f := range []func(context.Context) error{a.ixHeldStep, a.ixDeadlineStep, a.ixLowqStep} {
+			if err := f(ctx); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if opened {
+		t.Fatal("tried to reach Telegram in read-only mode")
+	}
+	if lines := logLines(); len(lines) != before {
+		t.Fatalf("log lines in read-only mode: %v", lines[before:])
+	}
+	if !ixTestPaused(t, a, held) || ixTestPaused(t, a, big) {
+		t.Fatal("the queue was changed in read-only mode")
+	}
+}
+
+// Looking for an exact re-upload by size uses the size indexes, not a
+// read of the whole catalogue.
+func TestIxSizeLookupsUseAnIndex(t *testing.T) {
+	a, _ := ixTestApp(t)
+	for _, q := range []string{
+		`SELECT EXISTS (SELECT 1 FROM downloads WHERE file_size=? AND status='completed') OR EXISTS (SELECT 1 FROM downloads WHERE telegram_media_size=? AND status='completed')`,
+		`SELECT file_path FROM downloads WHERE file_size=? AND status='completed' AND file_path IS NOT NULL AND file_path<>'' AND NOT (group_id=? AND message_id=?)
+		UNION SELECT file_path FROM downloads WHERE telegram_media_size=? AND status='completed' AND file_path IS NOT NULL AND file_path<>'' AND NOT (group_id=? AND message_id=?) LIMIT 5`,
+	} {
+		args := make([]any, strings.Count(q, "?"))
+		for i := range args {
+			args[i] = 1
+		}
+		rows, err := a.db.Reader.Query(`EXPLAIN QUERY PLAN `+q, args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var plan []string
+		for rows.Next() {
+			var id, parent, aux int
+			var detail string
+			_ = rows.Scan(&id, &parent, &aux, &detail)
+			plan = append(plan, detail)
+		}
+		rows.Close()
+		p := strings.Join(plan, "; ")
+		if strings.Contains(p, "SCAN downloads") || !strings.Contains(p, "ix_downloads_size") || !strings.Contains(p, "ix_downloads_tg_size") {
+			t.Fatalf("plan: %s", p)
+		}
+	}
+}
