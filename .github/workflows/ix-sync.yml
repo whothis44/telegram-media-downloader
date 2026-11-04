@@ -1,15 +1,16 @@
 name: Sync with the original project
 
-# Daily: merge botnick/telegram-media-downloader into a branch of this fork,
+# On request: merge botnick/telegram-media-downloader into a branch of this fork,
 # run the tests, and open a pull request for a person to review. Nothing is
 # merged into main or published by this job: start.bat installs whatever is
 # released on this fork, so an unreviewed change of the original project
 # must never reach a running archive on its own. On a failing test the
 # pull request is not opened and this run fails, so GitHub emails the owner.
 
+# Off by default: it runs only when started by hand (Actions → Sync with the
+# original project → Run workflow). The daily schedule was removed while the
+# archive races the account's deletion date.
 on:
-  schedule:
-    - cron: '17 9 * * *'
   workflow_dispatch: {}
 
 permissions:
