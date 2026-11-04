@@ -350,6 +350,30 @@ func (a *App) ixGoneSigns(ctx context.Context, since int64) []ixGoneSign {
 	return out
 }
 
+// ixGoneFilter drops the errors that say the account is gone from errs
+// (for the account status: banner, alert, rescans paused) when the main
+// connection has answered since the last of them: those came from another
+// data centre, not from a dead account.
+func (a *App) ixGoneFilter(ctx context.Context, errs []string, now int64) []string {
+	if a.ixIsGone() {
+		return errs
+	}
+	box := a.ixGoneBox()
+	box.mu.Lock()
+	alive := box.aliveAt
+	box.mu.Unlock()
+	if alive == 0 || len(a.ixGoneSigns(ctx, max(alive, now-6*60*60*1000))) > 0 {
+		return errs
+	}
+	out := errs[:0:0]
+	for _, e := range errs {
+		if !ixDeactivatedRe.MatchString(e) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // ixStopTelegram stops the engine: downloads, live updates and every open
 // Telegram session (backfills end with it). Stopping a stopped engine does
 // nothing, so this is cheap to repeat.

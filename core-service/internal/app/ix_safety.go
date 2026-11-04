@@ -248,7 +248,7 @@ func (a *App) ixRunSafety(ctx context.Context) {
 	for ctx.Err() == nil {
 		telegram.SetPacing(a.ixLoadSettings(ctx).DownloadPacing)
 		now := time.Now().UnixMilli()
-		st := ixClassify(a.ixRecentErrors(ctx, now-6*60*60*1000), now)
+		st := ixClassify(a.ixGoneFilter(ctx, a.ixRecentErrors(ctx, now-6*60*60*1000), now), now)
 		old := a.ixAccount()
 		ixAccountState.Store(a, st)
 		if (st.Frozen != old.Frozen || st.Deactivated != old.Deactivated) && a.hub != nil {

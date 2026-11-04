@@ -484,7 +484,11 @@ func (l *Library) moveStaged(ctx context.Context, mv stagedMove) error {
 		return stageDoubt{"the staged copy cannot be opened: " + err.Error()}
 	}
 	info, err := lf.Stat()
-	if err != nil || info.Size() != mv.size {
+	if err != nil {
+		lf.Close()
+		return fmt.Errorf("the staged copy cannot be read: %w", err)
+	}
+	if info.Size() != mv.size {
 		lf.Close()
 		return stageDoubt{fmt.Sprintf("the staged copy has %d bytes, %d were downloaded", info.Size(), mv.size)}
 	}

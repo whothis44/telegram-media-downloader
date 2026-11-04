@@ -346,6 +346,11 @@ func TestIxGoneNeedsTheMainConnectionToAgree(t *testing.T) {
 	if a.ixIsGone() || probes.Load() != 1 {
 		t.Fatalf("gone %v after %d live checks", a.ixIsGone(), probes.Load())
 	}
+	// The account status (banner, alert, rescans) ignores them too.
+	errs := a.ixGoneFilter(ctx, []string{dcErr, "FROZEN_METHOD_INVALID"}, now.UnixMilli())
+	if st := ixClassify(errs, now.UnixMilli()); st.Deactivated || !st.Frozen {
+		t.Fatalf("account status: %+v", st)
+	}
 	// The same errors again: no new check, still nothing.
 	a.ixGoneStep(ctx, now.Add(time.Minute))
 	a.ixGoneStep(ctx, now.Add(10*time.Minute))
@@ -357,6 +362,11 @@ func TestIxGoneNeedsTheMainConnectionToAgree(t *testing.T) {
 	a.ixGoneStep(ctx, now.Add(12*time.Minute))
 	if a.ixIsGone() || probes.Load() != 2 {
 		t.Fatalf("gone %v after %d live checks", a.ixIsGone(), probes.Load())
+	}
+	// Unanswered errors since the last answer still count for the status.
+	ixGoneWorkError(t, a, 210, dcErr, now.Add(13*time.Minute))
+	if st := ixClassify(a.ixGoneFilter(ctx, []string{dcErr}, now.Add(13*time.Minute).UnixMilli()), 0); !st.Deactivated {
+		t.Fatal("a fresh error was dropped from the account status")
 	}
 	// The engine is down (no live check): one new error is not enough.
 	answer = errIxNoProbe
