@@ -198,7 +198,7 @@ func (a *App) ixLowqIsCopy(ctx context.Context, work *engine.Work, att telegram.
 	}
 	if transport != nil {
 		item := download.Item{GroupID: work.GroupID, GroupName: work.GroupName, MessageID: work.MessageID, Name: att.Name, Type: att.Type, Identity: att.Identity, Facts: att.Facts}
-		if _, same := a.ixSubstitute(ctx, item, telegram.AttachmentClient{Source: transport, Media: att}); same {
+		if _, _, same := a.ixSubstitute(ctx, item, telegram.AttachmentClient{Source: transport, Media: att}); same {
 			return true
 		}
 	}

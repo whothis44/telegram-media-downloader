@@ -233,8 +233,7 @@ func (a *App) ixWriteDataModel(ctx context.Context, writeJSONL func(string, func
 			Like      string `json:"like,omitempty"`
 			At        int64  `json:"at"`
 		}
-		rows, err := a.db.Reader.QueryContext(ctx, `SELECT s.group_id, s.message_id, s.how, s.of_path, '', s.at FROM ix_subst s
-				JOIN downloads d ON d.group_id=s.group_id AND d.message_id=s.message_id AND d.file_path=s.of_path
+		rows, err := a.db.Reader.QueryContext(ctx, `SELECT s.group_id, s.message_id, s.how, s.of_path, '', s.at FROM ix_subst s WHERE `+ixSubstValid+`
 			UNION ALL SELECT group_id, message_id, 'held', '', like_key, held_at FROM ix_held WHERE released_at=0 AND reason<>''
 			ORDER BY 1, 2`)
 		if err != nil {

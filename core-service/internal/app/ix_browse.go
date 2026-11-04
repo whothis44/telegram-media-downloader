@@ -54,6 +54,7 @@ type ixMItem struct {
 	Ident   string // not downloaded: Telegram's file identity (kind:id:size)
 	Post    int32
 	Placed  bool // a lone file placed in the album beside it (ix_orphans.go)
+	Linked  bool // no catalogue entry of its own: ID and Path are the saved file it shares (ix_links.go)
 }
 
 type ixMPost struct {
@@ -283,6 +284,7 @@ func (a *App) ixBuildModel(ctx context.Context) (*ixModel, error) {
 	// forwarded, so files not downloaded yet are known as copies of saved
 	// ones, or of each other, before any download.
 	identKey := map[string]string{}
+	savedByID := map[int64]*fileRow{}
 	rows, err := a.db.Reader.QueryContext(ctx, `SELECT d.id, d.group_id, d.message_id, COALESCE(d.file_type,''), d.file_path, COALESCE(d.file_hash,''), COALESCE(d.file_size,0),
 			COALESCE(d.media_width,0), COALESCE(d.media_height,0), COALESCE(d.media_duration_ms,0), COALESCE(d.file_name,''), COALESCE(CAST(d.created_at AS TEXT),''),
 			COALESCE(p.width,0), COALESCE(p.height,0), s.of_path IS NOT NULL AND s.of_path=d.file_path, COALESCE(p.thumb,'')<>'',
@@ -322,8 +324,36 @@ func (a *App) ixBuildModel(ctx context.Context) (*ixModel, error) {
 		}
 		f.created = int64(ixParseCreated(created))
 		files[f.item.Group+":"+strconv.Itoa(f.item.Msg)] = &f
+		savedByID[f.item.ID] = &f
 	}
 	rows.Close()
+	// Messages that share a saved file without an entry of their own
+	// (download.skipDuplicates): the saved file, under their own message.
+	if linked, err := a.ixLinkedFiles(ctx, ""); err == nil {
+		for _, l := range linked {
+			mk := l.Group + ":" + strconv.Itoa(l.Msg)
+			saved := savedByID[l.SavedID]
+			if files[mk] != nil || saved == nil {
+				continue
+			}
+			f := *saved
+			f.item.Group, f.item.Msg, f.item.Linked = l.Group, l.Msg, true
+			if l.Name != "" {
+				f.item.Name = l.Name
+			}
+			if l.How == "exact-reupload" {
+				f.item.Status = "subst"
+			} else {
+				f.item.Status = "ok"
+			}
+			if l.TgFile != "" && identKey[l.TgFile] == "" {
+				identKey[l.TgFile] = f.item.Key
+			}
+			files[mk] = &f
+		}
+	} else if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	held := map[string]string{}
 	if rows, err := a.db.Reader.QueryContext(ctx, `SELECT group_id, message_id, like_key FROM ix_held WHERE released_at=0 AND reason<>'' AND like_key<>''`); err == nil {
 		for rows.Next() {
@@ -348,7 +378,7 @@ func (a *App) ixBuildModel(ctx context.Context) (*ixModel, error) {
 				m.ByKey[it.Key] = ii
 			}
 		}
-		if it.ID > 0 {
+		if it.ID > 0 && !it.Linked {
 			m.ByID[it.ID] = ii
 		}
 	}

@@ -58,6 +58,30 @@ type Record struct {
 	// Staged: the file is complete and verified in the local staging folder
 	// and is copied to the library later; ID is 0 until then (OnStaged).
 	Staged bool
+	// Dedup says how a Reused record was found (Dedup* below), and DedupHow
+	// how an exact re-upload was confirmed (Substitute's answer).
+	Dedup, DedupHow string
+}
+
+// How a message was found to share a file already in the library.
+const (
+	// DedupTelegramFile: the same Telegram file (a forward, a repost, or
+	// the message again). Nothing was downloaded.
+	DedupTelegramFile = "telegram-file"
+	// DedupReupload: a new upload of the same bytes, confirmed on Telegram
+	// before downloading (Substitute). Nothing was downloaded.
+	DedupReupload = "exact-reupload"
+	// DedupAfterDownload: the downloaded bytes were already in the library.
+	// The downloaded copy was removed; the bytes were spent.
+	DedupAfterDownload = "after-download"
+)
+
+// tagged marks how a record was found when it reuses a file.
+func tagged(r Record, how string) Record {
+	if r.Reused && r.Dedup == "" {
+		r.Dedup = how
+	}
+	return r
 }
 
 // Library uses the existing downloads table as its durable identity index.
@@ -66,8 +90,15 @@ type Record struct {
 type Library struct {
 	// Substitute (an archive option) may name a saved file that holds this
 	// item's exact bytes, checked on Telegram without a full download. The
-	// item is then catalogued like a forward of that file.
-	Substitute func(context.Context, Item, Client) (string, bool)
+	// item is then catalogued like a forward of that file. how names the
+	// check that confirmed it (Record.DedupHow); DedupTelegramFile when it
+	// is the same Telegram file, known by a message without an entry.
+	Substitute func(context.Context, Item, Client) (path, how string, ok bool)
+	// SubstituteFrom (with Substitute): from this size, while a file is
+	// downloading, another message's file of exactly its size waits for it
+	// instead of downloading at the same time, so that Substitute can find
+	// it saved (same-size files at once are almost always copies). 0: never.
+	SubstituteFrom func(context.Context) int64
 	// Staging (optional) names a local folder downloads are written to
 	// first, then copied to the library (staging.go). OnStaged is told when
 	// such a file is in the library; StageHold is held while it is added.
@@ -155,6 +186,26 @@ func (l *Library) tryEnter(key string) (func(), bool) {
 	return func() { l.mu.Lock(); delete(l.flights, key); close(done); l.mu.Unlock() }, true
 }
 
+func (l *Library) substituteFrom(ctx context.Context) int64 {
+	if l.Substitute == nil || l.SubstituteFrom == nil {
+		return 0
+	}
+	return l.SubstituteFrom(ctx)
+}
+
+// enterPaused is enter, with the client's attempt time limit stopped while
+// it waits (clients that have one: PauseBudget).
+func (l *Library) enterPaused(ctx context.Context, key string, client Client) (func(), error) {
+	if release, ok := l.tryEnter(key); ok {
+		return release, nil
+	}
+	if p, ok := client.(interface{ PauseBudget() func() }); ok {
+		resume := p.PauseBudget()
+		defer resume()
+	}
+	return l.enter(ctx, key)
+}
+
 func messageKey(item Item) string {
 	return "message:" + item.GroupID + ":" + strconv.FormatInt(item.MessageID, 10)
 }
@@ -187,26 +238,49 @@ func (l *Library) Ingest(ctx context.Context, item Item, client Client) (Record,
 	}
 	defer release()
 	if record, found, err := l.existing(ctx, item, `d.telegram_media_kind=? AND d.telegram_media_id=?`, item.Identity.Kind, item.Identity.ID); err != nil || found {
-		return record, err
+		return tagged(record, DedupTelegramFile), err
 	}
 	if record, found, err := l.reuse(ctx, item, `d.telegram_media_kind=? AND d.telegram_media_id=? AND (d.telegram_media_size=? OR (d.telegram_media_size IS NULL AND d.file_size=?))`, item.Identity.Kind, item.Identity.ID, item.Identity.Size, item.Identity.Size); err != nil || found {
-		return record, err
+		return tagged(record, DedupTelegramFile), err
 	}
 	if record, found, err := l.followStaged(ctx, item); err != nil || found {
-		return record, err
+		return tagged(record, DedupTelegramFile), err
 	}
 	if client == nil {
 		return Record{}, errors.New("Telegram download client is unavailable")
 	}
+	if from := l.substituteFrom(ctx); from > 0 && item.Identity.Size >= from {
+		sizeRelease, err := l.enterPaused(ctx, "size:"+strconv.FormatInt(item.Identity.Size, 10), client)
+		if err != nil {
+			return Record{}, err
+		}
+		defer sizeRelease()
+	}
 	if l.Substitute != nil {
-		if path, ok := l.Substitute(ctx, item, client); ok {
-			if record, found, err := l.reuse(ctx, item, `d.file_path=?`, path); err != nil || found {
+		if path, how, ok := l.Substitute(ctx, item, client); ok {
+			// With SkipDuplicates no entry is made, as for any other copy.
+			record, found, err := l.existing(ctx, item, `d.file_path=?`, path)
+			if err == nil && !found {
+				record, found, err = l.reuse(ctx, item, `d.file_path=?`, path)
+			}
+			if err != nil || found {
+				// how is DedupTelegramFile when Substitute knows this Telegram
+				// file under a message that has no entry of its own.
+				kind := DedupReupload
+				if how == DedupTelegramFile {
+					kind = DedupTelegramFile
+				}
+				record = tagged(record, kind)
+				if record.Dedup == kind {
+					record.DedupHow = how
+				}
 				return record, err
 			}
 		}
 	}
 	if st := l.stagingFor(ctx, item); st.Dir != "" {
-		return l.ingestStaged(ctx, item, client, st)
+		record, err := l.ingestStaged(ctx, item, client, st)
+		return tagged(record, DedupAfterDownload), err
 	}
 	relative, err := l.destination(item)
 	if err != nil {
@@ -254,9 +328,12 @@ func (l *Library) Ingest(ctx context.Context, item Item, client Client) (Record,
 		return Record{}, err
 	}
 	defer contentRelease()
+	// The bytes were downloaded and are already in the library: the
+	// catalogue points at the saved copy and the downloaded one goes.
 	if record, found, err := l.existing(ctx, item, `d.file_hash=?`, sum); err != nil {
 		return Record{}, err
 	} else if found {
+		record = tagged(record, DedupAfterDownload)
 		if err := root.Remove(path); err != nil {
 			return record, fmt.Errorf("remove redundant downloaded file: %w", err)
 		}
@@ -268,6 +345,7 @@ func (l *Library) Ingest(ctx context.Context, item Item, client Client) (Record,
 	if record, found, err := l.reuse(ctx, item, `d.file_hash=? AND d.file_size=?`, sum, item.Identity.Size); err != nil {
 		return Record{}, err
 	} else if found {
+		record = tagged(record, DedupAfterDownload)
 		// No catalog entry has ever named our unique destination. Deleting
 		// only this transfer's file cannot remove another message's media.
 		if err := root.Remove(path); err != nil {

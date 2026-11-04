@@ -3,7 +3,6 @@ package telegram
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	gotd "github.com/gotd/td/telegram"
 	"github.com/gotd/td/tg"
@@ -155,41 +154,7 @@ func (c *GotdClient) fileDC(ctx context.Context, a Attachment, fn func(*tg.Clien
 	return fn(tg.NewClient(pool))
 }
 
-// FileHashes asks Telegram for the SHA-256 hashes of the parts of the file
-// starting at offset (upload.getFileHashes). Telegram keeps no hashes for
-// some files and answers with an error.
-func (c AttachmentClient) FileHashes(ctx context.Context, offset int64) ([]tg.FileHash, error) {
-	g, ok := c.Source.(*GotdClient)
-	if !ok {
-		return nil, errors.New("Telegram file hashes are unavailable")
-	}
-	var out []tg.FileHash
-	err := g.fileDC(ctx, c.Media, func(api *tg.Client) error {
-		var e error
-		out, e = api.UploadGetFileHashes(ctx, &tg.UploadGetFileHashesRequest{Location: c.Media.Location, Offset: offset})
-		return e
-	})
-	return out, err
-}
-
-// ReadPart downloads the 1 MiB part of the file at offset (a multiple of
-// 1 MiB); the last part is shorter.
-func (c AttachmentClient) ReadPart(ctx context.Context, offset int64) ([]byte, error) {
-	if offset%downloadPartSize != 0 {
-		return nil, fmt.Errorf("part offset %d is not a multiple of %d", offset, downloadPartSize)
-	}
-	g, ok := c.Source.(*GotdClient)
-	if !ok {
-		return nil, errors.New("Telegram file parts are unavailable")
-	}
-	var out []byte
-	err := g.fileDC(ctx, c.Media, func(api *tg.Client) error {
-		var e error
-		out, e = fetchPart(ctx, api, c.Media.Location, offset)
-		return e
-	})
-	return out, err
-}
+// FileHashes, ReadPart and ReadRange: ix_parts.go.
 
 // PartSize is the size of the parts ReadPart returns.
 const PartSize = downloadPartSize

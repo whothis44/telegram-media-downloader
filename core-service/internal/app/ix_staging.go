@@ -121,7 +121,10 @@ func (a *App) ixWaitStageRoom(ctx context.Context, size int64, transport telegra
 // it is in the library: the dashboard event and the background work.
 func (a *App) ixStagedArrived(ctx context.Context, item download.Item, record download.Record) {
 	key := item.GroupID + "_" + strconv.FormatInt(item.MessageID, 10)
-	payload := map[string]any{"key": key, "groupId": item.GroupID, "groupName": item.GroupName, "messageId": item.MessageID, "fileName": item.Name, "filePath": record.Path, "fileSize": item.Identity.Size, "mediaType": item.Type, "deduped": record.Reused, "addedAt": nil, "accountId": nil, "accountName": nil}
+	payload := map[string]any{"key": key, "groupId": item.GroupID, "groupName": item.GroupName, "messageId": item.MessageID, "fileName": item.Name, "filePath": record.Path, "fileSize": item.Identity.Size, "mediaType": item.Type, "deduped": record.Reused, "dedupedHow": record.Dedup, "addedAt": nil, "accountId": nil, "accountName": nil}
+	if record.Reused {
+		a.ixNoteLink(ctx, item, record) // the file's place in the library (it may have been renamed on arrival)
+	}
 	if record.Skipped {
 		payload["skipped"] = true
 		a.hub.Broadcast(ws.Event{Type: "download_complete", Payload: payload})
