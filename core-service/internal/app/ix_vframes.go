@@ -39,7 +39,7 @@ const (
 
 // ixMLLookAlikeVideoSim: videos this alike by their mean embedding go to
 // the look-alike review.
-const ixMLLookAlikeVideoSim = 0.97
+const ixMLLookAlikeVideoSim = 0.985
 
 const ixSchemaVFrames = `
 CREATE TABLE IF NOT EXISTS ix_emb_frames ( -- embeddings of distinct video frames (int8, like ix_emb)

@@ -293,8 +293,9 @@ type ixMLBox struct {
 	notes        map[string]ixMLTaskNote    // task -> whether its service answered, its last error
 	done         map[string]map[string]bool // task -> files looked at (faces, text, speech)
 	doneModel    map[string]string
-	regroupAfter int64 // the last ungrouped face given another chance
-	running      int   // steps under way
+	regroupAfter int64         // the last ungrouped face given another chance
+	running      int           // steps under way
+	wake         chan struct{} // a service came back: stop waiting
 }
 
 type ixMLStatus struct {
@@ -518,6 +519,29 @@ func (a *App) ixEmbSim() func(string, string) (float32, bool) {
 
 // ---------- worker ----------
 
+// ixMLWakeChan is closed when the recognition service comes back, so the
+// background work does not sit out its wait after the service was down.
+func (a *App) ixMLWakeChan() <-chan struct{} {
+	box := a.ixMLBox()
+	box.mu.Lock()
+	defer box.mu.Unlock()
+	if box.wake == nil {
+		box.wake = make(chan struct{})
+	}
+	return box.wake
+}
+
+// ixMLWake ends the background work's wait.
+func (a *App) ixMLWake() {
+	box := a.ixMLBox()
+	box.mu.Lock()
+	defer box.mu.Unlock()
+	if box.wake != nil {
+		close(box.wake)
+	}
+	box.wake = make(chan struct{})
+}
+
 func (a *App) ixRunML(ctx context.Context) {
 	wait := 45 * time.Second
 	for {
@@ -525,6 +549,7 @@ func (a *App) ixRunML(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-time.After(wait):
+		case <-a.ixMLWakeChan():
 		}
 		wait = time.Minute
 		if !ixVdupBackground.Load() {

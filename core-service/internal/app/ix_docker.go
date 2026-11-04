@@ -297,6 +297,7 @@ func (a *App) ixMLStartWaitReady(ctx context.Context, s ixSettings, results []ix
 					err := c.ping(ctx)
 					if err == nil {
 						a.ixMLNote(true, "")
+						a.ixMLWake()
 					}
 					return err
 				}
