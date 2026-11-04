@@ -522,6 +522,7 @@ func (a *App) ixRunBackups(ctx context.Context) {
 }
 
 func (a *App) ixBackupTick(ctx context.Context, now time.Time) {
+	a.ixFinalStep(ctx, now)
 	s := a.ixLoadSettings(ctx)
 	if s.BackupOff || now.Format("15:04") <= s.ExportTime || a.ixExportStatus().Running {
 		return
@@ -557,6 +558,7 @@ func (a *App) ixBackupOverview(ctx context.Context) map[string]any {
 	if data, err := filepath.Abs(a.dataDir); err == nil {
 		out["dataDir"] = data
 	}
+	out["final"] = a.ixFinalOverview(ctx, time.Now())
 	return out
 }
 
@@ -574,7 +576,7 @@ func (a *App) ixBackupDiag(ctx context.Context, now time.Time, clean func(string
 	if st.Running {
 		line += " · running now"
 	}
-	return line
+	return line + " · " + a.ixFinalDiag(ctx, now)
 }
 
 // ixParseBackupSettings reads the backup switch from a settings change.

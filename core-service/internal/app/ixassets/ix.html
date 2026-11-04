@@ -99,6 +99,14 @@ function banner() {
   let h = '';
   const acct = s.account || {};
   const fz = s.freeze || {};
+  // The day before the deletion date (ix_final.go).
+  const fin = (s.backup && s.backup.final) || {};
+  if (fin.window) {
+    const run = fin.run || {};
+    const errs = [run.exportError, run.backupError].filter(Boolean);
+    const ran = run.finishedAt ? `A last index copy and backup were made ${esc(fmtTime(run.finishedAt))}${errs.length ? ` <span class="bad">(not everything worked: ${esc(errs.join('; '))})</span>` : ''}.` : run.startedAt ? 'A last index copy and backup are being made now.' : 'A last index copy and backup will be made in the next few minutes.';
+    h += `<div class="status bad"><b>Telegram deletes this account in less than a day.</b> Keep the app running until then: it keeps saving messages and files for as long as Telegram lets it. ${ran} Also copy the app's data folder <code>${esc(s.backup.dataDir || '')}</code> somewhere safe: it holds the session, the secret key that opens it, and the database.</div>`;
+  }
   if (fz.until) {
     const days = Math.max(0, Math.floor((fz.until * 1000 - Date.now()) / 86400000));
     h += `<div class="status bad"><b>Telegram will delete this account on ${esc(new Date(fz.until * 1000).toLocaleString())} — ${days} day(s) left</b> unless an appeal is accepted${fz.appealUrl ? ` (<a href="${esc(fz.appealUrl)}" target="_blank" rel="noopener">appeal</a>)` : ''}. Rescans now take private chats before public ones. <b>Never log this account out of the app:</b> a frozen account cannot sign in again. <button class="mini" data-act="freeze-check">Check again</button></div>`;
