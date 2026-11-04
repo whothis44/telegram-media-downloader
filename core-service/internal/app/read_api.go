@@ -73,11 +73,12 @@ func (a *App) handleAPIMonitorStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // monitorStatusForGuests is the monitor status a guest sees: without the
-// download throughput (speed and recent totals are the operator's).
+// download throughput (speed and recent totals are the operator's) and
+// the download state (ix_dlstate.go: it names the group being read).
 func monitorStatusForGuests(status map[string]any) map[string]any {
 	out := make(map[string]any, len(status))
 	for k, v := range status {
-		if k != "throughput" {
+		if k != "throughput" && k != "downloadState" {
 			out[k] = v
 		}
 	}
@@ -119,6 +120,7 @@ func (a *App) monitorStatusPayload(ctx context.Context) (map[string]any, error) 
 		status["accounts"] = accounts
 	}
 	status["throughput"] = a.throughputPayload(ctx) // throughput.go
+	status["downloadState"] = a.ixDlState(ctx)      // ix_dlstate.go
 	return status, nil
 }
 

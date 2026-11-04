@@ -158,6 +158,8 @@ type ixPace struct {
 	// Premium waits: Telegram's speed limit for accounts without Premium.
 	Premium1h  int        `json:"premium1h"`
 	Premium24h int        `json:"premium24h"`
+	Premium10m int        `json:"premium10m"`
+	Floods10m  int        `json:"floods10m"`
 	DCs        []ixPaceDC `json:"dcs"`
 }
 
@@ -186,6 +188,8 @@ func (a *App) ixPaceNow() ixPace {
 		p.Floods24h += s.Floods24h
 		p.Premium1h += s.Premium1h
 		p.Premium24h += s.Premium24h
+		p.Premium10m += s.Premium10m
+		p.Floods10m += s.Floods10m
 		for _, d := range s.DCs {
 			x := ixPaceDC{DCPace: d}
 			if len(all) > 1 {

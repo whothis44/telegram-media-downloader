@@ -4187,6 +4187,15 @@
             <span class="status-chip-val" id="status-day-files">0</span>
             <span class="status-chip-bytes text-tg-textSecondary" id="status-day-bytes">0 B</span>
         </span>
+        <!-- What downloads are doing (internal/app/ix_dlstate.go): one word,
+             what is ready and what waits; the title gives the reasons and
+             whether to do anything. Filled by statusbar.js from the monitor
+             status `downloadState` object (admins only). -->
+        <span class="status-chip hidden" id="status-dl-chip" data-admin-only tabindex="0">
+            <span class="status-dl-dot" aria-hidden="true"></span>
+            <span class="status-chip-val" id="status-dl-word">—</span>
+            <span class="status-chip-bytes text-tg-textSecondary" id="status-dl-counts"></span>
+        </span>
 
         <!-- Right cluster: WS indicator · update badge · version (admin, desktop) -->
         <span class="ml-auto flex items-center gap-2" data-admin-only>

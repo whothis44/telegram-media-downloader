@@ -94,10 +94,81 @@ function applyThroughput(tp) {
     );
 }
 
+// `downloadState` rides the monitor status too (internal/app/ix_dlstate.go):
+// one word for what downloads are doing, what is ready and what waits,
+// and one sentence on whether to do anything. Admins only, like the
+// throughput: a guest's status has none and the chip stays hidden.
+const DL_WORDS = {
+    paused: 'Paused',
+    readonly: 'Read-only',
+    stalled: 'Stalled',
+    'speed-limited': 'Speed limit',
+    filling: 'Filling',
+    downloading: 'Downloading',
+    done: 'Done',
+};
+function applyDownloadState(ds) {
+    const chip = $('status-dl-chip');
+    if (!chip) return;
+    if (!ds || !ds.verdict) {
+        chip.classList.add('hidden');
+        return;
+    }
+    const n = (v) => (Number(v) || 0).toLocaleString();
+    const word = i18nT(`status.dl.${ds.verdict}`, DL_WORDS[ds.verdict] || ds.verdict);
+    const w = $('status-dl-word');
+    if (w) w.textContent = word;
+    const c = $('status-dl-counts');
+    if (c) {
+        c.textContent = i18nTf(
+            'status.dl.counts',
+            { ready: n(ds.ready), aside: n(ds.setAside) },
+            '{ready} ready · {aside} set aside',
+        );
+    }
+    const a = ds.aside || {};
+    const r = ds.rescan || {};
+    const lines = [
+        i18nTf(
+            'status.dl.title_counts',
+            { ready: n(ds.ready), downloading: n(ds.downloading), retry: n(ds.retryLater) },
+            '{ready} ready to start · {downloading} downloading · {retry} to try again later',
+        ),
+        i18nTf(
+            'status.dl.title_aside',
+            {
+                copies: n(a.copies),
+                deadline: n(a.deadline),
+                lowq: n(a.lowerQuality),
+                big: n(a.bigLane),
+                mine: n(a.byYou),
+            },
+            'Set aside: {copies} likely copies · {deadline} waiting while private chats and smaller files go first · {lowq} waiting for a lower quality first · {big} big files waiting their turn · {mine} paused by you',
+        ),
+    ];
+    if (r.total) {
+        lines.push(
+            i18nTf(
+                r.group ? 'status.dl.title_rescan_group' : 'status.dl.title_rescan',
+                { done: n(r.done), total: n(r.total), group: r.group || '', left: n(ds.toDownload) },
+                r.group
+                    ? 'Rescan: {done} of {total} groups done · reading {group} · about {left} files still to download'
+                    : 'Rescan: {done} of {total} groups done · about {left} files still to download',
+            ),
+        );
+    }
+    if (ds.advice) lines.push(ds.advice);
+    chip.title = lines.join('\n');
+    chip.setAttribute('aria-label', `${word}. ${ds.advice || ''}`);
+    chip.dataset.verdict = ds.verdict;
+    chip.classList.remove('hidden');
+}
+
 function applyMonitor(mon) {
     if (!mon) return;
     applyState(mon.state);
     applyThroughput(mon.throughput);
+    applyDownloadState(mon.downloadState);
     const q = $('status-queue');
     if (q) q.textContent = mon.queue ?? 0;
     const a = $('status-active');

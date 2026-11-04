@@ -226,6 +226,20 @@ function viewKeeping() {
 </div>`;
 }
 
+// What downloads are doing (ix_dlstate.go): the verdict the dashboard's
+// status bar shows, why the rest of the queue waits, and the rescan.
+function viewDlState() {
+  const x = state.status.dlState; if (!x || !x.verdict) return '';
+  const words = { paused: 'Paused', readonly: 'Read-only', stalled: 'Stalled', 'speed-limited': 'Speed limit', filling: 'Filling', downloading: 'Downloading', done: 'Done' };
+  const cls = { stalled: 'bad', paused: 'warn', 'speed-limited': 'warn', downloading: 'ok', done: 'ok' }[x.verdict] || '';
+  const a = x.aside || {}, r = x.rescan || {};
+  const why = [[a.copies, 'likely copies'], [a.deadline, 'waiting while private chats and smaller files go first'], [a.lowerQuality, 'waiting for a lower quality first'], [a.bigLane, 'big files waiting their turn'], [a.byYou, 'paused by you']]
+    .filter(([n]) => n > 0).map(([n, l]) => `${fmtNum(n)} ${l}`).join(' · ');
+  const rescan = r.total ? `Rescan: ${fmtNum(r.done)} of ${fmtNum(r.total)} group(s) done${r.group ? ` · reading <b>${esc(r.group)}</b> (${r.phase === 'files' ? 'files' : 'messages'})` : ''} · about ${fmtNum(x.toDownload)} file(s) still to download${r.notQueued ? ` (${fmtNum(r.notQueued)} not queued yet)` : ''}.` : '';
+  return `<div class="dlstate"><b class="${cls}">${esc(words[x.verdict] || x.verdict)}</b>: ${fmtNum(x.ready)} ready · ${fmtNum(x.downloading)} downloading · ${fmtNum(x.setAside)} set aside${x.retryLater ? ` · ${fmtNum(x.retryLater)} to try again later` : ''}. <span class="${x.act ? 'warn' : 'muted'}">${esc(x.advice)}</span>
+${why ? `<div class="muted">Set aside: ${why}.</div>` : ''}${rescan ? `<div class="muted">${rescan}</div>` : ''}</div>`;
+}
+
 function viewDownloads() {
   const d = state.status.downloads;
   if (!d) return '';
@@ -235,7 +249,7 @@ function viewDownloads() {
   else if (d.downloading || d.lastHour) state1 = `<b>Downloading.</b> ${fmtNum(d.lastHour)} file(s) finished in the last hour${d.lastAt ? ' (latest: ' + esc(fmtTime(d.lastAt)) + ')' : ''}.`;
   else if (d.waiting) state1 = `<span class="warn">${fmtNum(d.waiting)} file(s) waiting, but none finished in the last hour.</span> Telegram may have asked the app to slow down; if this lasts, check the dashboard's queue.`;
   else state1 = `Nothing to download right now${d.lastAt ? ' — the latest file finished ' + esc(fmtTime(d.lastAt)) : ''}.`;
-  let h = `<div class="card"><h2>Downloads</h2><div>${state1}</div>
+  let h = `<div class="card"><h2>Downloads</h2><div>${state1}</div>${viewDlState()}
 <div class="muted" style="margin-top:6px">${fmtNum(d.downloading)} downloading · ${fmtNum(d.waiting)} waiting · <span class="${d.failed ? 'bad' : ''}">${fmtNum(d.failed)} failed</span>${d.givenUp ? ` (${fmtNum(d.givenUp)} no longer retried automatically)` : ''}</div>
 ${(() => {
   const b = d.big || {};
@@ -318,7 +332,7 @@ function viewRescan() {
   const notQueued = groups().filter((g) => !g.finishedAt && !items.some((i) => i.groupId === g.id && (i.state === 'waiting' || i.state === 'running')));
   let h = `<div class="card"><h2>Rescan everything</h2><div class="muted">Full history of every group, one group after another, with photos, videos <b>and files/documents</b> switched on. Groups already in the queue are skipped.</div>
 <div class="btns"><button class="b primary" data-act="p-everything" ${notQueued.length ? '' : 'disabled'}>Rescan all ${notQueued.length} group(s)</button></div></div>`;
-  h += `<div class="status">${head} Two lanes run side by side, one group each. <b>Messages:</b> every group's history is saved, without waiting for downloads. <b>Files:</b> as soon as a group's messages are saved, it is walked again to fetch the files still missing (failed files get another try too). <b>★ First</b> groups go first in both lanes. Runs inside the server — you can close this page.${q.notice ? `<div class="muted" style="margin-top:4px">${esc(q.notice)}</div>` : ''}</div>`;
+  h += `<div class="status">${head} Two lanes run side by side, one group each. <b>Messages:</b> every group's history is saved, without waiting for downloads. <b>Files:</b> as soon as a group's messages are saved, it is walked again to fetch the files still missing (failed files get another try too). <b>★ First</b> groups go first in both lanes. Runs inside the server — you can close this page.${q.notice ? `<div class="muted" style="margin-top:4px">${esc(q.notice)}</div>` : ''}<div style="margin-top:6px">${viewDlState()}</div></div>`;
   h += `<div class="btns" style="margin-bottom:12px">${q.running ? `<button class="b" data-act="q-pause">Pause</button>` : `<button class="b primary" data-act="q-start" ${counts.waiting ? '' : 'disabled'}>Start</button>`}
 <button class="b" data-act="q-clear-finished" ${counts.done + counts.failed ? '' : 'disabled'}>Remove finished</button><button class="b" data-act="q-clear" ${items.length ? '' : 'disabled'}>Clear queue</button>
 <span class="muted">Retries: ${q.maxAttempts ? 'up to ' + q.maxAttempts : 'unlimited'}</span></div>`;
