@@ -38,6 +38,11 @@ const (
 	ixFaceMinFaces = 3   // look-alike faces needed to make a new person
 )
 
+// ixFaceMinGood of the ixFaceMinFaces files must have a good face; the
+// others may have weak faces clearly alike (ixFaceWeakSim) to the one
+// starting the person.
+const ixFaceMinGood = 2
+
 // ---------- client ----------
 
 type ixFaceFound struct {
@@ -103,12 +108,19 @@ type ixFaceStore struct {
 	person []int64
 	key    []int32   // the face's file, an index into keys
 	frame  []int16   // the video frame it is in (0 for a picture)
-	tier   []int8    // good, weak or unusable (ixFaceTierOf)
+	tier   []int8    // good, weak or unusable (gates.tierOf)
 	qual   []float32 // for the cover picture (ixFaceQuality)
 	keys   []string
 	keyIdx map[string]int32
 	shots  map[int64][]int32 // one picture or video frame -> its faces
 	loaded bool
+
+	// For the gates that follow the archive (ix_faces_gates.go): detection
+	// score, box size and sharpness of each face, the gates in use, and how
+	// many faces there were when they were worked out.
+	score, px, blur []float32
+	gates           ixFaceGates
+	gatesAt         int
 }
 
 // ixFaceInfo is what is known of a face besides its embedding.
@@ -126,6 +138,7 @@ func (s *ixFaceStore) load(ctx context.Context, db *sql.DB, model string) error 
 	}
 	s.model, s.dim, s.ids, s.vecs, s.norms, s.person = model, 0, nil, nil, nil, nil
 	s.key, s.frame, s.tier, s.qual, s.keys = nil, nil, nil, nil, nil
+	s.score, s.px, s.blur, s.gates, s.gatesAt = nil, nil, nil, ixFaceGatesFixed, 0
 	s.index, s.keyIdx, s.shots = map[int64]int32{}, map[string]int32{}, map[int64][]int32{}
 	rows, err := db.QueryContext(ctx, `SELECT id, vec, person, key, frame, score, px, blur FROM ix_faces WHERE model=? ORDER BY id`, model)
 	if err != nil {
@@ -142,6 +155,7 @@ func (s *ixFaceStore) load(ctx context.Context, db *sql.DB, model string) error 
 		s.addLocked(id, ixBytesToInt8(blob), person, fi)
 	}
 	s.loaded = true
+	s.regateLocked()
 	return rows.Err()
 }
 
@@ -163,6 +177,9 @@ func (s *ixFaceStore) addLocked(id int64, v []int8, person int64, fi ixFaceInfo)
 	if s.index == nil {
 		s.index, s.keyIdx, s.shots = map[int64]int32{}, map[string]int32{}, map[int64][]int32{}
 	}
+	if s.gates == (ixFaceGates{}) {
+		s.gates = ixFaceGatesFixed
+	}
 	var n float64
 	for _, x := range v {
 		n += float64(x) * float64(x)
@@ -181,10 +198,14 @@ func (s *ixFaceStore) addLocked(id int64, v []int8, person int64, fi ixFaceInfo)
 	s.person = append(s.person, person)
 	s.key = append(s.key, k)
 	s.frame = append(s.frame, int16(fi.frame))
-	s.tier = append(s.tier, ixFaceTierOf(fi.score, fi.px, fi.blur))
+	s.tier = append(s.tier, s.gates.tierOf(fi.score, fi.px, fi.blur))
 	s.qual = append(s.qual, ixFaceQuality(fi.score, fi.px, fi.blur))
+	s.score, s.px, s.blur = append(s.score, float32(fi.score)), append(s.px, float32(fi.px)), append(s.blur, float32(fi.blur))
 	sh := ixFaceShot(k, int16(fi.frame))
 	s.shots[sh] = append(s.shots[sh], i)
+	if s.loaded {
+		s.regateSoonLocked()
+	}
 }
 
 // ixFaceShot names one picture, or one frame of a video.
@@ -224,7 +245,8 @@ func (s *ixFaceStore) dropLocked(id int64) {
 // setInfoLocked updates what a face was measured as.
 func (s *ixFaceStore) setInfoLocked(id int64, score, px, blur float64) {
 	if i, ok := s.index[id]; ok {
-		s.tier[i], s.qual[i] = ixFaceTierOf(score, px, blur), ixFaceQuality(score, px, blur)
+		s.tier[i], s.qual[i] = s.gates.tierOf(score, px, blur), ixFaceQuality(score, px, blur)
+		s.score[i], s.px[i], s.blur[i] = float32(score), float32(px), float32(blur)
 	}
 }
 
@@ -541,10 +563,11 @@ func (a *App) ixFaceRetryNearLocked(ctx context.Context, placed []int64, unit fu
 //   - unusable faces are never grouped;
 //   - a face joins the person of its closest grouped look-alike, at the
 //     likeness the pair needs (stricter when either face is weak);
-//   - otherwise a good face starts a new person when good look-alikes not
-//     yet grouped are seen in at least ixFaceMinFaces different files
-//     (copies of one file, and frames of one video, count once). It takes
-//     those faces with it, and the weak ones that are clearly alike.
+//   - otherwise a good face starts a new person when look-alikes not yet
+//     grouped are seen in at least ixFaceMinFaces different files (copies
+//     of one file, and frames of one video, count once), at least
+//     ixFaceMinGood of them with a good face; a weak face counts only when
+//     clearly alike. It takes those faces with it.
 //
 // reuse, when set, may give an existing empty person for the new one (and
 // the faces that may go to them). It says which faces were put with a
@@ -595,15 +618,16 @@ func (a *App) ixGroupFaceLocked(ctx context.Context, id int64, v []int8, unit fu
 	if tier != ixFaceGood {
 		return nil, nil // weak faces only join
 	}
-	units := map[string]bool{myUnit: true}
+	units, good := map[string]bool{myUnit: true}, map[string]bool{myUnit: true}
 	take := []int64{id}
 	for _, n := range loose {
+		units[n.unit] = true // weak ones are here only when clearly alike
 		if n.tier == ixFaceGood {
-			units[n.unit] = true
+			good[n.unit] = true
 		}
 		take = append(take, n.id)
 	}
-	if len(units) < ixFaceMinFaces {
+	if len(units) < ixFaceMinFaces || len(good) < ixFaceMinGood {
 		return nil, nil
 	}
 	var person int64
