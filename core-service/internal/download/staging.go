@@ -88,8 +88,16 @@ type stageState struct {
 // go on past the space allowed (see WaitStageRoom).
 const stageFreeReserve int64 = 50 << 30
 
-// stageFreeSpace is the free space on the disk holding dir (a variable for tests).
-var stageFreeSpace = diskFree
+// stageFreeHook replaces diskFree in tests.
+var stageFreeHook atomic.Pointer[func(string) (int64, bool)]
+
+// stageFreeSpace is the free space on the disk holding dir.
+func stageFreeSpace(dir string) (int64, bool) {
+	if f := stageFreeHook.Load(); f != nil {
+		return (*f)(dir)
+	}
+	return diskFree(dir)
+}
 
 // errStageLater: the move waits for another download of the same message
 // or file to finish. Not a failure; it is tried again shortly.
@@ -444,39 +452,18 @@ func (l *Library) moveStaged(ctx context.Context, mv stagedMove) error {
 	}
 	item.generation = mv.generation
 	local := filepath.Join(mv.stageDir, filepath.FromSlash(mv.path))
-	// While it is moved, no download of its file or of its messages runs:
-	// nothing can follow it or catalogue those messages meanwhile. When one
-	// runs, the move waits for it.
+	// What becomes of the file is decided with the locks of its file and its
+	// messages held (no download of them runs meanwhile), once before the
+	// copy and again just before it is catalogued. The locks are not held
+	// during the copy, and StageHold is never waited for while they are: a
+	// download holds the app's media lock while it waits for its message.
 	locks := stageLocks{l: l, held: map[string]func(){}}
 	defer locks.release()
-	if !locks.take("identity:"+mv.identity) || !locks.take(messageKey(item)) {
-		return errStageLater
-	}
-	followers, err := l.stageFollowers(ctx, mv.path)
+	d, err := l.stageDecide(ctx, &locks, item, mv)
 	if err != nil {
 		return err
 	}
-	for _, fw := range followers {
-		if !locks.take(messageKey(fw)) {
-			return errStageLater
-		}
-	}
-	fate, err := l.stageFateOf(ctx, item, mv.path)
-	if err != nil {
-		return err
-	}
-	if fate == stageLater {
-		return errStageLater
-	}
-	fates := make([]stageFate, len(followers))
-	wanted := fate != stageReplaced
-	for i, fw := range followers {
-		if fates[i], err = l.stageFateOf(ctx, fw, mv.path); err != nil {
-			return err
-		}
-		wanted = wanted || fates[i] == stageCurrent || fates[i] == stageAdopt
-	}
-	if !wanted {
+	if !d.wanted {
 		// A newer version of each message is in the catalogue: nothing wants this file.
 		l.dropStaged(ctx, mv.stageDir, filepath.FromSlash(mv.path))
 		return nil
@@ -490,8 +477,9 @@ func (l *Library) moveStaged(ctx context.Context, mv stagedMove) error {
 			return nil
 		}
 		// Removed by someone or something else: its messages go back in the queue.
-		return l.stagedLost(ctx, mv, append([]Item{item}, followers...), append([]stageFate{fate}, fates...))
+		return l.stagedLost(ctx, mv, append([]Item{item}, d.followers...), append([]stageFate{d.fate}, d.fates...))
 	}
+	locks.release()
 	if err != nil {
 		return stageDoubt{"the staged copy cannot be opened: " + err.Error()}
 	}
@@ -555,6 +543,16 @@ func (l *Library) moveStaged(ctx context.Context, mv stagedMove) error {
 		}
 		defer done()
 	}
+	// Decide again: a download of one of its messages may have run during
+	// the copy. The locks are held from here until it is catalogued.
+	if d, err = l.stageDecide(ctx, &locks, item, mv); err != nil || !d.wanted {
+		_ = parent.Remove(part)
+		if err == nil {
+			l.dropStaged(ctx, mv.stageDir, filepath.FromSlash(mv.path))
+		}
+		return err
+	}
+	fate, followers, fates := d.fate, d.followers, d.fates
 	dirFile, err := parent.Open(".")
 	if err != nil {
 		_ = parent.Remove(part)
@@ -766,9 +764,53 @@ func (s *stageLocks) take(key string) bool {
 }
 
 func (s *stageLocks) release() {
-	for _, release := range s.held {
+	for key, release := range s.held {
 		release()
+		delete(s.held, key)
 	}
+}
+
+// stageDecision is what becomes of a staged file: fate for its first
+// message, fates for the others (followers), and whether any still wants it.
+type stageDecision struct {
+	fate      stageFate
+	followers []Item
+	fates     []stageFate
+	wanted    bool
+}
+
+// stageDecide takes the locks of the staged file and of all its messages
+// without waiting (errStageLater when one is busy) and decides, with them
+// held, what becomes of the file for each message.
+func (l *Library) stageDecide(ctx context.Context, locks *stageLocks, item Item, mv stagedMove) (stageDecision, error) {
+	var d stageDecision
+	if !locks.take("identity:"+mv.identity) || !locks.take(messageKey(item)) {
+		return d, errStageLater
+	}
+	followers, err := l.stageFollowers(ctx, mv.path)
+	if err != nil {
+		return d, err
+	}
+	for _, fw := range followers {
+		if !locks.take(messageKey(fw)) {
+			return d, errStageLater
+		}
+	}
+	if d.fate, err = l.stageFateOf(ctx, item, mv.path); err != nil {
+		return d, err
+	}
+	if d.fate == stageLater {
+		return d, errStageLater
+	}
+	d.followers, d.fates = followers, make([]stageFate, len(followers))
+	d.wanted = d.fate != stageReplaced
+	for i, fw := range followers {
+		if d.fates[i], err = l.stageFateOf(ctx, fw, mv.path); err != nil {
+			return d, err
+		}
+		d.wanted = d.wanted || d.fates[i] == stageCurrent || d.fates[i] == stageAdopt
+	}
+	return d, nil
 }
 
 // stageFate is what becomes of a staged file for one of its messages, when
