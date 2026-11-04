@@ -166,7 +166,8 @@ const view = {
     scrollTop: 0,
     booted: false,
     visible: false,
-    rendered: 0, // how many rows of the filtered list are in the DOM
+    rendered: 0, // end of the rendered window in `_order`
+    frozen: false, // "Pause list updates" — in memory only, off after a reload
 };
 let _loadMoreObserver = null;
 // Keys whose rows landed in the DOM since the last full re-render. We
@@ -208,8 +209,10 @@ function scheduleRender() {
             // repaints it all from the store on the next visit.
             updateNavBadge();
             if (!view.visible) return;
-            if (structural) renderRows();
-            else patchRenderedRows();
+            // Data changes never re-render from the top: rows come and go
+            // around the reader (reconcileRows), then patch in place.
+            if (structural) reconcileRows(true);
+            patchRenderedRows();
             renderChips();
             renderAggregate();
             // Refresh batch-action button state alongside other toolbar
@@ -1035,35 +1038,75 @@ function _renderEmpty() {
     }
 }
 
-// Full re-render — wipes the rows host, paints INITIAL_RENDER rows, and
-// arms the load-more sentinel for further pages. Called when the
-// filter/sort/search changes, or on the very first paint.
+// ============ Keeping the reader's place ============
+//
+// The list on screen follows `_order` — the keys in the order they are
+// shown — not the live sorted list. A full re-render (renderRows) takes
+// the live order: on the first paint, a filter / sort / search change, a
+// visit to the page, and the "N new — show" pill. Everything the data does
+// on its own (downloads arriving, finishing, being cancelled) goes through
+// reconcileRows(), which never moves what the reader is looking at:
+//   - rows that arrive above the viewport are inserted and the scroll
+//     position is corrected so the first visible row stays put;
+//   - rows that would land at the top while the list is at the top, or
+//     among the visible rows, wait behind the "N new — show" pill;
+//   - rows already on screen keep updating in place (progress, status)
+//     and stay while visible even when they leave the filter;
+//   - "Pause list updates" holds every arrival and removal-by-filter
+//     until resumed; counters keep updating.
+// The browser's own scroll anchoring is off for the viewport (CSS
+// overflow-anchor: none) so it can't add a second correction.
+let _order = [];
+let _orderVersion = -1;
+let _pendingCount = 0; // live rows not shown yet (the pill)
+let _staleCount = 0; // rows shown that no longer match the filter
+
+function _paintEmpty() {
+    const rowsHost = document.getElementById('queue-rows');
+    const empty = document.getElementById('queue-empty');
+    if (rowsHost) rowsHost.innerHTML = '';
+    _renderedKeys.clear();
+    view.rendered = 0;
+    _renderEmpty();
+    if (empty) empty.classList.remove('hidden');
+    _toggleSentinel(false);
+}
+
+// Full re-render — wipes the rows host, takes the live order, paints
+// INITIAL_RENDER rows, and arms the load-more sentinel for further pages.
+// Called when the filter/sort/search changes, or on the very first paint.
 function renderRows() {
+    _order = getFilteredSorted().map((j) => j.key);
+    _orderVersion = _storeVersion;
+    paintWindow();
+}
+
+// Paint the first page of `_order` from scratch.
+function paintWindow() {
     const viewport = document.getElementById('queue-viewport');
     const rowsHost = document.getElementById('queue-rows');
     const empty = document.getElementById('queue-empty');
-    const sentinel = document.getElementById('queue-load-more');
     if (!viewport || !rowsHost) return;
 
-    const rows = getFilteredSorted();
     _renderedKeys.clear();
-    if (rows.length === 0) {
-        rowsHost.innerHTML = '';
-        view.rendered = 0;
-        _renderEmpty();
-        if (empty) empty.classList.remove('hidden');
-        if (sentinel) sentinel.classList.add('hidden');
+    _countPending();
+    renderNewPill();
+    if (_order.length === 0) {
+        _paintEmpty();
         return;
     }
     if (empty) empty.classList.add('hidden');
 
-    const initial = Math.min(INITIAL_RENDER, rows.length);
-    const slice = rows.slice(0, initial);
+    const initial = Math.min(INITIAL_RENDER, _order.length);
+    const slice = _order
+        .slice(0, initial)
+        .map((k) => store.get(k))
+        .filter(Boolean);
     rowsHost.innerHTML = slice.map((j) => renderRow(j)).join('');
     for (const j of slice) _renderedKeys.add(j.key);
     view.rendered = initial;
 
-    _toggleSentinel(rows.length > view.rendered);
+    _toggleSentinel(_order.length > view.rendered);
     _ensureLoadMoreObserver();
 
     // Wire per-row interaction via event delegation. Doing it on the host
@@ -1179,34 +1222,85 @@ const MAX_DOM_ROWS = 500;
 function appendNextPage() {
     const rowsHost = document.getElementById('queue-rows');
     if (!rowsHost) return;
-    const rows = getFilteredSorted();
-    if (view.rendered >= rows.length) {
+    // Pages come from the order on screen, not the live order — a row
+    // that arrived since sits wherever reconcileRows() put it.
+    if (view.rendered >= _order.length) {
         _toggleSentinel(false);
         return;
     }
-    const slice = rows.slice(view.rendered, view.rendered + PAGE_SIZE);
-    if (slice.length === 0) {
+    const keys = _order.slice(view.rendered, view.rendered + PAGE_SIZE);
+    if (keys.length === 0) {
         _toggleSentinel(false);
         return;
     }
+    const slice = keys.map((k) => store.get(k)).filter(Boolean);
     // Use insertAdjacentHTML for an O(N_appended) DOM insert that
     // doesn't re-parse the existing rows — a `rowsHost.innerHTML += …`
     // would re-parse the entire prior content, killing performance on
     // a long queue.
     rowsHost.insertAdjacentHTML('beforeend', slice.map((j) => renderRow(j)).join(''));
     for (const j of slice) _renderedKeys.add(j.key);
-    view.rendered += slice.length;
+    view.rendered += keys.length;
     // Sliding window — drop the topmost N rows that have scrolled out of
     // the viewport so the DOM stays bounded. Keeps the IntersectionObserver
     // sentinel intact at the bottom because it lives outside `queue-rows`.
-    while (rowsHost.children.length > MAX_DOM_ROWS) {
-        const first = rowsHost.firstElementChild;
-        if (!first) break;
-        const k = first.dataset?.key;
-        if (k) _renderedKeys.delete(k);
-        first.remove();
+    // The rows go from above the reader, so the scroll position is
+    // corrected to keep the visible rows still.
+    if (rowsHost.children.length > MAX_DOM_ROWS) {
+        const viewport = document.getElementById('queue-viewport');
+        const trim = (anchor) => {
+            while (rowsHost.children.length > MAX_DOM_ROWS) {
+                const first = rowsHost.firstElementChild;
+                if (!first || first === anchor) break;
+                const k = first.dataset?.key;
+                if (k) _renderedKeys.delete(k);
+                first.remove();
+            }
+        };
+        if (viewport) {
+            _keepPlace(viewport, rowsHost, _readerPlace(viewport, rowsHost), () => true, trim);
+        } else {
+            trim(null);
+        }
     }
-    _toggleSentinel(view.rendered < rows.length);
+    _toggleSentinel(view.rendered < _order.length);
+}
+
+// The other end of the sliding window: rows dropped off the top come back
+// when the reader scrolls up to them (inserted above, so the visible rows
+// stay put), and rows far below go to keep the DOM bounded.
+function prependPrevPage() {
+    const viewport = document.getElementById('queue-viewport');
+    const rowsHost = document.getElementById('queue-rows');
+    const firstKey = rowsHost?.firstElementChild?.dataset.key;
+    if (!viewport || !firstKey) return;
+    const from = _order.indexOf(firstKey);
+    if (from <= 0) return;
+    const keys = _order.slice(Math.max(0, from - PAGE_SIZE), from);
+    const place = _readerPlace(viewport, rowsHost);
+    _keepPlace(viewport, rowsHost, place, () => true, () => {
+        const jobs = keys.map((k) => store.get(k)).filter(Boolean);
+        rowsHost.insertAdjacentHTML('afterbegin', jobs.map((j) => renderRow(j)).join(''));
+        for (const j of jobs) _renderedKeys.add(j.key);
+        while (rowsHost.children.length > MAX_DOM_ROWS) {
+            const last = rowsHost.lastElementChild;
+            if (!last) break;
+            _renderedKeys.delete(last.dataset.key);
+            last.remove();
+            view.rendered--;
+        }
+    });
+    _toggleSentinel(view.rendered < _order.length);
+}
+
+let _prevPageScheduled = false;
+function _maybePrependPrev(viewport) {
+    if (_prevPageScheduled || viewport.scrollTop > 400) return;
+    _prevPageScheduled = true;
+    requestAnimationFrame(() => {
+        _prevPageScheduled = false;
+        prependPrevPage();
+    });
 }
 
 function _toggleSentinel(show) {
@@ -1252,39 +1346,236 @@ function _ensureLoadMoreObserver() {
 // by the structural-render path.
 function patchRenderedRows() {
     const rowsHost = document.getElementById('queue-rows');
-    if (!rowsHost || _renderedKeys.size === 0) return;
-    // Detect newly-added jobs that AREN'T in the rendered window — if
-    // there are any (e.g. monitor just started a fresh download), force
-    // a structural re-render so they appear.
-    const filtered = getFilteredSorted();
-    // The DOM holds the window [from, view.rendered) — appendNextPage()
-    // drops rows off the top past MAX_DOM_ROWS. Compare against that
-    // window only; comparing against [0, view.rendered) made every tick
-    // after a trim look "diverged" and snap the list back to the top.
-    const from = Math.max(0, view.rendered - _renderedKeys.size);
-    const filteredKeys = new Set();
-    for (let i = from; i < Math.min(filtered.length, view.rendered); i++) {
-        filteredKeys.add(filtered[i].key);
+    if (!rowsHost) return;
+    // Rows added / removed since the last pass (cheap no-op otherwise).
+    reconcileRows(false);
+    // Patch in place. Each `[data-key]` row has a small set of named
+    // child nodes the patcher knows about; update only those.
+    for (const rowEl of Array.from(rowsHost.children)) {
+        const job = store.get(rowEl.dataset.key);
+        if (job) _patchRowNode(rowEl, job);
     }
-    // If the rendered window's set of keys diverged from the filtered
-    // window (a new top-of-list job, a removal), do a structural pass.
-    if (filteredKeys.size !== _renderedKeys.size) {
+}
+
+// Index of the first element of `els` for which pred holds, given that it
+// holds for every element after it too (rows are in layout order).
+function _firstWhere(els, pred) {
+    let lo = 0;
+    let hi = els.length;
+    while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (pred(els[mid])) hi = mid;
+        else lo = mid + 1;
+    }
+    return lo;
+}
+
+// Where the reader is: the DOM rows, the first visible one and the first
+// one below the viewport. Row offsets are relative to the viewport's
+// content (#queue-viewport is position: relative).
+function _readerPlace(viewport, rowsHost) {
+    const rows = Array.from(rowsHost.children);
+    const top = viewport.scrollTop;
+    const bottom = top + viewport.clientHeight;
+    const first = _firstWhere(rows, (r) => r.offsetTop + r.offsetHeight > top);
+    const below = _firstWhere(rows, (r) => r.offsetTop >= bottom);
+    return { rows, top, first, below, atTop: top <= 2 };
+}
+
+// Run a DOM change without moving the reader: the first visible row that
+// survives (`keep(key)`) stays at the same height on screen.
+function _keepPlace(viewport, rowsHost, place, keep, change) {
+    let anchor = null;
+    let offset = 0;
+    for (let i = place.first; i < place.rows.length; i++) {
+        const r = place.rows[i];
+        if (keep(r.dataset.key)) {
+            anchor = r;
+            offset = r.offsetTop - place.top;
+            break;
+        }
+    }
+    change(anchor);
+    if (anchor && anchor.isConnected) {
+        const want = anchor.offsetTop - offset;
+        if (Math.abs(viewport.scrollTop - want) >= 1) viewport.scrollTop = want;
+    }
+}
+
+// Bring the list on screen in line with the store without moving what
+// the reader is looking at (see "Keeping the reader's place" above).
+function reconcileRows(force) {
+    if (!force && _orderVersion === _storeVersion) return;
+    const viewport = document.getElementById('queue-viewport');
+    const rowsHost = document.getElementById('queue-rows');
+    if (!viewport || !rowsHost) return;
+    _orderVersion = _storeVersion;
+    // Nothing on screen yet: nothing to keep in place.
+    if (_order.length === 0 && !view.frozen) {
         renderRows();
         return;
     }
-    for (const k of _renderedKeys) {
-        if (!filteredKeys.has(k)) {
-            renderRows();
-            return;
+    const live = getFilteredSorted();
+    const liveSet = new Set(live.map((j) => j.key));
+    const place = _readerPlace(viewport, rowsHost);
+    const visible = new Set();
+    for (let i = place.first; i < place.below; i++) visible.add(place.rows[i].dataset.key);
+    const posOf = new Map();
+    place.rows.forEach((r, i) => posOf.set(r.dataset.key, i));
+
+    // Rows that stay: still in the store, and still in the filter — or on
+    // screen, or the list is paused (they update in place until the next
+    // full re-render).
+    const survivors = _order.filter(
+        (k) => store.has(k) && (liveSet.has(k) || view.frozen || visible.has(k)),
+    );
+    const surviving = new Set(survivors);
+
+    // New rows, grouped by the surviving row they go before (null: end).
+    const groups = new Map();
+    let next = null;
+    for (let i = live.length - 1; i >= 0; i--) {
+        const k = live[i].key;
+        if (surviving.has(k)) {
+            next = k;
+            continue;
         }
+        let g = groups.get(next);
+        if (!g) groups.set(next, (g = []));
+        g.push(k); // reversed; read back to front below
     }
-    // Patch in place. Each `[data-key]` row has a small set of named
-    // child nodes the patcher knows about; update only those.
-    for (const job of filtered.slice(from, view.rendered)) {
-        const rowEl = rowsHost.querySelector(`[data-key="${CSS.escape(job.key)}"]`);
-        if (!rowEl) continue;
-        _patchRowNode(rowEl, job);
+    // At the top of the list itself, not of a window that starts lower.
+    const atListTop = place.atTop && place.rows[0]?.dataset.key === _order[0];
+    // Whether a group goes in now or waits behind the pill.
+    const goesIn = (before) => {
+        if (view.frozen) return false;
+        if (before == null || !posOf.has(before)) return true; // off screen
+        const i = posOf.get(before);
+        if (i < place.first) return true; // above the viewport
+        if (i === place.first) return !atListTop; // kept still by the anchor
+        return i >= place.below; // among the visible rows → wait
+    };
+    const newOrder = [];
+    const take = (before) => {
+        const g = groups.get(before);
+        if (!g || !goesIn(before)) return;
+        for (let j = g.length - 1; j >= 0; j--) newOrder.push(g[j]);
+    };
+    for (const k of survivors) {
+        take(k);
+        newOrder.push(k);
     }
+    take(null);
+
+    // The rendered window in the new order: from the first surviving DOM
+    // row to the last (stretched to the top / end when it reached them).
+    const oldIndex = new Map();
+    _order.forEach((k, i) => oldIndex.set(k, i));
+    const domKeys = place.rows.map((r) => r.dataset.key);
+    const keptDom = domKeys.filter((k) => surviving.has(k));
+    const oldFrom = domKeys.length ? (oldIndex.get(domKeys[0]) ?? 0) : 0;
+    const oldEnd = domKeys.length ? (oldIndex.get(domKeys[domKeys.length - 1]) ?? -1) + 1 : 0;
+    const reachedEnd = oldEnd >= _order.length;
+    _order = newOrder;
+    if (keptDom.length === 0) {
+        // Nothing on screen survived (cancel all, a reload that dropped
+        // them): start from the top of the new order.
+        paintWindow();
+        viewport.scrollTop = 0;
+        return;
+    }
+    const newIndex = new Map();
+    newOrder.forEach((k, i) => newIndex.set(k, i));
+    const start = oldFrom === 0 ? 0 : newIndex.get(keptDom[0]);
+    const end = reachedEnd ? newOrder.length : newIndex.get(keptDom[keptDom.length - 1]) + 1;
+    const desired = newOrder.slice(start, end);
+    const desiredSet = new Set(desired);
+
+    _keepPlace(viewport, rowsHost, place, (k) => desiredSet.has(k), (anchor) => {
+        for (const r of place.rows) {
+            if (!desiredSet.has(r.dataset.key)) {
+                _renderedKeys.delete(r.dataset.key);
+                r.remove();
+            }
+        }
+        // Survivors keep their relative order, so one pass inserts the rest.
+        let cursor = rowsHost.firstElementChild;
+        for (const k of desired) {
+            if (cursor && cursor.dataset.key === k) {
+                cursor = cursor.nextElementSibling;
+                continue;
+            }
+            const j = store.get(k);
+            if (!j) continue;
+            if (cursor) cursor.insertAdjacentHTML('beforebegin', renderRow(j));
+            else rowsHost.insertAdjacentHTML('beforeend', renderRow(j));
+            _renderedKeys.add(k);
+        }
+        // Keep the DOM bounded: drop rows from the top, above the anchor.
+        while (rowsHost.children.length > MAX_DOM_ROWS) {
+            const first = rowsHost.firstElementChild;
+            if (!first || first === anchor) break;
+            _renderedKeys.delete(first.dataset.key);
+            first.remove();
+        }
+    });
+    view.rendered = end;
+    document.getElementById('queue-empty')?.classList.toggle('hidden', newOrder.length > 0);
+    if (newOrder.length === 0) _renderEmpty();
+    _toggleSentinel(view.rendered < _order.length);
+    _countPending(liveSet);
+    renderNewPill();
+}
+
+function _countPending(liveSet) {
+    const live = liveSet || new Set(getFilteredSorted().map((j) => j.key));
+    const shown = new Set(_order);
+    let pending = 0;
+    for (const k of live) if (!shown.has(k)) pending++;
+    let stale = 0;
+    for (const k of _order) if (!live.has(k)) stale++;
+    _pendingCount = pending;
+    _staleCount = stale;
+}
+
+// The sticky "N new — show" pill at the top of the list. Also offered
+// (as "Update list") when rows on screen no longer match the filter.
+function renderNewPill() {
+    const wrap = document.getElementById('queue-new-pill');
+    const btn = document.getElementById('queue-new-pill-btn');
+    if (!wrap || !btn) return;
+    const show = _pendingCount > 0 || _staleCount > 0;
+    wrap.classList.toggle('hidden', !show);
+    if (!show) return;
+    const label =
+        _pendingCount > 0
+            ? i18nTf('queue.list.new_n', { n: _pendingCount }, `${_pendingCount} new — show`)
+            : i18nT('queue.list.update', 'Update list');
+    if (btn.textContent !== label) btn.textContent = label;
+}
+
+// Take the live order now (the pill): new rows in, finished rows out.
+function showNewRows() {
+    renderRows();
+    const vp = document.getElementById('queue-viewport');
+    if (vp) vp.scrollTop = 0;
+}
+
+function setListFrozen(on) {
+    view.frozen = !!on;
+    const btn = document.getElementById('queue-freeze');
+    if (btn) {
+        btn.setAttribute('aria-pressed', view.frozen ? 'true' : 'false');
+        btn.classList.toggle('queue-freeze--on', view.frozen);
+        const label = view.frozen
+            ? i18nT('queue.list.resume_updates', 'Resume list updates')
+            : i18nT('queue.list.pause_updates', 'Pause list updates');
+        const span = btn.querySelector('[data-freeze-label]');
+        if (span) span.textContent = label;
+        btn.title = label;
+        btn.setAttribute('aria-label', label);
+    }
+    if (!view.frozen && view.visible) reconcileRows(true);
 }
 
 function _patchRowNode(rowEl, job) {
@@ -2020,6 +2311,11 @@ function wireOnce() {
         .getElementById('queue-clear-finished')
         ?.addEventListener('click', () => runGlobalAction('clear-finished'));
     document.getElementById('queue-retry-all')?.addEventListener('click', () => runRetryAll());
+    document.getElementById('queue-new-pill-btn')?.addEventListener('click', () => showNewRows());
+    document
+        .getElementById('queue-freeze')
+        ?.addEventListener('click', () => setListFrozen(!view.frozen));
+    setListFrozen(view.frozen); // labels
     wireMoreMenu();
 
     // Header "select all visible" checkbox. Tri-state: empty / partial /
@@ -2076,6 +2372,7 @@ function wireOnce() {
             'scroll',
             () => {
                 view.scrollTop = viewport.scrollTop;
+                _maybePrependPrev(viewport);
             },
             { passive: true },
         );

@@ -108,3 +108,4 @@ jobs:
       - run: python -m playwright install --with-deps chromium
       - run: python tests/ui/login_accessibility.py
       - run: python tests/ui/forum_routes.py
+      - run: python tests/ui/queue_place.py
