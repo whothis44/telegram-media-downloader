@@ -636,6 +636,7 @@ function handleWs(msg) {
             // a "Duplicate" tag in the row so the operator can see at a
             // glance which finishes shared an existing on-disk file.
             deduped: p.deduped === true,
+            dedupedHow: p.dedupedHow || null,
             addedAt: p.addedAt || Date.now(),
             finishedAt: Date.now(),
             filePath: p.filePath || null,
@@ -1213,11 +1214,17 @@ function renderRow(j) {
     // hash matched an existing on-disk row. The file isn't downloaded
     // again (`bytesAddedToDisk = 0`) but the (group, msg) → file mapping
     // is still recorded so it shows in the gallery. The tag stays after
-    // dismiss/close — purely informational.
+    // dismiss/close — purely informational. `dedupedHow` says whether the
+    // bytes were downloaded first (after-download) or not at all.
+    const dupTip = {
+        'telegram-file': ['queue.duplicate.tooltip_telegram_file', 'No download needed: the same Telegram file (a forward or repost) is already saved. This row points at the existing copy.'],
+        'exact-reupload': ['queue.duplicate.tooltip_reupload', 'No download needed: an exact re-upload, its bytes checked on Telegram against the saved copy. This row points at the existing copy.'],
+        'after-download': ['queue.duplicate.tooltip_after', 'Found after downloading: the bytes were downloaded, then matched a saved copy. The downloaded copy was removed and this row points at the existing one.'],
+    }[j.dedupedHow] || ['queue.duplicate.tooltip', 'Same file already exists on disk — no new bytes written, this row points at the existing copy.'];
     const dupBadge = j.nsfwBlocked
         ? `<span class="text-[10px] px-1.5 py-0.5 rounded-full bg-red-500/15 text-red-400 ml-1.5 inline-flex items-center gap-0.5" title="${escapeHtml(i18nT('queue.nsfw_blocked.tooltip', 'File hash matched the NSFW blocklist — auto-deleted.'))}"><i class="ri-forbid-2-line"></i><span data-i18n="queue.nsfw_blocked">NSFW Blocked</span></span>`
         : j.deduped
-          ? `<span class="text-[10px] px-1.5 py-0.5 rounded-full bg-tg-orange/15 text-tg-orange ml-1.5 inline-flex items-center gap-0.5" title="${escapeHtml(i18nT('queue.duplicate.tooltip', 'Same file already exists on disk — no new bytes written, this row points at the existing copy.'))}"><i class="ri-file-copy-2-line"></i><span data-i18n="queue.duplicate">Duplicate</span></span>`
+          ? `<span class="text-[10px] px-1.5 py-0.5 rounded-full bg-tg-orange/15 text-tg-orange ml-1.5 inline-flex items-center gap-0.5" title="${escapeHtml(i18nT(dupTip[0], dupTip[1]))}"><i class="ri-file-copy-2-line"></i><span data-i18n="queue.duplicate">Duplicate</span></span>`
           : '';
 
     // Account chip — surfaces which Telegram session pulled this job's

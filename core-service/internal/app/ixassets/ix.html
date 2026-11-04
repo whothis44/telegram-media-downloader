@@ -203,10 +203,12 @@ ${ex.finishedAt && !ex.running ? `<div class="muted">Last written ${esc(fmtTime(
 }
 
 function viewKeeping() {
-  const s = state.status, hd = s.held || {}, fx = s.fixity || {}, pic = s.pictures || {}, vd = s.dups || {};
+  const s = state.status, hd = s.held || {}, fx = s.fixity || {}, pic = s.pictures || {}, vd = s.dups || {}, dd = s.dedup || {};
   const pct = (a, b) => b ? Math.floor((100 * a) / b) + '%' : '—';
+  const dc = (c) => `${fmtNum((c || {}).files || 0)} (${fmtNum((c || {}).mb || 0)} MB)`;
   return `<div class="card"><h2>Copies, duplicates and integrity</h2>
 <div><b>Not downloaded because they are copies:</b> ${fmtNum(hd.subst || 0)} exact re-upload(s) (${fmtNum(hd.savedMb || 0)} MB saved; the bytes were checked on Telegram) · ${fmtNum(hd.held || 0)} likely copies held at the back of the queue${s.settings.holdForever ? ' (kept held: Settings)' : ' until nothing else is waiting'}.</div>
+<div style="margin-top:6px" title="Counted since ${esc(dd.since || 'this version')}"><b>Duplicates, last 7 days:</b> found before downloading — same Telegram file ${dc(dd.telegramFile)}, exact re-upload check ${dc(dd.reupload)} · <span class="${(dd.after || {}).files ? 'warn' : ''}">found after downloading ${dc(dd.after)} downloaded for nothing</span> (the copies were removed) · ${fmtNum(dd.checks || 0)} checked on Telegram (${fmtNum(dd.noHashes || 0)} without Telegram's hashes${dd.checkFailed ? `, <span class="warn">${fmtNum(dd.checkFailed)} unreadable</span>` : ''}, ${fmtNum(dd.sampledMb || 0)} MB read as samples).</div>
 <div class="btns"><button class="b" data-act="held-release" ${hd.held ? '' : 'disabled'}>Download the held files now</button><button class="b" data-act="subst-fetch" ${hd.subst ? '' : 'disabled'}>Fetch the real files of re-uploads</button>${state.keepMsg ? `<span class="muted">${esc(state.keepMsg)}</span>` : ''}</div>
 <div class="muted">Every message is archived in full either way, so any of these files can be fetched later.</div>
 <div style="margin-top:6px"><b>Duplicate finding:</b> pictures ${fmtNum(pic.done || 0)} of ${fmtNum(pic.total || 0)} (${pct(pic.done || 0, pic.total)}), ${fmtNum(pic.grouped || 0)} grouped with a look-alike, ${fmtNum(pic.suggested || 0)} to review · videos ${fmtNum(vd.done || 0)} of ${fmtNum(vd.total || 0)} (${pct(vd.done || 0, vd.total)}). Runs on this PC from the files on the NAS; it never uses Telegram.</div>
@@ -510,7 +512,7 @@ ${state.diag ? `<textarea id="diag" readonly style="width:100%;min-height:260px;
 <label><input type="checkbox" data-set="downloadPacing" ${s.downloadPacing ? 'checked' : ''}> Pace downloads by measuring (recommended): the app finds how many file parts to ask Telegram for at once, backing off when Telegram asks it to wait. Untick to download as ix.8 did.</label>
 <label><input type="checkbox" data-set="pauseOnFreeze" ${s.pauseOnFreeze ? 'checked' : ''}> Pause rescans when Telegram reports the account frozen</label>
 <label><input type="checkbox" data-set="autoRetry" ${s.autoRetry ? 'checked' : ''}> Retry failed downloads automatically every few hours (up to 5 times per file)</label>
-<label><input type="checkbox" data-set="substExact" ${s.substExact ? 'checked' : ''}> Don't download exact re-uploads: when a file is exactly as large as one already saved, compare its bytes on Telegram first (uses Telegram's own fingerprints, or three 1 MB samples)</label>
+<label><input type="checkbox" data-set="substExact" ${s.substExact ? 'checked' : ''}> Don't download exact re-uploads: when a file is exactly as large as one already saved, compare its bytes on Telegram first (from 256 KB; uses Telegram's own fingerprints, or, for media from 2 MB, three 1 MB samples; photos only when size, pixel size and preview match a saved one)</label>
 <label><input type="checkbox" data-set="holdLikely" ${s.holdLikely ? 'checked' : ''}> Hold likely copies at the back of the queue: videos as long, as large and with the same preview as one already saved download after everything else</label>
 <label style="margin-left:22px"><input type="checkbox" data-set="holdForever" ${s.holdForever ? 'checked' : ''}> …and keep them held until I release them (Overview)</label>
 <label><input type="checkbox" data-set="fixityEnabled" ${s.fixityEnabled ? 'checked' : ''}> Re-read every stored file about once a month to check it is unchanged (reads from the NAS; follows the duplicate-finding quiet hours)</label>
