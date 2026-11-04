@@ -112,9 +112,19 @@ func ixVFFiles(t *testing.T, a *App, m *ixModel, photo map[string]string) {
 func ixVFGrab(t *testing.T, real map[string]float64, scene func(file string, at float64) string) *[]string {
 	var mu sync.Mutex
 	asked := &[]string{}
-	old, oldHave := ixGrabFrame, ixHaveFFmpeg
-	t.Cleanup(func() { ixGrabFrame, ixHaveFFmpeg = old, oldHave })
+	old, oldAll, oldHave := ixGrabFrame, ixGrabFrames, ixHaveFFmpeg
+	t.Cleanup(func() { ixGrabFrame, ixGrabFrames, ixHaveFFmpeg = old, oldAll, oldHave })
 	ixHaveFFmpeg = func() bool { return true }
+	// One run for many frames gives each frame as the one-by-one fake does.
+	ixGrabFrames = func(ctx context.Context, full string, reqs []ixFrameReq, _ string) ([]ixGrabbed, error) {
+		var out []ixGrabbed
+		for _, r := range reqs {
+			if pic, err := ixGrabFrame(ctx, full, r.At, r.Width, r.Quality); err == nil {
+				out = append(out, ixGrabbed{Req: r, AtMs: int64(math.Round(r.At * 1000)), Pic: pic})
+			}
+		}
+		return out, nil
+	}
 	ixGrabFrame = func(_ context.Context, full string, at float64, _, _ int) ([]byte, error) {
 		file := strings.TrimSuffix(filepath.Base(full), filepath.Ext(full))
 		mu.Lock()
