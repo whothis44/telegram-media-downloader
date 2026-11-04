@@ -147,10 +147,15 @@ func ixPlaceInAlbum(m *ixModel, pi int32, msg int) {
 	}
 }
 
-// ixOrphanNear reads the captured messages of a chat between two IDs.
-func (a *App) ixOrphanNear(ctx context.Context) func(string, int, int) []ixMsgNear {
+// ixOrphanNear reads the captured messages of a chat between two IDs
+// (one prepared query, used for every orphan); done releases it.
+func (a *App) ixOrphanNear(ctx context.Context) (near func(string, int, int) []ixMsgNear, done func()) {
+	st, err := a.db.Reader.PrepareContext(ctx, `SELECT message_id, grouped_id FROM ix_messages WHERE group_id=? AND message_id BETWEEN ? AND ?`)
+	if err != nil {
+		return nil, func() {}
+	}
 	return func(group string, lo, hi int) []ixMsgNear {
-		rows, err := a.db.Reader.QueryContext(ctx, `SELECT message_id, grouped_id FROM ix_messages WHERE group_id=? AND message_id BETWEEN ? AND ?`, group, lo, hi)
+		rows, err := st.QueryContext(ctx, group, lo, hi)
 		if err != nil {
 			return nil
 		}
@@ -163,7 +168,7 @@ func (a *App) ixOrphanNear(ctx context.Context) func(string, int, int) []ixMsgNe
 			}
 		}
 		return out
-	}
+	}, func() { st.Close() }
 }
 
 // ixOrphansOut lists the lone files a person said are not part of an album.

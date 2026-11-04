@@ -428,7 +428,8 @@ func (a *App) ixBuildModel(ctx context.Context) (*ixModel, error) {
 		return orphan[i].item.Msg < orphan[j].item.Msg
 	})
 	// Unless it sits inside an album of its chat (ix_orphans.go).
-	placer := newIxOrphanPlacer(m, a.ixOrphanNear(ctx), a.ixOrphansOut(ctx))
+	near, nearDone := a.ixOrphanNear(ctx)
+	placer := newIxOrphanPlacer(m, near, a.ixOrphansOut(ctx))
 	for _, f := range orphan {
 		if pi := placer.place(f.item.Group, f.item.Msg, f.created); pi >= 0 {
 			f.item.Placed = true
@@ -442,6 +443,7 @@ func (a *App) ixBuildModel(ctx context.Context) (*ixModel, error) {
 		m.ByMsg[f.item.Group+":"+strconv.Itoa(f.item.Msg)] = pi
 		addItem(&m.Posts[pi], f.item)
 	}
+	nearDone()
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
