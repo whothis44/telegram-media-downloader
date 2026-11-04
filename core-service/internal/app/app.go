@@ -52,6 +52,7 @@ type App struct {
 	webPolicy        webPolicyCache
 	apiRL            *rateLimiter
 	monitor          *engine.Controller
+	throughput       throughputState // status bar speed + recent totals (throughput.go)
 	forwarder        forwardSender
 	forwards         chan forwardJob
 	accounts         *accounts.Repository
