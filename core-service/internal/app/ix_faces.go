@@ -334,10 +334,9 @@ func (a *App) ixMLFullPicture(ctx context.Context, it *ixMItem) ([][]byte, error
 		}
 		return [][]byte{data}, nil
 	}
-	if _, err := os.Stat(full); err != nil {
-		return nil, errors.New("file not found")
-	}
-	frames, err := ixVideoFramesAt(ctx, full, ixVideoThreeTimes(it.Dur), 1280, 2) // ix_vframes.go
+	// One ffmpeg run, or the frames the other of faces and text read
+	// (ix_vgrab.go).
+	frames, err := a.ixVideoFramesOf(ctx, it, full, ixFullFrames(it.Dur))
 	if err != nil {
 		return nil, err
 	}

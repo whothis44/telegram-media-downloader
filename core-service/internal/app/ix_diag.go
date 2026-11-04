@@ -215,6 +215,7 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 	atOnce, timing := a.ixMLPaceReport()
 	line("  files at once: %s", atOnce)
 	line("  ms per file: %s", timing)
+	line("  video frames: %s", a.ixVFrameReport())
 	line("speech to text %s · reachable %v · done %d · to go %d · unreadable %d · last error: %s", on(ml.Speech.On), ml.Speech.Reachable, ml.Speech.Done, ml.Speech.Pending, ml.Speech.Failed, r.clean(ml.Speech.LastError))
 	var people, faces, ungrouped int
 	_ = a.db.Reader.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM ix_people WHERE merged_into=0), COUNT(*), COALESCE(SUM(person=0),0) FROM ix_faces`).Scan(&people, &faces, &ungrouped)
