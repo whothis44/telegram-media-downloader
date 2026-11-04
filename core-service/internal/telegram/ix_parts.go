@@ -116,6 +116,25 @@ func (c AttachmentClient) ReadPart(ctx context.Context, offset int64) ([]byte, e
 	return c.ReadRange(ctx, offset, downloadPartSize)
 }
 
+// PauseBudget stops the download queue's time limit for this attempt while
+// the library waits for something that is not this transfer (another
+// download it may make unnecessary). Call the returned function when the
+// wait is over.
+func (c AttachmentClient) PauseBudget() func() {
+	src := c.Source
+	for range 8 {
+		if p, ok := src.(interface{ PauseBudget() func() }); ok {
+			return p.PauseBudget()
+		}
+		w, ok := src.(TransportWrapper)
+		if !ok {
+			break
+		}
+		src = w.UnwrapTransport()
+	}
+	return func() {}
+}
+
 // ReadRange downloads limit bytes of the file at offset (ValidRange).
 func (c AttachmentClient) ReadRange(ctx context.Context, offset int64, limit int) ([]byte, error) {
 	if !ValidRange(offset, limit) {

@@ -93,6 +93,11 @@ type Library struct {
 	// item is then catalogued like a forward of that file. how names the
 	// check that confirmed it (Record.DedupHow).
 	Substitute func(context.Context, Item, Client) (path, how string, ok bool)
+	// SubstituteFrom (with Substitute): from this size, while a file is
+	// downloading, another message's file of exactly its size waits for it
+	// instead of downloading at the same time, so that Substitute can find
+	// it saved (same-size files at once are almost always copies). 0: never.
+	SubstituteFrom func(context.Context) int64
 	// Staging (optional) names a local folder downloads are written to
 	// first, then copied to the library (staging.go). OnStaged is told when
 	// such a file is in the library; StageHold is held while it is added.
@@ -180,6 +185,26 @@ func (l *Library) tryEnter(key string) (func(), bool) {
 	return func() { l.mu.Lock(); delete(l.flights, key); close(done); l.mu.Unlock() }, true
 }
 
+func (l *Library) substituteFrom(ctx context.Context) int64 {
+	if l.Substitute == nil || l.SubstituteFrom == nil {
+		return 0
+	}
+	return l.SubstituteFrom(ctx)
+}
+
+// enterPaused is enter, with the client's attempt time limit stopped while
+// it waits (clients that have one: PauseBudget).
+func (l *Library) enterPaused(ctx context.Context, key string, client Client) (func(), error) {
+	if release, ok := l.tryEnter(key); ok {
+		return release, nil
+	}
+	if p, ok := client.(interface{ PauseBudget() func() }); ok {
+		resume := p.PauseBudget()
+		defer resume()
+	}
+	return l.enter(ctx, key)
+}
+
 func messageKey(item Item) string {
 	return "message:" + item.GroupID + ":" + strconv.FormatInt(item.MessageID, 10)
 }
@@ -222,6 +247,13 @@ func (l *Library) Ingest(ctx context.Context, item Item, client Client) (Record,
 	}
 	if client == nil {
 		return Record{}, errors.New("Telegram download client is unavailable")
+	}
+	if from := l.substituteFrom(ctx); from > 0 && item.Identity.Size >= from {
+		sizeRelease, err := l.enterPaused(ctx, "size:"+strconv.FormatInt(item.Identity.Size, 10), client)
+		if err != nil {
+			return Record{}, err
+		}
+		defer sizeRelease()
 	}
 	if l.Substitute != nil {
 		if path, how, ok := l.Substitute(ctx, item, client); ok {

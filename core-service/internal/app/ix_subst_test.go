@@ -104,10 +104,10 @@ func ixDedupCounter(t *testing.T, a *App, how string) (files, bytes int64) {
 func TestIxSubstituteChecksBySizeAndKind(t *testing.T) {
 	a, ctx := ixTestApp(t)
 	thumb := []byte{1, 40, 30, 0x5a, 0xa5, 0x11}
-	small := ixRandom(1, 400<<10)                 // a short clip, below 2 MiB
-	doc := ixRandom(2, 600<<10)                   // an archive
-	photo := ixRandom(3, 1200<<10)                // a large compressed photo
-	smallPhoto := ixRandom(4, 600<<10)            // a photo below 1 MiB
+	small := ixRandom(1, 400<<10)      // a short clip, below 2 MiB
+	doc := ixRandom(2, 600<<10)        // an archive
+	photo := ixRandom(3, 1200<<10)     // a large compressed photo
+	smallPhoto := ixRandom(4, 600<<10) // a photo below 1 MiB
 	ixSaveFixture(t, a, 1, "Invented Chat/videos/clip_1.mp4", "video", small, 640, 360, nil)
 	ixSaveFixture(t, a, 2, "Invented Chat/documents/pack_2.zip", "document", doc, 0, 0, nil)
 	ixSaveFixture(t, a, 3, "Invented Chat/images/photo_3.jpg", "photo", photo, 2560, 1920, thumb)

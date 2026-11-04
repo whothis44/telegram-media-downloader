@@ -347,6 +347,15 @@ func (a *App) ixSubstitute(ctx context.Context, item download.Item, client downl
 	return "", "", false
 }
 
+// ixSubstituteFrom: the smallest file checked, 0 when the check is off
+// (the library then lets same-size files download at the same time).
+func (a *App) ixSubstituteFrom(ctx context.Context) int64 {
+	if !a.ixLoadSettings(ctx).SubstExact {
+		return 0
+	}
+	return ixSubstMinSize
+}
+
 // ixSubstCandidates: saved files of exactly the item's size (for a photo,
 // also its pixel size and stripped preview), at most five.
 func (a *App) ixSubstCandidates(ctx context.Context, item download.Item, plan ixSubstPlan) []string {
