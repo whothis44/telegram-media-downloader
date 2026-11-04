@@ -263,3 +263,63 @@ func TestIxKeepBusyCountsOnlyWhatTheLaneLetsGo(t *testing.T) {
 		t.Fatalf("then: %d big and %d small", big, small)
 	}
 }
+
+// A files pass that keeps failing (the rescan queue retries for ever) no
+// longer keeps files set aside: the deadline order goes by the files
+// queued. A pass that only waits to start or to try again soon still
+// counts, but nothing arrives meanwhile, so every worker may take a
+// set-aside file, not only half of them.
+func TestIxStuckRescansDoNotKeepFilesAside(t *testing.T) {
+	ixTestWorkers(t, 24)
+	ixTestLane(t, 2)
+	a, ctx := ix8App(t, map[string]any{"deadlineOrder": "on"})
+	for i := 1; i <= 100; i++ {
+		ixOldQueueRow(t, a, "-1001", i, 200<<20)
+	}
+	ixTestBackfill(t, a, ctx, "-1002")
+	if err := a.ixDeadlineStep(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n := a.ixDeferredWaiting(ctx); n != 88 { // half the workers took some
+		t.Fatalf("set aside with a rescan running: %d (want 88)", n)
+	}
+	a.historyMu.Lock()
+	a.historyJobs["j--1002"].State = "failed"
+	a.historyMu.Unlock()
+	now := time.Now()
+	stuck := []ixQueueItem{
+		{GroupID: "-1002", State: "waiting", Phase: ixPhaseFiles, Attempts: 7, NextAt: now.Add(time.Minute).UnixMilli(), Error: "history queue made no progress before the stall deadline"},
+		{GroupID: "-1004", State: "waiting", Phase: ixPhaseFiles, Attempts: 1, NextAt: now.Add(10 * time.Minute).UnixMilli(), Error: "FLOOD_WAIT (600)"},
+	}
+	if err := a.ixSaveQueue(ctx, ixQueueState{Running: true, Items: stuck}, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := a.ixUnqueuedBand(ctx); ok {
+		t.Fatal("passes that keep failing, or try again only later, counted as files to come")
+	}
+	if err := a.ixDeadlineStep(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n := a.ixDeferredWaiting(ctx); n != 0 {
+		t.Fatalf("still set aside with no rescan going: %d", n)
+	}
+	// A pass that tries again in a minute, none running: the files are set
+	// aside again, and every worker may take one.
+	stuck[1].NextAt = now.Add(time.Minute).UnixMilli()
+	if err := a.ixSaveQueue(ctx, ixQueueState{Running: true, Items: stuck}, now); err != nil {
+		t.Fatal(err)
+	}
+	band, ok, running := a.ixUnqueued(ctx)
+	if !ok || band != 0 || running {
+		t.Fatalf("a pass about to try again: band %d ok %v running %v", band, ok, running)
+	}
+	if err := a.ixDeadlineStep(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n := a.ixDeferredWaiting(ctx); n != 100-24 {
+		t.Fatalf("set aside: %d (want %d)", n, 100-24)
+	}
+	if big, small := ixTestClaim(t, a, 30); big != 0 || small != 24 {
+		t.Fatalf("workers took %d big and %d small files", big, small)
+	}
+}

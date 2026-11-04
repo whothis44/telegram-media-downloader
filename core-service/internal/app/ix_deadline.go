@@ -324,9 +324,9 @@ func (a *App) ixDeadlineStep(ctx context.Context) error {
 	// otherwise a queue holding only big files sees the big band as the
 	// smallest with work, sets nothing aside, the backfill finds its queue
 	// limit full of them and stops, and the smaller files never arrive.
-	unqueued := false
-	if ub, ok := a.ixUnqueuedBand(ctx); ok && (!cur.Valid || int64(ub) < cur.Int64) {
-		cur, unqueued = sql.NullInt64{Int64: int64(ub), Valid: true}, true
+	unqueued, reading := false, false
+	if ub, ok, running := a.ixUnqueued(ctx); ok && (!cur.Valid || int64(ub) < cur.Int64) {
+		cur, unqueued, reading = sql.NullInt64{Int64: int64(ub), Valid: true}, true, running
 	}
 	if !cur.Valid {
 		return nil
@@ -353,7 +353,7 @@ func (a *App) ixDeadlineStep(ctx context.Context) error {
 		return err
 	}
 	if unqueued {
-		return a.ixDeadlineKeepBusy(ctx, acctClause, args)
+		return a.ixDeadlineKeepBusy(ctx, acctClause, args, reading)
 	}
 	return nil
 }
@@ -367,13 +367,40 @@ func (a *App) ixDeadlineStep(ctx context.Context) error {
 // out or deleted account), counts only for the pass already running: the
 // others may not start for a long time, and the files set aside meanwhile
 // would only wait. Quiet hours end within the day: they do not count.
+//
+// A files pass waiting to try again counts only while it is likely to
+// bring files soon: fewer than ixUnqueuedTries failed attempts, and its
+// next try at most ixUnqueuedSoon away. The rescan queue keeps trying for
+// ever (no retry limit by default), and a group that keeps failing (the
+// account frozen, a flood wait, a backfill that found the download queue
+// full) would otherwise keep the files set aside for good while nothing
+// comes; without it the deadline order goes by the files queued.
 func (a *App) ixUnqueuedBand(ctx context.Context) (band int, ok bool) {
+	band, ok, _ = a.ixUnqueued(ctx)
+	return band, ok
+}
+
+const (
+	ixUnqueuedTries = 3               // a files pass that failed this often no longer counts
+	ixUnqueuedSoon  = 5 * time.Minute // nor one whose next try is further away
+)
+
+// ixUnqueued is ixUnqueuedBand, and whether a pass that queues files is
+// running now (not only waiting to start or to try again).
+func (a *App) ixUnqueued(ctx context.Context) (band int, ok, running bool) {
 	groups := map[string]bool{}
+	soon := time.Now().Add(ixUnqueuedSoon).UnixMilli()
 	if q, err := a.ixLoadQueue(ctx); err == nil && q.Running {
 		acct := a.ixAccount()
 		held := a.ixGoneHold() != "" || acct.Deactivated || acct.Frozen && a.ixLoadSettings(ctx).PauseOnFreeze
 		for _, it := range q.Items {
-			if it.Phase == ixPhaseFiles && (it.State == "running" || it.State == "waiting" && !held) {
+			if it.Phase != ixPhaseFiles {
+				continue
+			}
+			switch {
+			case it.State == "running":
+				groups[it.GroupID], running = true, true
+			case it.State == "waiting" && !held && it.Attempts < ixUnqueuedTries && it.NextAt <= soon:
 				groups[it.GroupID] = true
 			}
 		}
@@ -381,12 +408,12 @@ func (a *App) ixUnqueuedBand(ctx context.Context) (band int, ok bool) {
 	a.historyMu.Lock()
 	for _, j := range a.historyJobs {
 		if j.State == "running" && !j.MessagesOnly && !j.Cancelled {
-			groups[j.GroupID] = true
+			groups[j.GroupID], running = true, true
 		}
 	}
 	a.historyMu.Unlock()
 	if len(groups) == 0 {
-		return 0, false
+		return 0, false, false
 	}
 	public := map[string]bool{}
 	if rows, err := a.db.Reader.QueryContext(ctx, `SELECT group_id FROM ix_group_info WHERE username<>''`); err == nil {
@@ -400,10 +427,10 @@ func (a *App) ixUnqueuedBand(ctx context.Context) (band int, ok bool) {
 	}
 	for id := range groups {
 		if !public[id] {
-			return 0, true
+			return 0, true, running
 		}
 	}
-	return ixPublicLane, true
+	return ixPublicLane, true, running
 }
 
 // ixEngineWorkers is how many files the engine downloads at once now
@@ -424,13 +451,15 @@ var ixEngineWorkers = func(a *App, ctx context.Context) int {
 // smallest first, so that downloads never stop while the rescans read
 // chats holding only big files. They go only while fewer than half of the
 // workers have a file (busy, or one they could take now: ixClaimableNow),
-// and only up to that half,
-// so that the smaller files the rescans bring find workers free: a
-// set-aside file can take an hour. Those not taken by the next step are
-// set aside again (they are pending and unpaused); the big-file lane
+// and only up to that half, so that the smaller files the rescans bring
+// find workers free: a set-aside file can take an hour. The half holds
+// only while a pass that queues files is running (reading): when the
+// passes only wait to start or to try again, nothing arrives meanwhile and
+// every worker may take a file. Those not taken by the next step are set
+// aside again (they are pending and unpaused); the big-file lane
 // (engine.BigFileLane) still limits the biggest. acctClause and args are
 // ixDeadlineStep's: now, then the working accounts.
-func (a *App) ixDeadlineKeepBusy(ctx context.Context, acctClause string, args []any) error {
+func (a *App) ixDeadlineKeepBusy(ctx context.Context, acctClause string, args []any, reading bool) error {
 	workers := ixEngineWorkers(a, ctx)
 	if workers <= 0 {
 		workers = 25
@@ -439,7 +468,11 @@ func (a *App) ixDeadlineKeepBusy(ctx context.Context, acctClause string, args []
 	if err != nil {
 		return err
 	}
-	need := (workers+1)/2 - ready - busy
+	limit := workers
+	if reading {
+		limit = (workers + 1) / 2
+	}
+	need := limit - ready - busy
 	if need <= 0 {
 		return nil
 	}
