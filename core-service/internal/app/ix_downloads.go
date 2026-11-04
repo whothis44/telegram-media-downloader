@@ -211,7 +211,7 @@ func (a *App) ixDownloadDays(ctx context.Context) []ixDownloadDay {
 		byDay[out[i].Day] = &out[i]
 	}
 	rows, err := a.db.Reader.QueryContext(ctx, `SELECT w.updated_at, w.file_size FROM tgdl_work w WHERE w.status='completed' AND w.updated_at>=?
-		AND NOT EXISTS (SELECT 1 FROM ix_subst s WHERE s.group_id=w.group_id AND s.message_id=w.message_id)`, start.UnixMilli())
+		AND NOT `+ixSkippedBefore, start.UnixMilli())
 	if err != nil {
 		return out
 	}

@@ -91,7 +91,8 @@ type Library struct {
 	// Substitute (an archive option) may name a saved file that holds this
 	// item's exact bytes, checked on Telegram without a full download. The
 	// item is then catalogued like a forward of that file. how names the
-	// check that confirmed it (Record.DedupHow).
+	// check that confirmed it (Record.DedupHow); DedupTelegramFile when it
+	// is the same Telegram file, known by a message without an entry.
 	Substitute func(context.Context, Item, Client) (path, how string, ok bool)
 	// SubstituteFrom (with Substitute): from this size, while a file is
 	// downloading, another message's file of exactly its size waits for it
@@ -257,9 +258,20 @@ func (l *Library) Ingest(ctx context.Context, item Item, client Client) (Record,
 	}
 	if l.Substitute != nil {
 		if path, how, ok := l.Substitute(ctx, item, client); ok {
-			if record, found, err := l.reuse(ctx, item, `d.file_path=?`, path); err != nil || found {
-				record = tagged(record, DedupReupload)
-				if record.Dedup == DedupReupload {
+			// With SkipDuplicates no entry is made, as for any other copy.
+			record, found, err := l.existing(ctx, item, `d.file_path=?`, path)
+			if err == nil && !found {
+				record, found, err = l.reuse(ctx, item, `d.file_path=?`, path)
+			}
+			if err != nil || found {
+				// how is DedupTelegramFile when Substitute knows this Telegram
+				// file under a message that has no entry of its own.
+				kind := DedupReupload
+				if how == DedupTelegramFile {
+					kind = DedupTelegramFile
+				}
+				record = tagged(record, kind)
+				if record.Dedup == kind {
 					record.DedupHow = how
 				}
 				return record, err

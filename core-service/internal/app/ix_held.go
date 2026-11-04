@@ -114,7 +114,7 @@ func (a *App) ixHeldStatus(ctx context.Context) ixHeldStatus {
 	var st ixHeldStatus
 	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COALESCE(SUM(h.released_at=0 AND w.status='pending'),0), COALESCE(SUM(h.released_at>0),0)
 		FROM ix_held h LEFT JOIN tgdl_work w ON w.id=h.work_id`).Scan(&st.Held, &st.Released)
-	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(s.size),0)/1048576 FROM ix_subst s JOIN downloads d ON d.group_id=s.group_id AND d.message_id=s.message_id AND d.file_path=s.of_path`).Scan(&st.Subst, &st.SavedMB)
+	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(s.size),0)/1048576 FROM ix_subst s WHERE `+ixSubstValid).Scan(&st.Subst, &st.SavedMB)
 	return st
 }
 
@@ -736,8 +736,7 @@ func (a *App) ixReleaseSome(ctx context.Context, n int, confirmed bool) error {
 // identities are never substituted again, their catalogue entries are
 // removed, and the next files pass of their groups downloads them.
 func (a *App) ixFetchSubstituted(ctx context.Context) (int, []string, error) {
-	rows, err := a.db.Reader.QueryContext(ctx, `SELECT s.group_id, s.message_id, s.identity, s.of_path FROM ix_subst s
-		JOIN downloads d ON d.group_id=s.group_id AND d.message_id=s.message_id AND d.file_path=s.of_path`)
+	rows, err := a.db.Reader.QueryContext(ctx, `SELECT s.group_id, s.message_id, s.identity, s.of_path FROM ix_subst s WHERE `+ixSubstValid)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -770,6 +769,9 @@ func (a *App) ixFetchSubstituted(ctx context.Context) (int, []string, error) {
 		}
 		if err == nil {
 			_, err = tx.ExecContext(ctx, `DELETE FROM ix_subst WHERE group_id=? AND message_id=?`, x.group, x.msg)
+		}
+		if err == nil { // its link to the saved file, when it had no entry of its own (ix_links.go)
+			_, err = tx.ExecContext(ctx, `DELETE FROM ix_msg_link WHERE group_id=? AND message_id=?`, x.group, x.msg)
 		}
 		if err != nil {
 			tx.Rollback()

@@ -290,6 +290,12 @@ func ixSameBytes(ctx context.Context, remote ixRemoteFile, local *os.File, size 
 // ixSubstitute is the library's hook: the relative path of a saved file
 // with exactly this item's bytes, how that was confirmed, or false.
 func (a *App) ixSubstitute(ctx context.Context, item download.Item, client download.Client) (string, string, bool) {
+	// The same Telegram file as a message that shares a saved file without
+	// an entry of its own (download.skipDuplicates): the library does not
+	// know this identity, the link does (ix_links.go).
+	if path, ok := a.ixLinkedIdentity(ctx, item); ok {
+		return path, download.DedupTelegramFile, true
+	}
 	plan, ok := ixSubstPlanFor(item)
 	if !ok || !a.ixLoadSettings(ctx).SubstExact {
 		return "", "", false

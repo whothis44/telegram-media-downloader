@@ -94,7 +94,7 @@ func (a *App) ixDeadlineEstimate(ctx context.Context, withLoss bool) ixDeadlineI
 		// not count towards the speed.
 		_ = a.db.Reader.QueryRowContext(ctx, `SELECT COALESCE(SUM(w.file_size),0) FROM tgdl_work w
 			WHERE w.status='completed' AND w.updated_at>=?
-			AND NOT EXISTS (SELECT 1 FROM ix_subst s WHERE s.group_id=w.group_id AND s.message_id=w.message_id)`, now.Add(-since).UnixMilli()).Scan(&bytes)
+			AND NOT `+ixSkippedBefore, now.Add(-since).UnixMilli()).Scan(&bytes)
 		return float64(bytes) / since.Seconds()
 	}
 	d.Rate24h, d.Rate1h = rate(24*time.Hour), rate(time.Hour)

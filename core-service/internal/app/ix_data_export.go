@@ -40,6 +40,10 @@ type ixDataFile struct {
 	SHA256     string `json:"sha256,omitempty"`
 	TgFile     string `json:"telegram_file,omitempty"` // kind:id:size, as media.telegram_file
 	CreatedAt  string `json:"created_at,omitempty"`
+	// Linked: the message has no catalogue entry of its own; the file is the
+	// one saved for download_id, matched by how (telegram-file,
+	// exact-reupload, after-download). Messages' files only.
+	Linked string `json:"linked,omitempty"`
 	ixDataFacts
 }
 
@@ -239,7 +243,13 @@ func (a *App) ixDataVersion(ctx context.Context, meta ixGroupMeta) string {
 	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(MAX(deleted_at),0) FROM ix_messages WHERE group_id=? AND deleted_at>0`, meta.ID).Scan(&deleted, &lastDeleted)
 	var hashed int64
 	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM downloads WHERE group_id=? AND file_hash IS NOT NULL AND file_hash<>''`, meta.ID).Scan(&hashed)
-	return fmt.Sprintf("f%d|%s|%d/%d|%d|%v", ixDataFormat, a.ixVersion(ctx, meta.ID), deleted, lastDeleted, hashed, normalizedGroupFilters(meta.Filters))
+	v := fmt.Sprintf("f%d|%s|%d/%d|%d|%v", ixDataFormat, a.ixVersion(ctx, meta.ID), deleted, lastDeleted, hashed, normalizedGroupFilters(meta.Filters))
+	var links, lastLink int64
+	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(MAX(at),0) FROM ix_msg_link WHERE group_id=?`, meta.ID).Scan(&links, &lastLink)
+	if links > 0 { // messages sharing a saved file (ix_links.go)
+		v += fmt.Sprintf("|l%d/%d", links, lastLink)
+	}
+	return v
 }
 
 // ixGroupFiles reads a group's downloaded files, by message.
@@ -277,7 +287,27 @@ func (a *App) ixGroupFiles(ctx context.Context, groupID string) (map[int][]ixDat
 		by[msg] = append(by[msg], f)
 		all = append(all, f)
 	}
-	return by, all, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	// Messages sharing a saved file without an entry of their own carry
+	// that file (ix_links.go); files.jsonl lists each entry once.
+	linked, err := a.ixLinkedFiles(ctx, groupID)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, l := range linked {
+		if len(by[l.Msg]) > 0 {
+			continue
+		}
+		f := ixDataFile{DownloadID: l.SavedID, Path: l.Path, Name: l.Name, Size: l.Size, Type: l.FileType, SHA256: l.Hash, TgFile: l.TgFile, CreatedAt: l.Created, Linked: l.How,
+			ixDataFacts: ixDataFacts{Mime: l.Mime, Width: l.W, Height: l.H, DurationS: float64(l.DurMs) / 1000}}
+		if len(l.Thumb) > 0 {
+			f.ThumbStripped = base64.StdEncoding.EncodeToString(l.Thumb)
+		}
+		by[l.Msg] = append(by[l.Msg], f)
+	}
+	return by, all, nil
 }
 
 // ixWriteGroupMessages streams one group's messages to a gzip JSON Lines
@@ -780,7 +810,7 @@ const ixDataReadme = "# Telegram archive: data files\n\n" +
 	"`date`, `edit_date`, `forwarded_date`: Unix seconds (UTC). `first_seen`, `last_seen`, `deleted_at`, `recorded_at`: Unix milliseconds, when the archive saw it.\n\n" +
 	"- `media`: what the message carries on Telegram (`type`: photo, video, document, audio, voice, gif, sticker...; `name`; `size` in bytes; `telegram_file`; `mime`, `width`, `height`, `duration_s`; `thumb_stripped_base64`: Telegram's tiny \"stripped\" preview, a JPEG body without its standard header, see core.telegram.org/api/files#stripped-thumbnails), or null.\n" +
 	"- `file_status`: `downloaded` (see `files`), `missing` (wanted but not downloaded), `not_wanted` (switched off for the chat), `no_media`.\n" +
-	"- `files`: the downloaded file(s), same fields as `files.jsonl`.\n" +
+	"- `files`: the downloaded file(s), same fields as `files.jsonl`. A message whose file was already saved for another message and that has no entry of its own carries that file with `linked` set to how it was matched (`telegram-file`: the same Telegram file; `exact-reupload`: the same bytes checked on Telegram; `after-download`: the same bytes found once downloaded); `download_id` is then the saved file's entry.\n" +
 	"- `edits`: earlier versions of the text, as they were seen.\n" +
 	"- `deleted_at`: set when a full rescan no longer found the message on Telegram (it is kept here).\n" +
 	"- `raw`: the complete Telegram message, decoded: every object has `_` (its TL constructor name, such as `message` or `messageMediaPhoto`) and its fields in the TL schema's snake_case; bytes are base64. Fields that are 0, false, empty or absent are left out: read a missing number as 0 and a missing flag as false (an entity at the start of the text has no `offset`). Formatting (`entities`), reactions, buttons and full media details are here.\n" +

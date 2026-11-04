@@ -41,10 +41,11 @@ func (a *App) ixCountDedup(ctx context.Context, how string, files, bytes int64) 
 		ON CONFLICT(day,how) DO UPDATE SET files=files+excluded.files, bytes=bytes+excluded.bytes`, day, how, files, bytes)
 }
 
-// ixNoteDedup counts a catalogued message that shares a saved file, and
-// records an exact re-upload (ix_subst) once the library has catalogued it
-// on the saved file.
+// ixNoteDedup counts a catalogued message that shares a saved file, links
+// the message to that file (ix_links.go), and records an exact re-upload
+// (ix_subst) once the library has catalogued it on the saved file.
 func (a *App) ixNoteDedup(ctx context.Context, item download.Item, record download.Record) {
+	a.ixNoteLink(ctx, item, record)
 	if !record.Reused || record.Dedup == "" {
 		return
 	}
