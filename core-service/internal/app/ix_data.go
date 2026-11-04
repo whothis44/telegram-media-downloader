@@ -369,6 +369,16 @@ func (a *App) ixLoadGroup(ctx context.Context, meta ixGroupMeta, withText bool) 
 	if err := files.Err(); err != nil {
 		return nil, err
 	}
+	// Messages sharing a saved file without an entry of their own (ix_links.go).
+	if linked, err := a.ixLinkedFiles(ctx, meta.ID); err == nil {
+		for _, l := range linked {
+			if m := g.ByID[l.Msg]; m != nil && len(m.Files) == 0 {
+				m.Files = append(m.Files, &ixFile{ID: l.SavedID, MessageID: l.Msg, Name: l.Name, Size: l.Size, Type: l.FileType, Path: l.Path, Hash: l.Hash, Created: ixParseCreated(l.Created), Key: ixFileKey(l.Hash, l.Path)})
+			}
+		}
+	} else {
+		return nil, err
+	}
 	sort.Slice(g.Msgs, func(i, j int) bool { return g.Msgs[i].ID < g.Msgs[j].ID })
 	g.analyse()
 	g.layout()
@@ -560,7 +570,9 @@ type ixPlace struct {
 func (a *App) ixShared(ctx context.Context) (map[string][]ixPlace, error) {
 	rows, err := a.db.Reader.QueryContext(ctx, `WITH k AS (
 			SELECT CASE WHEN length(file_hash)=64 THEN 'h:'||lower(file_hash) ELSE 'p:'||replace(file_path,char(92),'/') END AS key, group_id, message_id
-			FROM downloads WHERE message_id>0 AND file_type IS NOT 'stories' AND file_path IS NOT NULL AND file_path<>'' AND (status IS NULL OR status='completed'))
+			FROM downloads WHERE message_id>0 AND file_type IS NOT 'stories' AND file_path IS NOT NULL AND file_path<>'' AND (status IS NULL OR status='completed')
+			UNION ALL SELECT CASE WHEN length(`+ixLinkedHash+`)=64 THEN 'h:'||lower(`+ixLinkedHash+`) ELSE 'p:'||replace(`+ixLinkedPath+`,char(92),'/') END, l.group_id, l.message_id
+			`+ixLinkedFrom+`) -- messages sharing a saved file (ix_links.go)
 		SELECT key, group_id, message_id FROM k WHERE key IN (SELECT key FROM k GROUP BY key HAVING COUNT(*)>1) ORDER BY key, group_id, message_id`)
 	if err != nil {
 		return nil, err

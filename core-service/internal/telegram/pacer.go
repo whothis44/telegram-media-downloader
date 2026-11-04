@@ -489,6 +489,8 @@ type PaceStats struct {
 	// Premium waits: Telegram's speed limit for accounts without Premium.
 	Premium1h  int        `json:"premium1h"`
 	Premium24h int        `json:"premium24h"`
+	Premium10m int        `json:"premium10m"` // the last 10 minutes: is a limit what sets the pace now
+	Floods10m  int        `json:"floods10m"`
 	FloodsHour [24]int    `json:"floodsByHour"` // [0] is the current hour
 	Hours      []PaceHour `json:"hours"`        // the last 48 hours, newest first
 	DCs        []DCPace   `json:"dcs"`
@@ -521,6 +523,9 @@ func (p *downloadPacer) stats() PaceStats {
 		if age := now.Sub(t); age < time.Hour {
 			s.Premium1h++
 		}
+		if now.Sub(t) < 10*time.Minute {
+			s.Premium10m++
+		}
 		if now.Sub(t) < 24*time.Hour {
 			s.Premium24h++
 		}
@@ -529,6 +534,9 @@ func (p *downloadPacer) stats() PaceStats {
 		age := now.Sub(t)
 		if age < time.Hour {
 			s.Floods1h++
+		}
+		if age < 10*time.Minute {
+			s.Floods10m++
 		}
 		if age < 24*time.Hour {
 			s.Floods24h++

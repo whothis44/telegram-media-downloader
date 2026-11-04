@@ -213,15 +213,31 @@ ${ex.finishedAt && !ex.running ? `<div class="muted">Last written ${esc(fmtTime(
 }
 
 function viewKeeping() {
-  const s = state.status, hd = s.held || {}, fx = s.fixity || {}, pic = s.pictures || {}, vd = s.dups || {};
+  const s = state.status, hd = s.held || {}, fx = s.fixity || {}, pic = s.pictures || {}, vd = s.dups || {}, dd = s.dedup || {};
   const pct = (a, b) => b ? Math.floor((100 * a) / b) + '%' : '—';
+  const dc = (c) => `${fmtNum((c || {}).files || 0)} (${fmtNum((c || {}).mb || 0)} MB)`;
   return `<div class="card"><h2>Copies, duplicates and integrity</h2>
 <div><b>Not downloaded because they are copies:</b> ${fmtNum(hd.subst || 0)} exact re-upload(s) (${fmtNum(hd.savedMb || 0)} MB saved; the bytes were checked on Telegram) · ${fmtNum(hd.held || 0)} likely copies held at the back of the queue${s.settings.holdForever ? ' (kept held: Settings)' : ' until nothing else is waiting'}.</div>
+<div style="margin-top:6px" title="Counted since ${esc(dd.since || 'this version')}"><b>Duplicates, last 7 days:</b> found before downloading — same Telegram file ${dc(dd.telegramFile)}, exact re-upload check ${dc(dd.reupload)} · <span class="${(dd.after || {}).files ? 'warn' : ''}">found after downloading ${dc(dd.after)} downloaded for nothing</span> (the copies were removed) · ${fmtNum(dd.checks || 0)} checked on Telegram (${fmtNum(dd.noHashes || 0)} without Telegram's hashes${dd.checkFailed ? `, <span class="warn">${fmtNum(dd.checkFailed)} unreadable</span>` : ''}, ${fmtNum(dd.sampledMb || 0)} MB read as samples).</div>
 <div class="btns"><button class="b" data-act="held-release" ${hd.held ? '' : 'disabled'}>Download the held files now</button><button class="b" data-act="subst-fetch" ${hd.subst ? '' : 'disabled'}>Fetch the real files of re-uploads</button>${state.keepMsg ? `<span class="muted">${esc(state.keepMsg)}</span>` : ''}</div>
 <div class="muted">Every message is archived in full either way, so any of these files can be fetched later.</div>
 <div style="margin-top:6px"><b>Duplicate finding:</b> pictures ${fmtNum(pic.done || 0)} of ${fmtNum(pic.total || 0)} (${pct(pic.done || 0, pic.total)}), ${fmtNum(pic.grouped || 0)} grouped with a look-alike, ${fmtNum(pic.suggested || 0)} to review · videos ${fmtNum(vd.done || 0)} of ${fmtNum(vd.total || 0)} (${pct(vd.done || 0, vd.total)}). Runs on this PC from the files on the NAS; it never uses Telegram.</div>
 <div style="margin-top:6px"><b>Integrity check:</b> ${fmtNum(fx.checked || 0)} of ${fmtNum(fx.files || 0)} stored files re-read this month (every file is re-read about once a month and its fingerprint compared)${fx.changed ? ` · <span class="bad">${fmtNum(fx.changed)} changed</span>` : ''}${fx.missing ? ` · <span class="bad">${fmtNum(fx.missing)} missing</span>` : ''}${fx.sizeOff ? ` · <span class="warn">${fmtNum(fx.sizeOff)} not the size Telegram gave</span>` : ''}${!fx.changed && !fx.missing && fx.checked ? ' · <span class="ok">no problems</span>' : ''}.</div>
 </div>`;
+}
+
+// What downloads are doing (ix_dlstate.go): the verdict the dashboard's
+// status bar shows, why the rest of the queue waits, and the rescan.
+function viewDlState() {
+  const x = state.status.dlState; if (!x || !x.verdict) return '';
+  const words = { paused: 'Paused', readonly: 'Read-only', stalled: 'Stalled', 'speed-limited': 'Speed limit', filling: 'Filling', downloading: 'Downloading', done: 'Done' };
+  const cls = { stalled: 'bad', paused: 'warn', 'speed-limited': 'warn', downloading: 'ok', done: 'ok' }[x.verdict] || '';
+  const a = x.aside || {}, r = x.rescan || {};
+  const why = [[a.copies, 'likely copies'], [a.deadline, 'waiting while private chats and smaller files go first'], [a.lowerQuality, 'waiting for a lower quality first'], [a.bigLane, 'big files waiting their turn'], [a.byYou, 'paused by you']]
+    .filter(([n]) => n > 0).map(([n, l]) => `${fmtNum(n)} ${l}`).join(' · ');
+  const rescan = r.total ? `Rescan: ${fmtNum(r.done)} of ${fmtNum(r.total)} group(s) done${r.group ? ` · reading <b>${esc(r.group)}</b> (${r.phase === 'files' ? 'files' : 'messages'})` : ''} · about ${fmtNum(x.toDownload)} file(s) still to download${r.notQueued ? ` (${fmtNum(r.notQueued)} not queued yet)` : ''}.` : '';
+  return `<div class="dlstate"><b class="${cls}">${esc(words[x.verdict] || x.verdict)}</b>: ${fmtNum(x.ready)} ready · ${fmtNum(x.downloading)} downloading · ${fmtNum(x.setAside)} set aside${x.retryLater ? ` · ${fmtNum(x.retryLater)} to try again later` : ''}. <span class="${x.act ? 'warn' : 'muted'}">${esc(x.advice)}</span>
+${why ? `<div class="muted">Set aside: ${why}.</div>` : ''}${rescan ? `<div class="muted">${rescan}</div>` : ''}</div>`;
 }
 
 function viewDownloads() {
@@ -233,7 +249,7 @@ function viewDownloads() {
   else if (d.downloading || d.lastHour) state1 = `<b>Downloading.</b> ${fmtNum(d.lastHour)} file(s) finished in the last hour${d.lastAt ? ' (latest: ' + esc(fmtTime(d.lastAt)) + ')' : ''}.`;
   else if (d.waiting) state1 = `<span class="warn">${fmtNum(d.waiting)} file(s) waiting, but none finished in the last hour.</span> Telegram may have asked the app to slow down; if this lasts, check the dashboard's queue.`;
   else state1 = `Nothing to download right now${d.lastAt ? ' — the latest file finished ' + esc(fmtTime(d.lastAt)) : ''}.`;
-  let h = `<div class="card"><h2>Downloads</h2><div>${state1}</div>
+  let h = `<div class="card"><h2>Downloads</h2><div>${state1}</div>${viewDlState()}
 <div class="muted" style="margin-top:6px">${fmtNum(d.downloading)} downloading · ${fmtNum(d.waiting)} waiting · <span class="${d.failed ? 'bad' : ''}">${fmtNum(d.failed)} failed</span>${d.givenUp ? ` (${fmtNum(d.givenUp)} no longer retried automatically)` : ''}</div>
 ${(() => {
   const b = d.big || {};
@@ -316,7 +332,7 @@ function viewRescan() {
   const notQueued = groups().filter((g) => !g.finishedAt && !items.some((i) => i.groupId === g.id && (i.state === 'waiting' || i.state === 'running')));
   let h = `<div class="card"><h2>Rescan everything</h2><div class="muted">Full history of every group, one group after another, with photos, videos <b>and files/documents</b> switched on. Groups already in the queue are skipped.</div>
 <div class="btns"><button class="b primary" data-act="p-everything" ${notQueued.length ? '' : 'disabled'}>Rescan all ${notQueued.length} group(s)</button></div></div>`;
-  h += `<div class="status">${head} Two lanes run side by side, one group each. <b>Messages:</b> every group's history is saved, without waiting for downloads. <b>Files:</b> as soon as a group's messages are saved, it is walked again to fetch the files still missing (failed files get another try too). <b>★ First</b> groups go first in both lanes. Runs inside the server — you can close this page.${q.notice ? `<div class="muted" style="margin-top:4px">${esc(q.notice)}</div>` : ''}</div>`;
+  h += `<div class="status">${head} Two lanes run side by side, one group each. <b>Messages:</b> every group's history is saved, without waiting for downloads. <b>Files:</b> as soon as a group's messages are saved, it is walked again to fetch the files still missing (failed files get another try too). <b>★ First</b> groups go first in both lanes. Runs inside the server — you can close this page.${q.notice ? `<div class="muted" style="margin-top:4px">${esc(q.notice)}</div>` : ''}<div style="margin-top:6px">${viewDlState()}</div></div>`;
   h += `<div class="btns" style="margin-bottom:12px">${q.running ? `<button class="b" data-act="q-pause">Pause</button>` : `<button class="b primary" data-act="q-start" ${counts.waiting ? '' : 'disabled'}>Start</button>`}
 <button class="b" data-act="q-clear-finished" ${counts.done + counts.failed ? '' : 'disabled'}>Remove finished</button><button class="b" data-act="q-clear" ${items.length ? '' : 'disabled'}>Clear queue</button>
 <span class="muted">Retries: ${q.maxAttempts ? 'up to ' + q.maxAttempts : 'unlimited'}</span></div>`;
@@ -539,7 +555,7 @@ ${state.diag ? `<textarea id="diag" readonly style="width:100%;min-height:260px;
 <label><input type="checkbox" data-set="downloadPacing" ${s.downloadPacing ? 'checked' : ''}> Pace downloads by measuring (recommended): the app finds how many file parts to ask Telegram for at once, backing off when Telegram asks it to wait. Untick to download as ix.8 did.</label>
 <label><input type="checkbox" data-set="pauseOnFreeze" ${s.pauseOnFreeze ? 'checked' : ''}> Pause rescans when Telegram reports the account frozen</label>
 <label><input type="checkbox" data-set="autoRetry" ${s.autoRetry ? 'checked' : ''}> Retry failed downloads automatically every few hours (up to 5 times per file)</label>
-<label><input type="checkbox" data-set="substExact" ${s.substExact ? 'checked' : ''}> Don't download exact re-uploads: when a file is exactly as large as one already saved, compare its bytes on Telegram first (uses Telegram's own fingerprints, or three 1 MB samples)</label>
+<label><input type="checkbox" data-set="substExact" ${s.substExact ? 'checked' : ''}> Don't download exact re-uploads: when a file is exactly as large as one already saved, compare its bytes on Telegram first (from 256 KB; uses Telegram's own fingerprints of every part, or, for videos from 2 MB, of the start, middle and end or three 1 MB samples; photos only when size, pixel size and preview match a saved one)</label>
 <label><input type="checkbox" data-set="holdLikely" ${s.holdLikely ? 'checked' : ''}> Hold likely copies at the back of the queue: videos as long, as large and with the same preview as one already saved download after everything else</label>
 <label style="margin-left:22px"><input type="checkbox" data-set="holdForever" ${s.holdForever ? 'checked' : ''}> …and keep them held until I release them (Overview)</label>
 <label><input type="checkbox" data-set="fixityEnabled" ${s.fixityEnabled ? 'checked' : ''}> Re-read every stored file about once a month to check it is unchanged (reads from the NAS; follows the duplicate-finding quiet hours)</label>

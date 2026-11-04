@@ -92,7 +92,9 @@ type ixMLFrame struct {
 }
 
 // ixGrabFrame reads one frame of a video, at a time in seconds, as a JPEG
-// at most width pixels wide. Replaceable in tests.
+// at most width pixels wide: an ffmpeg run of its own, seeking exactly. Only
+// used when one run for all of a video's frames fails (ix_vgrab.go).
+// Replaceable in tests.
 var ixGrabFrame = func(ctx context.Context, full string, at float64, width, quality int) ([]byte, error) {
 	bin := seekbar.FFmpegPath()
 	if bin == "" {
@@ -112,55 +114,6 @@ var ixGrabFrame = func(ctx context.Context, full string, at float64, width, qual
 		return nil, errors.New("no frame")
 	}
 	return buf.Bytes(), nil
-}
-
-// ixVideoFramesAt reads the frames at these times; a time that gives no
-// frame is left out. When none does (a clip shorter than it says, or a
-// wrong length), the very first frame is tried before giving up.
-func ixVideoFramesAt(ctx context.Context, full string, times []float64, width, quality int) ([]ixMLFrame, error) {
-	var out []ixMLFrame
-	err := ixVideoFramesEach(ctx, full, times, width, quality, func(f ixMLFrame) error {
-		out = append(out, f)
-		return nil
-	})
-	return out, err
-}
-
-// ixVideoFramesEach is ixVideoFramesAt handing each frame on as soon as it
-// is read.
-func ixVideoFramesEach(ctx context.Context, full string, times []float64, width, quality int, each func(ixMLFrame) error) error {
-	got, triedStart := 0, false
-	grab := func(at float64) error {
-		clock := ixMLClock(ctx, ixStFFmpeg)
-		pic, err := ixGrabFrame(ctx, full, at, width, quality)
-		clock()
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if errors.Is(err, ixErrNoFFmpeg) {
-			return err
-		}
-		if err != nil || len(pic) == 0 {
-			return nil
-		}
-		got++
-		return each(ixMLFrame{AtMs: int64(math.Round(at * 1000)), Pic: pic})
-	}
-	for _, at := range times {
-		triedStart = triedStart || at == 0
-		if err := grab(at); err != nil {
-			return err
-		}
-	}
-	if got == 0 && !triedStart {
-		if err := grab(0); err != nil {
-			return err
-		}
-	}
-	if got == 0 {
-		return errors.New("no frame could be read from the video")
-	}
-	return nil
 }
 
 // ixMLVideoFrames is what is sent for a video: its frames, with their
@@ -199,7 +152,18 @@ func (a *App) ixMLVideoFramesEach(ctx context.Context, it *ixMItem, each func(ix
 	if !ixHaveFFmpeg() {
 		return ixErrNoFFmpeg
 	}
-	return ixVideoFramesEach(ctx, full, ixMLFrameTimes(it.Dur), 512, 3, each)
+	// All frames in one ffmpeg run, or from the frames another task read
+	// (ix_vgrab.go).
+	frames, err := a.ixVideoFramesOf(ctx, it, full, ixEmbedFrames(it.Dur))
+	if err != nil {
+		return err
+	}
+	for _, f := range frames {
+		if err := each(f); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (a *App) ixMLVideoPath(it *ixMItem) (string, error) {
@@ -219,7 +183,8 @@ func (a *App) ixMLVideoPath(it *ixMItem) (string, error) {
 // ixMLEmbedVideo looks at a video's frames, keeps the distinct ones, and
 // saves them and their mean.
 func (a *App) ixMLEmbedVideo(ctx context.Context, c *ixMLClient, it *ixMItem) error {
-	// The next frame is read while the last one is looked at.
+	// Frames are handed on as they are read (all of a video's come out of
+	// one ffmpeg run, ix_vgrab.go).
 	fctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	frames := make(chan ixMLFrame, 2)

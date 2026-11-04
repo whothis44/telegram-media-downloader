@@ -185,6 +185,7 @@ func (a *App) handleIxStatus(w http.ResponseWriter, r *http.Request) {
 		"groups":    groups,
 		"queue":     queue,
 		"queueLeft": a.ixQueueLeft(ctx),
+		"dlState":   a.ixDlState(ctx), // ix_dlstate.go
 		"settings":  settings.public(),
 		"account":   a.ixAccount(),
 		"export":    a.ixExportStatus(),
@@ -195,6 +196,7 @@ func (a *App) handleIxStatus(w http.ResponseWriter, r *http.Request) {
 		"downloads": a.ixDownloads(ctx),
 		"freeze":    a.ixFreeze(ctx),
 		"held":      a.ixHeldStatus(ctx),
+		"dedup":     a.ixDedupStatus(ctx),
 		"copies":    a.ixCopiesNow(),
 		"previews":  a.ixPreviewAllNow(),
 		"fixity":    a.ixFixityStatus(ctx),

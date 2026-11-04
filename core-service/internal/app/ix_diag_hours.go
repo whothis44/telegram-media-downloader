@@ -58,7 +58,7 @@ func (a *App) ixDiagHours(ctx context.Context, now time.Time) []string {
 	}
 	if q, err := a.db.Reader.QueryContext(ctx, `SELECT w.updated_at/3600000*3600, COUNT(*), COALESCE(SUM(w.file_size),0) FROM tgdl_work w
 		WHERE w.status='completed' AND w.updated_at>=?
-		AND NOT EXISTS (SELECT 1 FROM ix_subst s WHERE s.group_id=w.group_id AND s.message_id=w.message_id)
+		AND NOT `+ixSkippedBefore+`
 		GROUP BY 1`, from.UnixMilli()); err == nil {
 		for q.Next() {
 			var start int64

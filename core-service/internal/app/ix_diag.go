@@ -149,6 +149,7 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 	}
 	line("\n[downloads]")
 	d := a.ixDownloads(ctx)
+	line("%s", a.ixDlState(ctx).diagLine(r.group)) // ix_dlstate.go
 	line("engine running %v · queue paused %v · downloading %d · waiting %d · failed %d (given up %d) · last hour %d · last finished %s", d.EngineRunning, d.QueuePaused, d.Downloading, d.Waiting, d.Failed, d.GivenUp, d.LastHour, ixAgo(d.LastAt, now))
 	mb := func(b float64) float64 { return b / 1e6 }
 	if d.Pace.Off {
@@ -175,6 +176,9 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 	}
 	h := a.ixHeldStatus(ctx)
 	line("copies: %d exact re-uploads not downloaded (%d MB) · %d held · %d released", h.Subst, h.SavedMB, h.Held, h.Released)
+	for _, l := range a.ixDedupDiag(ctx) { // ix_dedup.go
+		line("%s", l)
+	}
 	for _, l := range a.ixCopiesDiag(ctx) {
 		line("%s", l)
 	}
@@ -218,10 +222,16 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 	atOnce, timing := a.ixMLPaceReport()
 	line("  files at once: %s", atOnce)
 	line("  ms per file: %s", timing)
+	line("  video frames: %s", a.ixVFrameReport())
 	line("speech to text %s · reachable %v · done %d · to go %d · unreadable %d · last error: %s", on(ml.Speech.On), ml.Speech.Reachable, ml.Speech.Done, ml.Speech.Pending, ml.Speech.Failed, r.clean(ml.Speech.LastError))
 	var people, faces, ungrouped int
 	_ = a.db.Reader.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM ix_people WHERE merged_into=0), COUNT(*), COALESCE(SUM(person=0),0) FROM ix_faces`).Scan(&people, &faces, &ungrouped)
 	line("people %d · faces %d (%d not grouped)", people, faces, ungrouped)
+	if faces > 0 {
+		for _, l := range ixFaceLooseLines(a.ixFaceLooseNow(ctx, time.Minute, time.Minute)) {
+			line("%s", l)
+		}
+	}
 	dl := a.ixDeadlineEstimate(ctx, false)
 	line("still to download: %d distinct files / %d MB (+%d copies that come free)", dl.ToGetFiles, dl.ToGetBytes>>20, dl.Copies)
 	limit := ""

@@ -1701,6 +1701,14 @@
                                     placeholder="Search filename or group…"
                                     data-i18n-aria-label="queue.search_placeholder" aria-label="Search filename or group…">
                             </div>
+                            <!-- Freezes the list's order and new arrivals
+                                 (downloads carry on; counters keep updating). -->
+                            <button id="queue-freeze" type="button" aria-pressed="false"
+                                class="queue-freeze shrink-0 h-11 px-3 rounded-lg bg-tg-bg/60 hover:bg-tg-hover text-tg-text text-xs flex items-center gap-1.5"
+                                title="Pause list updates" aria-label="Pause list updates">
+                                <!-- Labels set by js/queue.js (they change with the state). -->
+                                <i class="ri-pause-mini-line" aria-hidden="true"></i><span data-freeze-label class="queue-freeze-label">Pause list updates</span>
+                            </button>
                             <div id="queue-sort-inline" class="shrink-0">
                             <select id="queue-sort" class="tg-input text-sm w-auto queue-sort-select"
                                 data-i18n-aria-label="queue.sort.label" aria-label="Sort by">
@@ -1838,6 +1846,13 @@
                              re-render) so a 1000-job queue stays smooth
                              even with dozens of concurrent downloads. -->
                         <div id="queue-viewport" class="overflow-y-auto" style="height: calc(100vh - 280px); height: calc(100dvh - 280px); min-height: 320px;">
+                            <!-- Rows that arrived while the reader was at the
+                                 top wait here instead of pushing the list down
+                                 (js/queue.js reconcileRows). Zero height, so
+                                 showing it moves nothing. -->
+                            <div id="queue-new-pill" class="queue-new-pill hidden">
+                                <button id="queue-new-pill-btn" type="button" class="queue-new-pill-btn"></button>
+                            </div>
                             <div id="queue-rows" class="divide-y divide-tg-border/30"></div>
                             <div id="queue-load-more" class="flex items-center justify-center py-3 text-xs text-tg-textSecondary hidden">
                                 <i class="ri-loader-4-line animate-spin mr-2"></i>
@@ -4171,6 +4186,15 @@
             <span class="text-tg-textSecondary" data-i18n="status.last_24h">24h</span>
             <span class="status-chip-val" id="status-day-files">0</span>
             <span class="status-chip-bytes text-tg-textSecondary" id="status-day-bytes">0 B</span>
+        </span>
+        <!-- What downloads are doing (internal/app/ix_dlstate.go): one word,
+             what is ready and what waits; the title gives the reasons and
+             whether to do anything. Filled by statusbar.js from the monitor
+             status `downloadState` object (admins only). -->
+        <span class="status-chip hidden" id="status-dl-chip" data-admin-only tabindex="0">
+            <span class="status-dl-dot" aria-hidden="true"></span>
+            <span class="status-chip-val" id="status-dl-word">—</span>
+            <span class="status-chip-bytes text-tg-textSecondary" id="status-dl-counts"></span>
         </span>
 
         <!-- Right cluster: WS indicator · update badge · version (admin, desktop) -->

@@ -848,6 +848,30 @@ html.theme-light .status-chip .status-chip-val {
         display: none;
     }
 }
+/* What downloads are doing: a dot in the verdict's colour; the word turns
+   red only when something needs a look. */
+.status-dl-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--tg-green, #4fae4e);
+}
+#status-dl-chip[data-verdict='filling'] .status-dl-dot {
+    background: var(--tg-blue, #2aabee);
+}
+#status-dl-chip[data-verdict='speed-limited'] .status-dl-dot,
+#status-dl-chip[data-verdict='paused'] .status-dl-dot {
+    background: var(--tg-orange, #ff9800);
+}
+#status-dl-chip[data-verdict='readonly'] .status-dl-dot {
+    background: #8b9baa;
+}
+#status-dl-chip[data-verdict='stalled'] .status-dl-dot {
+    background: var(--tg-red, #e53935);
+}
+#status-dl-chip[data-verdict='stalled'] #status-dl-word {
+    color: var(--tg-red, #e53935) !important;
+}
 
 /* Engine/queue/maintenance pills + status colours */
 html.theme-light .bg-tg-blue\/10 {
@@ -8589,6 +8613,54 @@ html.theme-light #queue-actions-menu-slot .queue-global-actions button:hover {
 .queue-menu-sort .queue-sort-select {
     width: 100%;
     max-width: none;
+}
+/* Keeping the reader's place (js/queue.js reconcileRows): rows measure
+   their offsets against the viewport, and the browser's own scroll
+   anchoring is off so it can't correct a second time. */
+#queue-viewport {
+    position: relative;
+    overflow-anchor: none;
+}
+/* Zero-height sticky slot: the pill floats over the first rows and
+   showing it never moves them. */
+.queue-new-pill {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    height: 0;
+    display: flex;
+    justify-content: center;
+    pointer-events: none;
+}
+.queue-new-pill.hidden {
+    display: none;
+}
+.queue-new-pill-btn {
+    pointer-events: auto;
+    margin-top: 8px;
+    padding: 4px 12px;
+    border-radius: 9999px;
+    font-size: 12px;
+    font-weight: 500;
+    color: #fff;
+    background: var(--tg-blue);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+    white-space: nowrap;
+}
+.queue-new-pill-btn:focus-visible {
+    outline: 2px solid var(--tg-blue);
+    outline-offset: 2px;
+}
+/* Icon only until the toolbar has room for the words (title/aria-label
+   carry them). */
+@media (max-width: 1679px) {
+    .queue-freeze-label {
+        display: none;
+    }
+}
+.queue-freeze.queue-freeze--on {
+    color: var(--tg-blue);
+    box-shadow: inset 0 0 0 1px var(--tg-blue);
 }
 
 /* ── Settings search (js/settings-search.js) ─────────────────────── */

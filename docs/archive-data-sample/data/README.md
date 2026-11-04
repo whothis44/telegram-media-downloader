@@ -41,7 +41,7 @@ All files are UTF-8 [JSON Lines](https://jsonlines.org/): one JSON object per li
 
 - `media`: what the message carries on Telegram (`type`: photo, video, document, audio, voice, gif, sticker...; `name`; `size` in bytes; `telegram_file`; `mime`, `width`, `height`, `duration_s`; `thumb_stripped_base64`: Telegram's tiny "stripped" preview, a JPEG body without its standard header, see core.telegram.org/api/files#stripped-thumbnails), or null.
 - `file_status`: `downloaded` (see `files`), `missing` (wanted but not downloaded), `not_wanted` (switched off for the chat), `no_media`.
-- `files`: the downloaded file(s), same fields as `files.jsonl`.
+- `files`: the downloaded file(s), same fields as `files.jsonl`. A message whose file was already saved for another message and that has no entry of its own carries that file with `linked` set to how it was matched (`telegram-file`: the same Telegram file; `exact-reupload`: the same bytes checked on Telegram; `after-download`: the same bytes found once downloaded); `download_id` is then the saved file's entry.
 - `edits`: earlier versions of the text, as they were seen.
 - `deleted_at`: set when a full rescan no longer found the message on Telegram (it is kept here).
 - `raw`: the complete Telegram message, decoded: every object has `_` (its TL constructor name, such as `message` or `messageMediaPhoto`) and its fields in the TL schema's snake_case; bytes are base64. Fields that are 0, false, empty or absent are left out: read a missing number as 0 and a missing flag as false (an entity at the start of the text has no `offset`). Formatting (`entities`), reactions, buttons and full media details are here.

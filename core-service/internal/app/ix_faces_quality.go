@@ -24,6 +24,8 @@ import (
 // of PhotoPrism's cluster size for a model that reads faces at 112 px;
 // blur is the variance of the Laplacian on a 112 px grey face, with Ente's
 // thresholds (soft 50, hard 10).
+// The three "start a person" numbers are the usual gates; an archive of
+// poorer faces gets lower ones, within limits (ix_faces_gates.go).
 const (
 	ixFaceCoreScore = 0.8  // detection score a face needs to start a person
 	ixFaceCorePx    = 80.0 // short side of the face box, in pixels of the picture
@@ -43,18 +45,12 @@ const (
 	ixFaceJunk
 )
 
-// ixFaceTierOf says what kind a face is. A size or sharpness that is not
-// known (0 / below zero) does not count against the face: faces stored
-// before these were measured are judged by their score alone.
-func ixFaceTierOf(score, px, blur float64) int8 {
-	if px > 0 && px < ixFaceJunkPx || blur >= 0 && blur < ixFaceJunkBlur {
-		return ixFaceJunk
-	}
-	if score >= ixFaceCoreScore && (px <= 0 || px >= ixFaceCorePx) && (blur < 0 || blur >= ixFaceCoreBlur) {
-		return ixFaceGood
-	}
-	return ixFaceWeak
-}
+// ixFaceTierOf says what kind a face is under the usual (fixed) gates;
+// the store uses the gates that follow the archive (ix_faces_gates.go). A
+// size or sharpness that is not known (0 / below zero) does not count
+// against the face: faces stored before these were measured are judged by
+// their score alone.
+func ixFaceTierOf(score, px, blur float64) int8 { return ixFaceGatesFixed.tierOf(score, px, blur) }
 
 // ixFaceJunkSQL is ixFaceTierOf's "unusable" as SQL on ix_faces.
 var ixFaceJunkSQL = fmt.Sprintf(`((px>0 AND px<%g) OR (blur>=0 AND blur<%g))`, ixFaceJunkPx, ixFaceJunkBlur)

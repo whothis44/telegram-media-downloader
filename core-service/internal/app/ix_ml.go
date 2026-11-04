@@ -608,6 +608,8 @@ func (a *App) ixRunML(ctx context.Context) {
 // marked idle runs only when the tasks before it had nothing left.
 func (a *App) ixMLRoundAll(ctx context.Context, tasks []*ixMLTask, m *ixModel) time.Duration {
 	wait, busy := time.Minute, false
+	a.ixVFRoundTasks(tasks) // frames read for one are kept for the others (ix_vgrab.go)
+	defer a.ixVFRoundTasks(nil)
 	for _, t := range tasks {
 		if t.idle && busy {
 			continue
@@ -722,7 +724,7 @@ func (a *App) ixMLRound(ctx context.Context, c *ixMLClient, m *ixModel, n int) t
 // again.
 func (a *App) ixMLRoundTask(ctx context.Context, t *ixMLTask, m *ixModel, n int) time.Duration {
 	pace := a.ixMLPaceOf(t) // files at once, and where their time goes (ix_mlpace.go)
-	ctx = ixMLWithStats(ctx, pace.stats)
+	ctx = ixVFWithTask(ixMLWithStats(ctx, pace.stats), t.name)
 	t.note(true, "")
 	r := &ixMLRun{failed: a.ixMLFailedKeys(ctx, t), tried: map[string]bool{}, noFFmpeg: !ixHaveFFmpeg()}
 	defer func() {
@@ -930,6 +932,27 @@ func (a *App) ixMLFiles(ctx context.Context, t *ixMLTask, m *ixModel, r *ixMLRun
 // ixMLNext picks up to n files a task has still to do, walking the
 // duplicate sets from where it stopped (and once more from the start).
 func (a *App) ixMLNext(t *ixMLTask, m *ixModel, r *ixMLRun, n int) []*ixMItem {
+	var out []*ixMItem
+	take := func(it *ixMItem) bool {
+		if !t.wanted(it) || t.done(it.Key) || r.failed[it.Key] || r.tried[it.Key] || (it.Type != "photo" && r.noFFmpeg) {
+			return false
+		}
+		r.tried[it.Key] = true // once per round
+		out = append(out, it)
+		return true
+	}
+	// Videos whose frames another task just read go first, while they are
+	// still held (ix_vgrab.go).
+	for _, k := range a.ixVFCachedFirst(t) {
+		if len(out) >= n {
+			return out
+		}
+		if ii, ok := m.ByKey[k]; ok {
+			if canon, ok := ixMLWanted(m, int(m.Items[ii].Cluster)); ok && canon == ii {
+				take(&m.Items[ii])
+			}
+		}
+	}
 	box := a.ixMLBox()
 	box.mu.Lock()
 	start := int(box.after[t.name])
@@ -937,7 +960,6 @@ func (a *App) ixMLNext(t *ixMLTask, m *ixModel, r *ixMLRun, n int) []*ixMItem {
 	if start > len(m.Clusters) {
 		start = 0 // the model was rebuilt smaller
 	}
-	var out []*ixMItem
 	ci := start
 	wrapped := false
 	for len(out) < n {
@@ -956,12 +978,7 @@ func (a *App) ixMLNext(t *ixMLTask, m *ixModel, r *ixMLRun, n int) []*ixMItem {
 		if !ok {
 			continue
 		}
-		it := &m.Items[ii]
-		if !t.wanted(it) || t.done(it.Key) || r.failed[it.Key] || r.tried[it.Key] || (it.Type != "photo" && r.noFFmpeg) {
-			continue
-		}
-		r.tried[it.Key] = true // once per round
-		out = append(out, it)
+		take(&m.Items[ii])
 	}
 	box.mu.Lock()
 	box.after[t.name] = int32(ci)
