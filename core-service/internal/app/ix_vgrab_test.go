@@ -144,7 +144,11 @@ func TestIxFFmpegFramesAtTheRightTimes(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(got) != 2 || ixJPEGWidth(t, got[0].Pic) != 64 || ixJPEGWidth(t, got[1].Pic) != 160 || got[0].AtMs != 4000 {
-		t.Fatalf("sizes: %d frames", len(got))
+		var desc []string
+		for _, g := range got {
+			desc = append(desc, fmt.Sprintf("%d ms %d px (asked %.0f s)", g.AtMs, ixJPEGWidth(t, g.Pic), g.Req.At))
+		}
+		t.Fatalf("sizes: %d frames: %v", len(got), desc)
 	}
 	if d := time.Since(start); d > 20*time.Second {
 		t.Fatalf("a time past the end took %v", d)

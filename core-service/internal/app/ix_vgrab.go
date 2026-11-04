@@ -174,7 +174,14 @@ func ixFFmpegFrames(ctx context.Context, full string, reqs []ixFrameReq, hw stri
 		}
 		return ixByTime(keep), nil
 	}
-	return ixByTime(append(keep, exact...)), nil
+	// A time read exactly that still comes out far before itself is past
+	// the end of the video (some ffmpeg builds give the last frame then).
+	for _, g := range exact {
+		if g.Req.At-float64(g.AtMs)/1000 <= g.Req.Slack+0.001 {
+			keep = append(keep, g)
+		}
+	}
+	return ixByTime(keep), nil
 }
 
 // ixByTime puts frames in the order they are in the video.
