@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"image"
 	"math"
 	"strconv"
@@ -54,6 +55,9 @@ func ixFaceTierOf(score, px, blur float64) int8 {
 	}
 	return ixFaceWeak
 }
+
+// ixFaceJunkSQL is ixFaceTierOf's "unusable" as SQL on ix_faces.
+var ixFaceJunkSQL = fmt.Sprintf(`((px>0 AND px<%g) OR (blur>=0 AND blur<%g))`, ixFaceJunkPx, ixFaceJunkBlur)
 
 // ixFaceQuality ranks faces for the cover picture: score × size × sharpness,
 // each at most 1 (112 px and Ente's "very soft" blur 200 count as full

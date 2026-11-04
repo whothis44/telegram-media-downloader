@@ -289,8 +289,11 @@ func (a *App) ixFaceTask(ctx context.Context, c *ixMLClient) *ixMLTask {
 			_, err := c.faces(ctx, ixMLTestPicture())
 			return err
 		},
-		note:   a.ixMLTaskNoter("faces"),
-		finish: func(ctx context.Context) { a.ixRegroupFaces(ctx, 300) },
+		note: a.ixMLTaskNoter("faces"),
+		finish: func(ctx context.Context) {
+			a.ixRegroupFaces(ctx, 300)
+			a.ixFacePeopleSoon(ctx)
+		},
 	}
 }
 
@@ -489,6 +492,7 @@ func (a *App) ixGroupFace(ctx context.Context, id int64, v []int8) error {
 func (a *App) ixGroupFaceLocked(ctx context.Context, id int64, v []int8, unit func(string) string, reuse func([]int64) int64) error {
 	box := a.ixMLBox()
 	s := &box.faces
+	rejected := a.ixFaceRejects(ctx, id) // people a person took this face out of
 	s.mu.RLock()
 	me, ok := s.index[id]
 	if !ok || s.person[me] != 0 || s.tier[me] == ixFaceJunk {
@@ -512,7 +516,7 @@ func (a *App) ixGroupFaceLocked(ctx context.Context, id int64, v []int8, unit fu
 		c := cand{n, t, ""}
 		switch {
 		case n.person > 0:
-			if !s.inShotLocked(n.person, myShot, id) {
+			if !rejected[n.person] && !s.inShotLocked(n.person, myShot, id) {
 				grouped = append(grouped, c)
 			}
 		case n.person == 0:
@@ -604,13 +608,7 @@ func (a *App) ixRegroupFaces(ctx context.Context, n int) {
 func (a *App) ixSetFacePerson(ctx context.Context, ids []int64, person int64) error {
 	box := a.ixMLBox()
 	// A person merged into another is that other person now.
-	for i := 0; i < 20; i++ {
-		var into int64
-		if a.db.Reader.QueryRowContext(ctx, `SELECT merged_into FROM ix_people WHERE id=?`, person).Scan(&into) != nil || into == 0 {
-			break
-		}
-		person = into
-	}
+	person = a.ixPersonResolve(ctx, person)
 	for _, id := range ids {
 		if _, err := a.db.Writer.ExecContext(ctx, `UPDATE ix_faces SET person=? WHERE id=? AND manual=0`, person, id); err != nil {
 			return err
@@ -680,8 +678,9 @@ func (a *App) ixPeople(ctx context.Context) ([]ixPerson, error) {
 	return out, rows.Err()
 }
 
-// ixPersonChange: rename, hide, show, merge (into another person), or take
-// a face out (it is never put with anyone again by itself).
+// ixPersonChange: rename, hide, show, merge (into another person), say two
+// people are not the same, or take a face out (it is never put with this
+// person again).
 func (a *App) ixPersonChange(ctx context.Context, id int64, action, name string, other, face int64) error {
 	box := a.ixMLBox()
 	box.faces.group.Lock()
@@ -708,33 +707,28 @@ func (a *App) ixPersonChange(ctx context.Context, id int64, action, name string,
 		if err := a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM ix_people WHERE id=? AND merged_into=0`, other).Scan(&exists); err != nil || exists == 0 {
 			return errors.New("no such person to merge into")
 		}
-		tx, terr := a.db.Writer.BeginTx(ctx, nil)
-		if terr != nil {
-			return terr
+		err = a.ixMergePeopleLocked(ctx, id, other)
+	case "not-same":
+		// "Same person?" answered no: never suggested (or merged by
+		// itself) again, also after either is merged with someone else.
+		if other == id || other <= 0 {
+			return errors.New("choose another person")
 		}
-		if _, err = tx.ExecContext(ctx, `UPDATE ix_faces SET person=? WHERE person=?`, other, id); err == nil {
-			_, err = tx.ExecContext(ctx, `UPDATE ix_people SET merged_into=?, updated_at=? WHERE id=?`, other, now, id)
-		}
-		if err == nil {
-			// A merged person keeps the name it had when the other has none.
-			_, err = tx.ExecContext(ctx, `UPDATE ix_people SET name=(SELECT name FROM ix_people WHERE id=?), updated_at=? WHERE id=? AND name=''`, id, now, other)
-		}
-		if err != nil {
-			tx.Rollback()
-			return err
-		}
-		if err = tx.Commit(); err == nil {
-			box.faces.repoint(id, other)
-		}
+		lo, hi := min(id, other), max(id, other)
+		_, err = a.db.Writer.ExecContext(ctx, `INSERT INTO ix_person_pair(a,b,state,at) VALUES(?,?,'no',?)
+			ON CONFLICT(a,b) DO UPDATE SET state='no', at=excluded.at`, lo, hi, now)
 	case "remove-face":
+		// As in Ente: the face is never put with this person again (nor with
+		// anyone this person is merged with), but may go to someone else.
 		var res sql.Result
-		res, err = a.db.Writer.ExecContext(ctx, `UPDATE ix_faces SET person=-1, manual=1 WHERE id=? AND person=?`, face, id)
+		res, err = a.db.Writer.ExecContext(ctx, `UPDATE ix_faces SET person=0 WHERE id=? AND person=?`, face, id)
 		if err == nil {
 			if n, _ := res.RowsAffected(); n == 0 {
 				return errors.New("that face is not this person's")
 			}
+			_, err = a.db.Writer.ExecContext(ctx, `INSERT OR IGNORE INTO ix_face_reject(face,person,at) VALUES(?,?,?)`, face, id, now)
 			box.faces.mu.Lock()
-			box.faces.setPersonLocked(face, -1)
+			box.faces.setPersonLocked(face, 0)
 			box.faces.mu.Unlock()
 		}
 	default:
@@ -805,9 +799,11 @@ func (a *App) handleIxPeople(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	var loose int
-	_ = a.db.Reader.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM ix_faces WHERE person=0`).Scan(&loose)
-	writeJSON(w, http.StatusOK, map[string]any{"people": list, "ungrouped": loose, "status": a.ixMLStatusNow(r.Context()).Tasks["faces"]})
+	// Faces too small or blurred to group are counted on their own.
+	var loose, unusable int
+	_ = a.db.Reader.QueryRowContext(r.Context(), `SELECT COALESCE(SUM(NOT `+ixFaceJunkSQL+`),0), COALESCE(SUM(`+ixFaceJunkSQL+`),0) FROM ix_faces WHERE person=0`).Scan(&loose, &unusable)
+	writeJSON(w, http.StatusOK, map[string]any{"people": list, "ungrouped": loose, "unusable": unusable,
+		"suggest": a.ixPeopleSuggestions(r.Context(), list, 12), "status": a.ixMLStatusNow(r.Context()).Tasks["faces"]})
 }
 
 func (a *App) handleIxPerson(w http.ResponseWriter, r *http.Request) {

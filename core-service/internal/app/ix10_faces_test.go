@@ -3,9 +3,12 @@ package app
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"image"
 	"image/jpeg"
+	"math"
 	"math/rand"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -161,6 +164,125 @@ func TestIxFacesCountFilesNotFramesOrCopies(t *testing.T) {
 	p := ix10People(t, a, ctx)
 	if len(p) != 1 || p[0].Faces != 4 {
 		t.Fatalf("H: %+v", p)
+	}
+}
+
+// ix10Vec is a unit embedding with the given parts (dimension -> weight).
+func ix10Vec(parts map[int]float64) []byte {
+	v := make([]float32, 512)
+	var n float64
+	for d, w := range parts {
+		v[d] = float32(w)
+		n += w * w
+	}
+	for i := range v {
+		v[i] /= float32(math.Sqrt(n))
+	}
+	q, _ := ixQuantise(v)
+	b := make([]byte, len(q))
+	for i, x := range q {
+		b[i] = byte(x)
+	}
+	return b
+}
+
+// ix10Put stores people and their faces directly, as an older version
+// (or earlier grouping) left them. Call before the faces are first loaded.
+func ix10Put(t *testing.T, a *App, people map[int64]string, faces []ix10Face) {
+	t.Helper()
+	for id, name := range people {
+		if _, err := a.db.Writer.Exec(`INSERT INTO ix_people(id,name,created_at,updated_at) VALUES(?,?,1,1)`, id, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, f := range faces {
+		if f.score == 0 {
+			f.score = 0.95
+		}
+		if f.px == 0 && f.blur == 0 {
+			f.px, f.blur = 180, 300
+		}
+		if _, err := a.db.Writer.Exec(`INSERT INTO ix_faces(id,key,model,x1,y1,x2,y2,score,vec,person,at,frame,px,blur) VALUES(?,?,?,0.1,0.1,0.4,0.5,?,?,?,1,0,?,?)`,
+			f.id, f.key, ixFaceModel, f.score, ix10Vec(f.vec), f.person, f.px, f.blur); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+type ix10Face struct {
+	id     int64
+	key    string
+	person int64
+	vec    map[int]float64
+	score  float64
+	px     float64
+	blur   float64
+}
+
+func TestIxPeopleSuggestionsAndMerges(t *testing.T) {
+	a, ctx := ix8App(t, map[string]any{})
+	q := func(o int, w float64) map[int]float64 { return map[int]float64{1: w, o: math.Sqrt(1 - w*w)} }
+	var faces []ix10Face
+	id := int64(0)
+	add := func(person int64, vec map[int]float64, keys ...string) {
+		for _, k := range keys {
+			id++
+			faces = append(faces, ix10Face{id: id, key: k, person: person, vec: vec})
+		}
+	}
+	add(1, q(2, 1), "k1", "k2", "k3", "k4")                       // the same person as 2: merged unasked
+	add(2, q(2, 0.75), "k5", "k6")                                // 0.75 alike to 1
+	add(3, q(3, 0.45), "k7", "k8", "k9")                          // 0.45: "same person?"
+	add(4, q(4, 0.75), "k1", "k10", "k11")                        // as alike as 2, but seen beside 1 in k1
+	add(5, map[int]float64{9: 1}, "k12", "k13", "k14")            // Zed
+	add(6, map[int]float64{9: 0.8, 10: 0.6}, "k15", "k16", "k17") // Zoe: alike, but both named
+	ix10Put(t, a, map[int64]string{1: "", 2: "", 3: "", 4: "", 5: "Zed", 6: "Zoe"}, faces)
+	if err := a.ixFacePeoplePass(ctx); err != nil {
+		t.Fatal(err)
+	}
+	merged := func(id int64) int64 {
+		var into int64
+		_ = a.db.Reader.QueryRow(`SELECT merged_into FROM ix_people WHERE id=?`, id).Scan(&into)
+		return into
+	}
+	if merged(2) != 1 || merged(4) != 0 || merged(5) != 0 || merged(6) != 0 {
+		t.Fatalf("merged: 2→%d 4→%d 5→%d 6→%d", merged(2), merged(4), merged(5), merged(6))
+	}
+	pairs := func() string {
+		var out []string
+		for _, p := range a.ixPeopleSuggestions(ctx, ix10People(t, a, ctx), 12) {
+			if len(p.AFaces) == 0 || len(p.BFaces) == 0 {
+				t.Fatalf("suggestion without faces: %+v", p)
+			}
+			out = append(out, fmt.Sprintf("%d-%d", p.A, p.B))
+		}
+		return strings.Join(out, ",")
+	}
+	if got := pairs(); got != "5-6,1-3" {
+		t.Fatalf("suggestions: %s", got)
+	}
+	// "Not the same" is remembered, also after the next pass.
+	if err := a.ixPersonChange(ctx, 3, "not-same", "", 1, 0); err != nil {
+		t.Fatal(err)
+	}
+	a.ixFacePeoplePass(ctx)
+	if got := pairs(); got != "5-6" {
+		t.Fatalf("after no: %s", got)
+	}
+	// ... and after 1 is merged into someone else.
+	if err := a.ixPersonChange(ctx, 1, "merge", "", 4, 0); err != nil {
+		t.Fatal(err)
+	}
+	a.ixFacePeoplePass(ctx)
+	if got := pairs(); got != "5-6" {
+		t.Fatalf("after merging 1: %s", got)
+	}
+	// "Same person": the usual merge; the suggestion goes.
+	if err := a.ixPersonChange(ctx, 6, "merge", "", 5, 0); err != nil {
+		t.Fatal(err)
+	}
+	if got := pairs(); got != "" {
+		t.Fatalf("after yes: %s", got)
 	}
 }
 

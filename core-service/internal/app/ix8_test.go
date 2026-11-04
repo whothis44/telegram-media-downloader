@@ -198,15 +198,16 @@ func TestIxFacesBecomePeopleAndCanBeCorrected(t *testing.T) {
 	if len(people) != 1 || people[0].Name != "Alice" || people[0].Faces != 5 {
 		t.Fatalf("after merge: %+v", people)
 	}
-	// A face taken out is never put back by itself.
-	var person, manual int64
-	_ = a.db.Reader.QueryRow(`SELECT person, manual FROM ix_faces WHERE id=?`, faceOfB).Scan(&person, &manual)
-	if person != -1 || manual != 1 {
-		t.Fatalf("taken-out face: %d %d", person, manual)
+	// A face taken out is never put back with that person by itself, nor
+	// with the person they were merged into since.
+	var person int64
+	_ = a.db.Reader.QueryRow(`SELECT person FROM ix_faces WHERE id=?`, faceOfB).Scan(&person)
+	if person != 0 {
+		t.Fatalf("taken-out face: %d", person)
 	}
 	a.ixRegroupFaces(ctx, 100)
 	_ = a.db.Reader.QueryRow(`SELECT person FROM ix_faces WHERE id=?`, faceOfB).Scan(&person)
-	if person != -1 {
+	if person == pa || person == pb {
 		t.Fatal("regrouping put a taken-out face back")
 	}
 	// The browser finds the people's posts, and each file's faces.

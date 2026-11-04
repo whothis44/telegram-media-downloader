@@ -542,14 +542,29 @@ async function loadPeople() {
   const st = r.data.status || {};
   let h = st.on === false && !list.length ? '<p class="muted">Faces are off. Turn them on in Archive → Settings → Image recognition.</p>' : '';
   if (st.pending) h += `<p class="muted">${st.pending.toLocaleString()} file(s) still to look at for faces.</p>`;
+  // "Same person?": people whose faces look close, but not close enough to merge unasked.
+  const byId = Object.fromEntries(list.map((p) => [p.id, p]));
+  const sug = (r.data.suggest || []).filter((s) => byId[s.a] && byId[s.b]);
+  const faceRow = (ids) => (ids || []).map((f) => `<img loading="lazy" src="/api/ix/face?id=${f}" alt="" style="width:40px;height:40px;border-radius:50%;object-fit:cover">`).join('');
+  const side = (p, faces) => `<span class="row" style="gap:2px">${faceRow(faces)}</span> <b>${esc(p.name || 'Unnamed')}</b> <span class="muted">${p.files.toLocaleString()} file(s)</span>`;
+  if (sug.length) h += `<h3 style="font-size:14px;margin:4px 0">Same person?</h3>` + sug.map((s) => `<div class="row" data-pair="${s.a},${s.b}" style="margin:4px 0 8px;gap:8px;align-items:center;flex-wrap:wrap">${side(byId[s.a], s.aFaces)}<span class="muted">and</span>${side(byId[s.b], s.bFaces)}<button class="b" data-same>Same person</button><button class="b" data-notsame>Not the same</button></div>`).join('');
   const shown = list.filter((p) => !p.hidden), hidden = list.filter((p) => p.hidden);
   const card = (p) => `<button class="tile" data-pid="${p.id}" style="aspect-ratio:auto;padding:8px;cursor:pointer;background:var(--soft)"><img loading="lazy" src="/api/ix/face?id=${p.cover}" alt="" style="width:100%;aspect-ratio:1;border-radius:50%;object-fit:cover"><div style="font-size:13px;margin-top:4px"><b>${esc(p.name || 'Unnamed')}</b><br><span class="muted">${p.files.toLocaleString()} file(s)</span></div></button>`;
   h += shown.length ? `<div class="grid media" style="grid-template-columns:repeat(auto-fill,minmax(120px,1fr))">${shown.map(card).join('')}</div>` : (list.length ? '' : '<p class="muted">No people yet: a person appears once three or more faces look alike.</p>');
   if (hidden.length) h += `<details style="margin-top:12px"><summary>${hidden.length} hidden</summary><div class="grid media" style="grid-template-columns:repeat(auto-fill,minmax(120px,1fr))">${hidden.map(card).join('')}</div></details>`;
   if (r.data.ungrouped) h += `<p class="muted">${r.data.ungrouped.toLocaleString()} face(s) not grouped with anyone yet.</p>`;
+  if (r.data.unusable) h += `<p class="muted">${r.data.unusable.toLocaleString()} face(s) too small or too blurred to group.</p>`;
   $('#people').innerHTML = h;
   P.list = list;
   $$('#people [data-pid]').forEach((b) => b.onclick = () => showPerson(Number(b.dataset.pid)));
+  $$('#people [data-pair]').forEach((row) => {
+    const [a, b] = row.dataset.pair.split(',').map(Number), A = byId[a], B = byId[b];
+    // Same person: the one without a name (or in fewer files) goes into the other.
+    const into = A.name && !B.name ? A : B.name && !A.name ? B : A.files >= B.files ? A : B, from = into === A ? B : A;
+    const send = async (id, body, msg) => { const x = await api('POST', '/api/ix/browse/person/' + id, body); toast(x.ok ? msg : errText(x)); if (x.ok) loadPeople(); };
+    row.querySelector('[data-same]').onclick = () => send(from.id, { action: 'merge', into: into.id }, 'Merged.');
+    row.querySelector('[data-notsame]').onclick = () => send(a, { action: 'not-same', into: b }, 'Noted: they will not be suggested again.');
+  });
 }
 const P = { list: [] };
 async function showPerson(id) {
