@@ -38,6 +38,10 @@ import (
 //     hash of every part, and from 1 MiB, when it has none, four 64 KiB
 //     ranges (at most a quarter of the photo).
 //
+// From 256 KiB a file also waits while another of exactly its size is
+// downloading (download.Library.SubstituteFrom), so that a copy queued next
+// to its original is checked against it instead of downloaded alongside.
+//
 // What each check found is counted per day (ix_dedup.go).
 
 const (
