@@ -75,12 +75,25 @@ CREATE TABLE IF NOT EXISTS tgdl_stage_followers ( -- other messages with the sam
 );`
 
 type stageState struct {
-	known    atomic.Bool // the journal exists, so files may be waiting
-	mu       sync.Mutex
-	reserved int64 // staged downloads in progress
-	signal   chan struct{}
-	moving   sync.Mutex // one mover at a time
+	known     atomic.Bool // the journal exists, so files may be waiting
+	mu        sync.Mutex
+	reserved  int64 // staged downloads in progress
+	waiters   int   // downloads waiting for room now
+	fullSince int64 // when they started waiting (Unix ms), 0: none waits
+	signal    chan struct{}
+	moving    sync.Mutex // one mover at a time
 }
+
+// stageFreeReserve is the free space the staging disk keeps when downloads
+// go on past the space allowed (see WaitStageRoom).
+const stageFreeReserve int64 = 50 << 30
+
+// stageFreeSpace is the free space on the disk holding dir (a variable for tests).
+var stageFreeSpace = diskFree
+
+// errStageLater: the move waits for another download of the same message
+// or file to finish. Not a failure; it is tried again shortly.
+var errStageLater = errors.New("waiting for another download of the same message")
 
 // stageDoubt is a problem a retry cannot fix: the local file is kept and
 // the move waits for a person.
@@ -142,31 +155,65 @@ func (l *Library) reserveStage(size int64) func() {
 	}
 }
 
-// stageUsed is the local space staged files take or will take.
+// stageUsed is the local space staged files take or will take. Files that
+// need a person (stuck) stay on disk but do not count: they would otherwise
+// stop every download until someone looks (StagingStatus reports them).
 func (l *Library) stageUsed(ctx context.Context) int64 {
 	l.stage.mu.Lock()
 	used := l.stage.reserved
 	l.stage.mu.Unlock()
 	if l.stage.known.Load() {
 		var n int64
-		_ = l.reader.QueryRowContext(ctx, `SELECT COALESCE(SUM(size),0) FROM tgdl_stage_moves`).Scan(&n)
+		_ = l.reader.QueryRowContext(ctx, `SELECT COALESCE(SUM(size),0) FROM tgdl_stage_moves WHERE state='waiting'`).Scan(&n)
 		used += n
 	}
 	return used
 }
 
+// stageRoomOnDisk: past the space allowed, a download still goes while the
+// staging disk keeps plenty free after it (as much again as the space
+// allowed, and at least stageFreeReserve).
+func stageRoomOnDisk(st Staging, size int64) bool {
+	free, ok := stageFreeSpace(st.Dir)
+	return ok && free-size >= max(st.Cap, stageFreeReserve)
+}
+
+func (l *Library) stageWaiting(delta int) {
+	l.stage.mu.Lock()
+	defer l.stage.mu.Unlock()
+	l.stage.waiters += delta
+	switch {
+	case l.stage.waiters <= 0:
+		l.stage.waiters, l.stage.fullSince = 0, 0
+	case l.stage.fullSince == 0:
+		l.stage.fullSince = time.Now().UnixMilli()
+	}
+}
+
 // WaitStageRoom waits, when staging is on and the staged files already take
 // the space allowed, until moves to the library make room for size bytes.
-// One file is always let through so a file larger than the cap still goes.
+// One file is always let through so a file larger than the cap still goes,
+// and downloads go on while the disk has plenty of free space. While any
+// download waits, StagingStatus says so (Full), for the dashboard and alerts.
 func (l *Library) WaitStageRoom(ctx context.Context, size int64) error {
+	waiting := false
+	defer func() {
+		if waiting {
+			l.stageWaiting(-1)
+		}
+	}()
 	for {
 		st := l.stagingFor(ctx, Item{})
 		if st.Dir == "" {
 			return nil
 		}
 		used := l.stageUsed(ctx)
-		if used == 0 || used+size <= st.Cap {
+		if used == 0 || used+size <= st.Cap || stageRoomOnDisk(st, size) {
 			return nil
+		}
+		if !waiting {
+			waiting = true
+			l.stageWaiting(1)
 		}
 		wake := l.stageWait()
 		timer := time.NewTimer(5 * time.Second)
@@ -263,7 +310,7 @@ func (l *Library) ingestStaged(ctx context.Context, item Item, client Client, st
 }
 
 // dropStaged removes a staged file the library no longer needs (it holds
-// the same bytes already, or a newer version replaced the message).
+// the same bytes already, or a newer version of the message is catalogued).
 func (l *Library) dropStaged(ctx context.Context, stageRoot, relative string) {
 	ctx = context.WithoutCancel(ctx)
 	if err := os.Remove(filepath.Join(stageRoot, relative)); err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -301,9 +348,9 @@ func (l *Library) followStaged(ctx context.Context, item Item) (Record, bool, er
 }
 
 type stagedMove struct {
-	path, stageDir, payload, sum string
-	generation, size             int64
-	attempts                     int
+	path, stageDir, payload, sum, identity string
+	generation, size                       int64
+	attempts                               int
 }
 
 // RunStaging moves staged files to the library until ctx ends.
@@ -333,14 +380,14 @@ func (l *Library) MoveStaged(ctx context.Context) time.Duration {
 	l.stage.moving.Lock()
 	defer l.stage.moving.Unlock()
 	now := time.Now().UnixMilli()
-	rows, err := l.reader.QueryContext(ctx, `SELECT path,stage_dir,item,generation,sha256,size,attempts FROM tgdl_stage_moves WHERE state='waiting' AND next_at<=? ORDER BY created_at LIMIT 50`, now)
+	rows, err := l.reader.QueryContext(ctx, `SELECT path,stage_dir,item,generation,sha256,size,attempts,identity FROM tgdl_stage_moves WHERE state='waiting' AND next_at<=? ORDER BY created_at LIMIT 50`, now)
 	if err != nil {
 		return time.Minute
 	}
 	var due []stagedMove
 	for rows.Next() {
 		var mv stagedMove
-		if rows.Scan(&mv.path, &mv.stageDir, &mv.payload, &mv.generation, &mv.sum, &mv.size, &mv.attempts) == nil {
+		if rows.Scan(&mv.path, &mv.stageDir, &mv.payload, &mv.generation, &mv.sum, &mv.size, &mv.attempts, &mv.identity) == nil {
 			due = append(due, mv)
 		}
 	}
@@ -349,7 +396,12 @@ func (l *Library) MoveStaged(ctx context.Context) time.Duration {
 		if ctx.Err() != nil {
 			return 0
 		}
-		if err := l.moveStaged(ctx, mv); err != nil && ctx.Err() == nil {
+		err := l.moveStaged(ctx, mv)
+		switch {
+		case err == nil || ctx.Err() != nil:
+		case errors.Is(err, errStageLater):
+			_, _ = l.writer.ExecContext(context.WithoutCancel(ctx), `UPDATE tgdl_stage_moves SET next_at=? WHERE path=?`, time.Now().Add(stageLaterPause).UnixMilli(), mv.path)
+		default:
 			l.stageFailed(ctx, mv, err)
 		}
 	}
@@ -392,12 +444,40 @@ func (l *Library) moveStaged(ctx context.Context, mv stagedMove) error {
 	}
 	item.generation = mv.generation
 	local := filepath.Join(mv.stageDir, filepath.FromSlash(mv.path))
+	// While it is moved, no download of its file or of its messages runs:
+	// nothing can follow it or catalogue those messages meanwhile. When one
+	// runs, the move waits for it.
+	locks := stageLocks{l: l, held: map[string]func(){}}
+	defer locks.release()
+	if !locks.take("identity:"+mv.identity) || !locks.take(messageKey(item)) {
+		return errStageLater
+	}
 	followers, err := l.stageFollowers(ctx, mv.path)
 	if err != nil {
 		return err
 	}
-	if !l.stageCurrent(ctx, item) && len(followers) == 0 {
-		// A newer version of the message came meanwhile: nothing wants this file.
+	for _, fw := range followers {
+		if !locks.take(messageKey(fw)) {
+			return errStageLater
+		}
+	}
+	fate, err := l.stageFateOf(ctx, item, mv.path)
+	if err != nil {
+		return err
+	}
+	if fate == stageLater {
+		return errStageLater
+	}
+	fates := make([]stageFate, len(followers))
+	wanted := fate != stageReplaced
+	for i, fw := range followers {
+		if fates[i], err = l.stageFateOf(ctx, fw, mv.path); err != nil {
+			return err
+		}
+		wanted = wanted || fates[i] == stageCurrent || fates[i] == stageAdopt
+	}
+	if !wanted {
+		// A newer version of each message is in the catalogue: nothing wants this file.
 		l.dropStaged(ctx, mv.stageDir, filepath.FromSlash(mv.path))
 		return nil
 	}
@@ -409,7 +489,8 @@ func (l *Library) moveStaged(ctx context.Context, mv stagedMove) error {
 			l.stageSignal()
 			return nil
 		}
-		return stageDoubt{"the staged copy is missing from the staging folder"}
+		// Removed by someone or something else: its messages go back in the queue.
+		return l.stagedLost(ctx, mv, append([]Item{item}, followers...), append([]stageFate{fate}, fates...))
 	}
 	if err != nil {
 		return stageDoubt{"the staged copy cannot be opened: " + err.Error()}
@@ -537,15 +618,30 @@ func (l *Library) moveStaged(ctx context.Context, mv stagedMove) error {
 	}
 	var records []stagedRecord
 	media := candidate{path: relative, sha256: mv.sum, info: finfo, fingerprint: fingerprint}
-	record, err := l.register(ctx, item, media, false)
-	switch {
-	case err == nil:
-		records = append(records, stagedRecord{item, record})
-	case errors.Is(err, ErrSuperseded):
-	default:
-		return err
+	if fate != stageReplaced {
+		if fate == stageAdopt {
+			if err := l.adoptStaged(ctx, &item); err != nil {
+				return err
+			}
+		}
+		record, err := l.register(ctx, item, media, false)
+		switch {
+		case err == nil:
+			records = append(records, stagedRecord{item, record})
+		case errors.Is(err, ErrSuperseded):
+		default:
+			return err
+		}
 	}
-	for _, fw := range followers {
+	for i, fw := range followers {
+		switch fates[i] {
+		case stageReplaced, stageLater:
+			continue // a newer version of that message is catalogued, or comes
+		case stageAdopt:
+			if err := l.adoptStaged(ctx, &fw); err != nil {
+				return err
+			}
+		}
 		if len(records) == 0 {
 			// The first message was replaced meanwhile: the next one owns the file.
 			rec, e := l.register(ctx, fw, media, false)
@@ -567,6 +663,11 @@ func (l *Library) moveStaged(ctx context.Context, mv stagedMove) error {
 		if found {
 			records = append(records, stagedRecord{fw, rec})
 		}
+	}
+	if len(records) == 0 {
+		// Some message wants this file (checked above, with their locks
+		// held), so nothing may be removed before one has it catalogued.
+		return errors.New("the staged file was not catalogued; trying again")
 	}
 	// In the library: the local copy can go, then its journal entry.
 	if err := os.Remove(local); err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -642,12 +743,106 @@ func (l *Library) renameStaged(ctx context.Context, mv stagedMove, relative stri
 	return tx.Commit()
 }
 
-func (l *Library) stageCurrent(ctx context.Context, item Item) bool {
-	var current int64
-	if err := l.reader.QueryRowContext(ctx, `SELECT generation FROM tgdl_message_generations WHERE group_id=? AND message_id=?`, item.GroupID, item.MessageID).Scan(&current); err != nil {
-		return true // unknown: move it anyway, registration decides
+// stageLaterPause is the wait before a move that waited for another
+// download is tried again.
+const stageLaterPause = 30 * time.Second
+
+// stageLocks are the identity and message locks a move holds, taken
+// without waiting.
+type stageLocks struct {
+	l    *Library
+	held map[string]func()
+}
+
+func (s *stageLocks) take(key string) bool {
+	if _, ok := s.held[key]; ok {
+		return true
 	}
-	return current == item.generation
+	release, ok := s.l.tryEnter(key)
+	if ok {
+		s.held[key] = release
+	}
+	return ok
+}
+
+func (s *stageLocks) release() {
+	for _, release := range s.held {
+		release()
+	}
+}
+
+// stageFate is what becomes of a staged file for one of its messages, when
+// that message may have been downloaded again since.
+type stageFate int
+
+const (
+	stageCurrent  stageFate = iota // the message's latest download
+	stageReplaced                  // a newer version is catalogued: not needed for it
+	stageLater                     // a newer version waits in the staging folder: that one goes first
+	stageAdopt                     // newer downloads failed or stopped: this is its only copy, kept
+)
+
+// stageFateOf decides, with the message's lock held, what becomes of the
+// staged file at path for item. A newer download that failed never costs
+// the file: it is dropped only once a newer version is in the catalogue.
+func (l *Library) stageFateOf(ctx context.Context, item Item, path string) (stageFate, error) {
+	var current, registered int64
+	err := l.reader.QueryRowContext(ctx, `SELECT generation, registered FROM tgdl_message_generations WHERE group_id=? AND message_id=?`, item.GroupID, item.MessageID).Scan(&current, &registered)
+	if errors.Is(err, sql.ErrNoRows) {
+		return stageCurrent, nil // unknown: move it anyway, registration decides
+	}
+	if err != nil {
+		return 0, err
+	}
+	switch {
+	case current == item.generation:
+		return stageCurrent, nil
+	case registered > item.generation:
+		return stageReplaced, nil
+	}
+	var newer bool
+	err = l.reader.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tgdl_stage_moves WHERE state='waiting' AND path<>? AND generation>? AND json_extract(item,'$.GroupID')=? AND json_extract(item,'$.MessageID')=?)
+		OR EXISTS(SELECT 1 FROM tgdl_stage_followers f JOIN tgdl_stage_moves m ON m.path=f.path WHERE m.state='waiting' AND f.path<>? AND f.generation>? AND f.group_id=? AND f.message_id=?)`,
+		path, item.generation, item.GroupID, item.MessageID, path, item.generation, item.GroupID, item.MessageID).Scan(&newer)
+	if err != nil {
+		return 0, err
+	}
+	if newer {
+		return stageLater, nil
+	}
+	return stageAdopt, nil
+}
+
+// adoptStaged makes item its message's latest version again, so that its
+// staged file is catalogued. The message's lock is held.
+func (l *Library) adoptStaged(ctx context.Context, item *Item) error {
+	return l.writer.QueryRowContext(ctx, `UPDATE tgdl_message_generations SET generation=generation+1 WHERE group_id=? AND message_id=? RETURNING generation`, item.GroupID, item.MessageID).Scan(&item.generation)
+}
+
+// stagedLost handles a staged file that is gone from the staging folder
+// before it reached the library (an antivirus, someone cleaning up): its
+// download had already counted as done, so each message that still wants it
+// is put back in the download queue, and the journal entry goes.
+func (l *Library) stagedLost(ctx context.Context, mv stagedMove, items []Item, fates []stageFate) error {
+	if l.StageLost == nil {
+		return stageDoubt{"the staged copy is missing from the staging folder"}
+	}
+	for i, it := range items {
+		if fates[i] != stageCurrent && fates[i] != stageAdopt {
+			continue
+		}
+		if len(it.Requeue) == 0 {
+			return stageDoubt{"the staged copy is missing from the staging folder, and its message cannot be queued again on its own: download it again"}
+		}
+		if err := l.StageLost(ctx, it); err != nil {
+			return fmt.Errorf("the staged copy is missing from the staging folder; queueing its message again failed: %w", err)
+		}
+	}
+	bg := context.WithoutCancel(ctx)
+	_, _ = l.writer.ExecContext(bg, `DELETE FROM tgdl_stage_followers WHERE path=?`, mv.path)
+	_, _ = l.writer.ExecContext(bg, `DELETE FROM tgdl_stage_moves WHERE path=?`, mv.path)
+	l.stageSignal()
+	return nil
 }
 
 func (l *Library) stageFollowers(ctx context.Context, path string) ([]Item, error) {
@@ -773,16 +968,23 @@ type StagingStatus struct {
 	Failing      int      `json:"failing"` // of those, the last copy failed
 	FailingSince int64    `json:"failingSince,omitempty"`
 	Stuck        int      `json:"stuck"` // need a person; their local files are kept
+	StuckBytes   int64    `json:"stuckBytes,omitempty"`
+	Full         bool     `json:"full"`                // downloads are waiting for room in the staging folder
+	FullSince    int64    `json:"fullSince,omitempty"` // since when (Unix ms)
 	Errors       []string `json:"errors,omitempty"`
 }
 
 func (l *Library) StagingStatus(ctx context.Context) StagingStatus {
 	st := StagingStatus{}
+	l.stage.mu.Lock()
+	st.Full, st.FullSince = l.stage.waiters > 0, l.stage.fullSince
+	l.stage.mu.Unlock()
 	if !l.stage.known.Load() {
 		return st
 	}
-	_ = l.reader.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(size),0), COALESCE(SUM(error<>'' AND state='waiting'),0), COALESCE(SUM(state='stuck'),0), COALESCE(MIN(CASE WHEN failing_since>0 THEN failing_since END),0) FROM tgdl_stage_moves`).
-		Scan(&st.Waiting, &st.Bytes, &st.Failing, &st.Stuck, &st.FailingSince)
+	_ = l.reader.QueryRowContext(ctx, `SELECT COALESCE(SUM(state='waiting'),0), COALESCE(SUM(CASE WHEN state='waiting' THEN size ELSE 0 END),0), COALESCE(SUM(error<>'' AND state='waiting'),0),
+		COALESCE(SUM(state='stuck'),0), COALESCE(SUM(CASE WHEN state='stuck' THEN size ELSE 0 END),0), COALESCE(MIN(CASE WHEN failing_since>0 THEN failing_since END),0) FROM tgdl_stage_moves`).
+		Scan(&st.Waiting, &st.Bytes, &st.Failing, &st.Stuck, &st.StuckBytes, &st.FailingSince)
 	rows, err := l.reader.QueryContext(ctx, `SELECT error, COUNT(*) FROM tgdl_stage_moves WHERE error<>'' GROUP BY error ORDER BY 2 DESC LIMIT 5`)
 	if err == nil {
 		for rows.Next() {
