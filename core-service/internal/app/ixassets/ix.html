@@ -212,6 +212,18 @@ ${(() => {
   return h;
 }
 
+// Settings → Copies (ix_copies*.go).
+function viewCopySettings(s) {
+  const c = state.status.copies || {}, q = c.queue || {}, sm = c.sampled || {}, cal = c.calibration;
+  const n = (x) => fmtNum((x || {}).files || 0);
+  return `<div class="card"><h2>Copies</h2>
+<div class="muted">Held copies only wait: nothing is skipped for good, and every message is archived in full. Now: ${n(q.held)} held (${n(q.vsSaved)} copies of saved videos, ${n(q.vsQueued)} lesser copies of queued ones, ${n(q.recog)} by image recognition), ${n(q.confirmed)} confirmed. Big videos checked by sampling: ${fmtNum(sm.checked || 0)}, using ${fmtNum(sm.partsMb || 0)} MB instead of ${fmtSize(sm.sizeBytes || 0)}; ${fmtNum(sm.confirmed || 0)} confirmed copies.</div>
+<label><input type="checkbox" data-set="skipConfirmed" ${s.confirmedGoEarly ? '' : 'checked'}> Skip confirmed copies until everything else is done (recommended). A confirmed copy is a held video whose frames, sampled across the file without downloading it, match a saved video. “Download the held files now” (Overview) still fetches them.</label>
+<label><input type="checkbox" data-set="copyThumbs" ${s.copyThumbsOff ? '' : 'checked'}> Compare Telegram's small previews of queued videos and large pictures with saved files (needs image recognition; one small request per file, a few seconds apart). The previews are kept and shown in the browser for files not downloaded.</label>
+<div class="muted">Likeness that makes a probable copy: ${((c.threshold || 0.95) * 100).toFixed(1)}%${cal ? ` (calibrated on ${fmtNum(cal.pictures)} of your pictures: a picture and its 320 px preview ${(cal.sameMin * 100).toFixed(1)}% or more alike, different pictures at most ${(cal.diffMax * 100).toFixed(1)}%)` : ' (not calibrated)'}.</div>
+<div class="btns"><button class="b primary" data-act="set-save">Save settings</button><button class="b" data-act="copy-calib" ${state.status.ml && state.status.ml.enabled ? '' : 'disabled'}>Calibrate on my pictures</button>${state.copyMsg ? `<span class="muted">${esc(state.copyMsg)}</span>` : ''}</div></div>`;
+}
+
 // Copies among what is left to download (ix_copies.go).
 function viewCopies() {
   const c = state.status.copies;
@@ -418,6 +430,7 @@ ${state.diag ? `<textarea id="diag" readonly style="width:100%;min-height:260px;
 <div class="muted">A frozen account can still read history. Leave this off to keep capturing messages while you can.</div>
 <div class="btns"><button class="b primary" data-act="set-save">Save settings</button></div>
 ${state.setMsg ? `<div class="muted">${esc(state.setMsg)}</div>` : ''}</div>
+${viewCopySettings(s)}
 <div class="card"><h2>Image recognition (optional)</h2>
 <div class="muted">Lets the archive browser find pictures and videos by what they show (“bikes in the snow”, in any language), show “more like this”, set apart files in a set that don't look like the rest, list what pictures show (Things), and, if you turn them on, read the text in pictures and group faces into people. It uses the machine-learning part of Immich (a self-hosted photo app), running in Docker on this PC; nothing is sent anywhere else, and only addresses on this computer or your local network are accepted. Each distinct picture is looked at once, in the background. Instructions: docs/image-recognition.md.</div>
 <div class="btns">Address: <input class="t" data-set-text="mlUrl" value="${esc(s.mlUrl || '')}" placeholder="http://127.0.0.1:3003 (empty = off)" style="flex:1;min-width:240px"></div>
@@ -542,6 +555,7 @@ $app.addEventListener('click', async (ev) => {
     case 'diag': { const r = await fetch('/api/ix/diagnostics', { credentials: 'same-origin' }); state.diag = r.ok ? await r.text() : ''; state.diagMsg = r.ok ? '' : 'Could not make the report: HTTP ' + r.status; render(); break; }
     case 'diag-copy': { try { await navigator.clipboard.writeText(state.diag); state.diagMsg = 'Copied.'; } catch { const t = document.getElementById('diag'); if (t) { t.select(); document.execCommand('copy'); } state.diagMsg = 'Copied.'; } render(); break; }
     case 'freeze-check': { const r = await api('POST', '/api/ix/freeze/check'); if (!r.ok) state.error = 'Could not read the freeze state: ' + errText(r); load(); break; }
+    case 'copy-calib': { state.copyMsg = 'Calibrating…'; render(); const r = await api('POST', '/api/ix/copies/calibrate'); state.copyMsg = r.ok ? 'Calibrated.' : errText(r); load(); break; }
     case 'held-release': { const r = await api('POST', '/api/ix/held/release'); state.keepMsg = r.ok ? 'The held files are back in the download queue.' : errText(r); load(); break; }
     case 'subst-fetch': {
       if (!confirm('Download the real files of every re-upload that was matched to a saved file? Their groups get a files pass.')) break;

@@ -179,3 +179,18 @@ func TestIxCopiesAreMeasured(t *testing.T) {
 	}
 }
 
+func TestIxCopySettings(t *testing.T) {
+	d := ixDefaultSettings()
+	if d.ConfirmedGoEarly || d.CopyThumbsOff {
+		t.Fatal("the recommended way is not the default")
+	}
+	s, err := ixParseSettings(map[string]any{"skipConfirmed": false, "copyThumbs": false}, d)
+	if err != nil || !s.ConfirmedGoEarly || !s.CopyThumbsOff {
+		t.Fatalf("%+v %v", s, err)
+	}
+	s, _ = ixParseSettings(map[string]any{"skipConfirmed": true, "copyThumbs": true}, s)
+	if s.ConfirmedGoEarly || s.CopyThumbsOff {
+		t.Fatal("turned back on")
+	}
+}
+
