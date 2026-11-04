@@ -4153,6 +4153,25 @@
             <span class="text-tg-textSecondary" data-i18n="status.active">A:</span>
             <span class="status-chip-val" id="status-active">0</span>
         </span>
+        <!-- Download speed (only while an engine run is in progress) and
+             what finished in the last hour / 24 h. Filled by statusbar.js
+             from the monitor status `throughput` object; narrow screens
+             drop the byte totals (.status-chip-bytes). -->
+        <span class="status-chip hidden" id="status-speed-chip" data-admin-only title="Download speed (last 10 s)" data-i18n-title="status.speed_title">
+            <i class="ri-speed-up-line text-tg-textSecondary" aria-hidden="true"></i>
+            <span class="status-chip-val" id="status-speed">—</span>
+        </span>
+        <span class="status-chip hidden" id="status-hour-chip" data-admin-only>
+            <i class="ri-history-line text-tg-textSecondary" aria-hidden="true"></i>
+            <span class="text-tg-textSecondary" data-i18n="status.last_hour">1h</span>
+            <span class="status-chip-val" id="status-hour-files">0</span>
+            <span class="status-chip-bytes text-tg-textSecondary" id="status-hour-bytes">0 B</span>
+        </span>
+        <span class="status-chip hidden" id="status-day-chip" data-admin-only>
+            <span class="text-tg-textSecondary" data-i18n="status.last_24h">24h</span>
+            <span class="status-chip-val" id="status-day-files">0</span>
+            <span class="status-chip-bytes text-tg-textSecondary" id="status-day-bytes">0 B</span>
+        </span>
 
         <!-- Right cluster: WS indicator · update badge · version (admin, desktop) -->
         <span class="ml-auto flex items-center gap-2" data-admin-only>

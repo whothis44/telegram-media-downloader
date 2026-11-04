@@ -832,6 +832,22 @@ html.theme-light .status-chip .status-chip-val {
     font-size: 12px;
     line-height: 1;
 }
+/* Speed / last-hour / 24 h chips: numbers keep a steady width; phones
+   show file counts only (the byte totals stay in the chip's title). */
+#status-speed {
+    min-width: 4.5em;
+}
+.status-chip-bytes {
+    font-variant-numeric: tabular-nums;
+}
+@media (max-width: 767.98px) {
+    #status-speed {
+        min-width: 0;
+    }
+    .status-chip-bytes {
+        display: none;
+    }
+}
 
 /* Engine/queue/maintenance pills + status colours */
 html.theme-light .bg-tg-blue\/10 {
