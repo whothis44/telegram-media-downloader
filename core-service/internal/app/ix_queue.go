@@ -123,7 +123,7 @@ func (a *App) ixStart() {
 		go func() { defer a.ambientWG.Done(); run(a.ctx) }()
 	}
 	// Lower quality first, and the staging folder's moves to the library.
-	for _, run := range []func(context.Context){a.ixRunLowq, a.ixRunStaging} {
+	for _, run := range []func(context.Context){a.ixRunLowq, a.ixRunStaging, a.ixRunPreviewsAll} {
 		a.ambientWG.Add(1)
 		go func() { defer a.ambientWG.Done(); run(a.ctx) }()
 	}
