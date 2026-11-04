@@ -193,7 +193,6 @@ func (a *App) ixLastProgress(ctx context.Context) time.Time {
 // the backfills cannot queue big files without end.
 const ixBigApartTimes = 2
 
-//
 // The two counts are kept for ixApartCacheTTL: a backfill at its limit asks
 // every 250 ms.
 func (a *App) ixWaitingApart(ctx context.Context, cap int) int {
