@@ -202,13 +202,24 @@ ${(() => {
   }
   if ((d.days || []).length) x += `<div class="muted">Downloaded per day: ${d.days.map((y) => `${esc(y.day.slice(5))} <b>${fmtNum(y.files)}</b> files, ${fmtSize(y.bytes)}`).join(' · ')}</div>`;
   return x;
-})()}
+})()}${transferNotes()}
 <div class="muted">A failed file is first retried a few times by the download engine. ${state.status.settings.autoRetry ? `After that, it goes back in the queue every ${Math.round(d.retryAfterMin / 60)} hours, up to ${d.retryRounds} times (Settings).` : 'Automatic retries every few hours are <b>off</b> (Settings).'} A group's files pass also tries its failed files again.</div>`;
   if (d.errors && d.errors.length) {
     h += `<div class="list" style="margin-top:8px"><table><tr><th>Why files failed</th><th>Files</th></tr>${d.errors.map((e) => `<tr><td class="muted">${esc(e.error)}</td><td class="n">${fmtNum(e.count)}</td></tr>`).join('')}</table></div>`;
   }
   h += `<div class="btns"><button class="b" data-act="dl-retry" ${d.failed && d.engineRunning ? '' : 'disabled'}>Retry all ${fmtNum(d.failed)} failed now</button>${state.dlMsg ? `<span class="muted">${esc(state.dlMsg)}</span>` : ''}</div></div>`;
   return h;
+}
+
+// Big videos saved in a lower quality first, and the local staging folder.
+function transferNotes() {
+  const q = state.status.lowq || {}; const g = state.status.staging || {};
+  let x = '';
+  if (q.saved) x += `<div class="muted">${fmtNum(q.saved)} big video(s) saved in a lower quality first (${fmtSize(q.savedBytes)} instead of ${fmtSize(q.origBytes)}); ${fmtNum(q.upgraded)} upgraded to the original${q.extraBytes ? ` (their lower qualities cost ${fmtSize(q.extraBytes)} extra)` : ''}${q.waiting ? `, ${fmtNum(q.waiting)} original(s) still to come after everything else` : ''}.</div>`;
+  if (g.on || g.waiting) {
+    x += `<div class="muted">Local staging folder: ${fmtNum(g.waiting || 0)} file(s), ${fmtSize(g.bytes || 0)}, waiting to be copied to the downloads folder${g.failing ? ` · <span class="warn">${fmtNum(g.failing)} copy attempt(s) failing; they are retried and the local files are kept</span>` : ''}${g.stuck ? ` · <span class="bad">${fmtNum(g.stuck)} need you: their local files are kept (see the diagnostics report)</span>` : ''}.</div>`;
+  }
+  return x;
 }
 
 // ---------------- Rescan ----------------
@@ -392,6 +403,13 @@ ${state.diag ? `<textarea id="diag" readonly style="width:100%;min-height:260px;
 <div class="btns">At <input class="t" data-set-text="exportTime" value="${esc(s.exportTime)}" style="width:80px"> (24-hour, this computer's time)</div>
 <div class="btns">Folder: <input class="t" data-set-text="exportDir" value="${esc(s.exportDir)}" placeholder="${esc(state.status.exportDir || '')}" style="flex:1;min-width:240px"></div>
 <div class="muted">Leave the folder empty to use a folder next to your downloads folder. It can't be inside the downloads folder.</div></div>
+<div class="card"><h2>Big videos and the NAS</h2>
+<label><input type="checkbox" data-set="lowqFirst" ${s.lowqFirst ? 'checked' : ''}> Save a lower quality of very large videos first when time is short: when a deletion date is set and a video of 200 MB or more would not be reached in time, a smaller copy Telegram keeps of it (at least 480p, at most 40% of the size) is saved first; the original follows after everything else and then replaces it. Not done for likely copies.</label>
+<label style="margin-left:22px"><input type="checkbox" data-set="lowqKeep" ${s.lowqKeep ? 'checked' : ''}> …and keep the lower quality after the original arrives</label>
+<div class="btns">Download first to this folder on this computer: <input class="t" data-set-text="stageDir" value="${esc(s.stageDir || '')}" placeholder="empty = off; for example ${esc((state.status.staging || {}).suggest || '')}" style="flex:1;min-width:240px"></div>
+<div class="btns">Space it may use: <input class="t" data-set-text="stageCapGb" value="${esc(String(s.stageCapGb || 20))}" style="width:70px"> GB</div>
+<div class="muted">Downloads are written to this local folder, checked, then copied to the downloads folder (your NAS) and checked again before the local copy is removed, so a network hiccup on the share doesn't fail a download. A copy that fails is retried for as long as it takes; nothing on the NAS is ever replaced. The folder must exist and must not be inside the downloads folder. When it is full, new downloads wait for copies to finish.</div>
+<div class="btns"><button class="b primary" data-act="set-save">Save settings</button></div></div>
 <div class="card"><h2>Account safety</h2>
 <label>Pace of rescans: <select class="t" data-set-select="pace"><option value="normal" ${s.pace === 'normal' ? 'selected' : ''}>Normal</option><option value="gentle" ${s.pace === 'gentle' ? 'selected' : ''}>Gentle (pauses more often, smaller download batches)</option></select></label>
 <div class="btns">Quiet hours (no new group starts): <input class="t" data-set-text="quietStart" value="${esc(s.quietStart)}" placeholder="22:00" style="width:80px"> to <input class="t" data-set-text="quietEnd" value="${esc(s.quietEnd)}" placeholder="07:00" style="width:80px"> <span class="muted">empty = none</span></div>

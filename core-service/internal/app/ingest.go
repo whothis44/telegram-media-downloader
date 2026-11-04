@@ -49,6 +49,7 @@ func (a *App) ingestTelegram(ctx context.Context, message *tg.Message, groupID, 
 	if err != nil {
 		return download.Record{}, err
 	}
+	item.NoStage = forward // a forward needs the file in the library at once
 	record, err := a.library.Ingest(ctx, item, telegram.AttachmentClient{Source: transport, Media: attachment})
 	if err != nil {
 		return record, err
@@ -61,6 +62,10 @@ func (a *App) ingestTelegram(ctx context.Context, message *tg.Message, groupID, 
 	if ttl > 0 {
 		// 2.x announced captured self-destructing media to the dashboard.
 		a.hub.Broadcast(ws.Event{Type: "monitor_download", Payload: map[string]any{"group": groupName, "type": "ttl", "messageId": message.ID, "ttl": ttl}})
+	}
+	if record.Staged {
+		// In the local staging folder: the rest follows when it reaches the library (ixStagedArrived).
+		return record, nil
 	}
 	if forward {
 		a.queueForward(forwardJob{groupID: item.GroupID, groupName: groupName, messageID: message.ID, topicID: telegram.MessageTopicID(message), text: message.Message, recordID: record.ID, path: record.Path, facts: attachment.Facts})

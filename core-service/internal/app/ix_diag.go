@@ -154,6 +154,9 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 	}
 	h := a.ixHeldStatus(ctx)
 	line("copies: %d exact re-uploads not downloaded (%d MB) · %d held · %d released", h.Subst, h.SavedMB, h.Held, h.Released)
+	for _, l := range a.ixTransferDiag(ctx, r.clean) {
+		line("%s", l)
+	}
 	line("\n[background work]")
 	pic := a.ixMediaStatus()
 	line("pictures %d/%d (errors %d, grouped %d, to review %d, running %v)", pic.Done, pic.Total, pic.Errors, pic.Grouped, pic.Suggested, pic.Running)

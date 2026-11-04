@@ -49,6 +49,11 @@ type ixSettings struct {
 	// DownloadPacing lets the download pacer set how many file parts are in
 	// flight (ix.9); off goes back to how ix.8 downloaded.
 	DownloadPacing bool `json:"downloadPacing"`
+	// Big videos and the NAS (ix_lowq.go, ix_staging.go).
+	LowqFirst  bool   `json:"lowqFirst"`  // save a lower quality of very large videos first when time is short
+	LowqKeep   bool   `json:"lowqKeep"`   // keep that lower quality after the original arrives
+	StageDir   string `json:"stageDir"`   // local folder downloads go to before the library; empty: off
+	StageCapGB int    `json:"stageCapGb"` // space staged files may take
 	// Alerts (see ix_alerts.go). The SMTP password is never sent back to
 	// the dashboard; AlertSMTPPassSet says whether one is saved.
 	AlertWebhook     string `json:"alertWebhook"`
@@ -71,7 +76,7 @@ func (s ixSettings) public() ixSettings {
 }
 
 func ixDefaultSettings() ixSettings {
-	return ixSettings{ExportEnabled: true, ExportTime: "03:30", Pace: "normal", DupEnabled: true, DupHWAccel: "cuda", AutoRetry: true, FixityEnabled: true, SubstExact: true, HoldLikely: true, MLText: true, MLDupes: true, DeadlineOrder: "auto", DownloadPacing: true, AlertWebhookKind: "ntfy", AlertSMTPPort: "587"}
+	return ixSettings{ExportEnabled: true, ExportTime: "03:30", Pace: "normal", DupEnabled: true, DupHWAccel: "cuda", AutoRetry: true, FixityEnabled: true, SubstExact: true, HoldLikely: true, MLText: true, MLDupes: true, DeadlineOrder: "auto", DownloadPacing: true, LowqFirst: true, StageCapGB: 20, AlertWebhookKind: "ntfy", AlertSMTPPort: "587"}
 }
 
 func (a *App) ixLoadSettings(ctx context.Context) ixSettings {
@@ -389,6 +394,9 @@ func ixParseSettings(body map[string]any, s ixSettings) (ixSettings, error) {
 			return s, errors.New("pace must be normal or gentle")
 		}
 		s.Pace = v
+	}
+	if err := ixParseTransferSettings(body, &s); err != nil {
+		return s, err
 	}
 	return s, nil
 }
