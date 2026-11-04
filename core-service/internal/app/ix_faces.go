@@ -24,8 +24,12 @@ import (
 // video) and describes each by an embedding; faces whose embeddings are
 // close are the same person. They are grouped the way Immich groups them:
 // a face joins the person of its closest grouped look-alike, and a new
-// person is made once enough faces look alike. A person can then be named,
-// merged with another, hidden, and a face taken out of a person.
+// person is made once enough faces look alike in different files. Poor
+// faces may only join, and more strictly (ix_faces_quality.go); two faces
+// of one picture are never one person. People that look close are offered
+// as "Same person?" (ix_faces_people.go). A person can be named, merged
+// with another, hidden, given a picture, and a face taken out of a person.
+// Stored faces are grouped again when these rules change (ix_faces_regroup.go).
 
 const (
 	ixFaceModel    = "buffalo_l"
@@ -38,6 +42,7 @@ const (
 
 type ixFaceFound struct {
 	X1, Y1, X2, Y2 float64 // share of the picture's width and height
+	Px             float64 // short side of the box, in pixels of the picture
 	Score          float64
 	Vec            []float32
 }
@@ -78,7 +83,8 @@ func ixParseFaces(raw []byte) ([]ixFaceFound, error) {
 			return nil, fmt.Errorf("faces: %v", err)
 		}
 		clamp := func(x float64) float64 { return math.Max(0, math.Min(1, x)) }
-		out = append(out, ixFaceFound{X1: clamp(f.Box.X1 / resp.W), Y1: clamp(f.Box.Y1 / resp.H), X2: clamp(f.Box.X2 / resp.W), Y2: clamp(f.Box.Y2 / resp.H), Score: f.Score, Vec: v})
+		px := math.Max(0, math.Min(math.Min(f.Box.X2, resp.W)-math.Max(f.Box.X1, 0), math.Min(f.Box.Y2, resp.H)-math.Max(f.Box.Y1, 0)))
+		out = append(out, ixFaceFound{X1: clamp(f.Box.X1 / resp.W), Y1: clamp(f.Box.Y1 / resp.H), X2: clamp(f.Box.X2 / resp.W), Y2: clamp(f.Box.Y2 / resp.H), Px: px, Score: f.Score, Vec: v})
 	}
 	return out, nil
 }
@@ -95,7 +101,21 @@ type ixFaceStore struct {
 	vecs   []int8
 	norms  []float32
 	person []int64
+	key    []int32   // the face's file, an index into keys
+	frame  []int16   // the video frame it is in (0 for a picture)
+	tier   []int8    // good, weak or unusable (ixFaceTierOf)
+	qual   []float32 // for the cover picture (ixFaceQuality)
+	keys   []string
+	keyIdx map[string]int32
+	shots  map[int64][]int32 // one picture or video frame -> its faces
 	loaded bool
+}
+
+// ixFaceInfo is what is known of a face besides its embedding.
+type ixFaceInfo struct {
+	key             string
+	frame           int
+	score, px, blur float64
 }
 
 func (s *ixFaceStore) load(ctx context.Context, db *sql.DB, model string) error {
@@ -105,8 +125,9 @@ func (s *ixFaceStore) load(ctx context.Context, db *sql.DB, model string) error 
 		return nil
 	}
 	s.model, s.dim, s.ids, s.vecs, s.norms, s.person = model, 0, nil, nil, nil, nil
-	s.index = map[int64]int32{}
-	rows, err := db.QueryContext(ctx, `SELECT id, vec, person FROM ix_faces WHERE model=? ORDER BY id`, model)
+	s.key, s.frame, s.tier, s.qual, s.keys = nil, nil, nil, nil, nil
+	s.index, s.keyIdx, s.shots = map[int64]int32{}, map[string]int32{}, map[int64][]int32{}
+	rows, err := db.QueryContext(ctx, `SELECT id, vec, person, key, frame, score, px, blur FROM ix_faces WHERE model=? ORDER BY id`, model)
 	if err != nil {
 		return err
 	}
@@ -114,10 +135,11 @@ func (s *ixFaceStore) load(ctx context.Context, db *sql.DB, model string) error 
 	for rows.Next() {
 		var id, person int64
 		var blob []byte
-		if rows.Scan(&id, &blob, &person) != nil {
+		var fi ixFaceInfo
+		if rows.Scan(&id, &blob, &person, &fi.key, &fi.frame, &fi.score, &fi.px, &fi.blur) != nil {
 			continue
 		}
-		s.addLocked(id, ixBytesToInt8(blob), person)
+		s.addLocked(id, ixBytesToInt8(blob), person, fi)
 	}
 	s.loaded = true
 	return rows.Err()
@@ -131,28 +153,86 @@ func ixBytesToInt8(b []byte) []int8 {
 	return v
 }
 
-func (s *ixFaceStore) addLocked(id int64, v []int8, person int64) {
+func (s *ixFaceStore) addLocked(id int64, v []int8, person int64, fi ixFaceInfo) {
 	if s.dim == 0 {
 		s.dim = len(v)
 	}
 	if len(v) != s.dim {
 		return
 	}
+	if s.index == nil {
+		s.index, s.keyIdx, s.shots = map[int64]int32{}, map[string]int32{}, map[int64][]int32{}
+	}
 	var n float64
 	for _, x := range v {
 		n += float64(x) * float64(x)
 	}
-	s.index[id] = int32(len(s.ids))
+	k, ok := s.keyIdx[fi.key]
+	if !ok {
+		k = int32(len(s.keys))
+		s.keys = append(s.keys, fi.key)
+		s.keyIdx[fi.key] = k
+	}
+	i := int32(len(s.ids))
+	s.index[id] = i
 	s.ids = append(s.ids, id)
 	s.vecs = append(s.vecs, v...)
 	s.norms = append(s.norms, float32(math.Sqrt(n)))
 	s.person = append(s.person, person)
+	s.key = append(s.key, k)
+	s.frame = append(s.frame, int16(fi.frame))
+	s.tier = append(s.tier, ixFaceTierOf(fi.score, fi.px, fi.blur))
+	s.qual = append(s.qual, ixFaceQuality(fi.score, fi.px, fi.blur))
+	sh := ixFaceShot(k, int16(fi.frame))
+	s.shots[sh] = append(s.shots[sh], i)
+}
+
+// ixFaceShot names one picture, or one frame of a video.
+func ixFaceShot(key int32, frame int16) int64 { return int64(key)<<16 | int64(uint16(frame)) }
+
+func (s *ixFaceStore) shotLocked(i int32) int64 { return ixFaceShot(s.key[i], s.frame[i]) }
+
+// inShotLocked says whether person has a face (other than skip) in the
+// picture or frame: two faces seen together are never the same person.
+func (s *ixFaceStore) inShotLocked(person, shot, skip int64) bool {
+	for _, i := range s.shots[shot] {
+		if s.person[i] == person && s.ids[i] != skip {
+			return true
+		}
+	}
+	return false
+}
+
+// vecOf gives a copy of a face's embedding and its kind.
+func (s *ixFaceStore) vecOf(id int64) ([]int8, int8, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	i, ok := s.index[id]
+	if !ok || s.norms[i] == 0 {
+		return nil, 0, false
+	}
+	return append([]int8(nil), s.vecs[int(i)*s.dim:int(i+1)*s.dim]...), s.tier[i], true
+}
+
+// dropLocked forgets a face deleted from the table.
+func (s *ixFaceStore) dropLocked(id int64) {
+	if i, ok := s.index[id]; ok {
+		s.norms[i], s.person[i], s.tier[i] = 0, 0, ixFaceJunk
+	}
+}
+
+// setInfoLocked updates what a face was measured as.
+func (s *ixFaceStore) setInfoLocked(id int64, score, px, blur float64) {
+	if i, ok := s.index[id]; ok {
+		s.tier[i], s.qual[i] = ixFaceTierOf(score, px, blur), ixFaceQuality(score, px, blur)
+	}
 }
 
 type ixFaceNear struct {
 	id     int64
 	person int64
 	sim    float32
+	idx    int32
 }
 
 // near lists the faces at least min alike to v.
@@ -173,7 +253,7 @@ func (s *ixFaceStore) nearLocked(v []int8, min float32, skip int64) []ixFaceNear
 		}
 		c := float32(ixDot8(v, s.vecs[i*d:(i+1)*d])) / (qn * s.norms[i])
 		if c >= min {
-			out = append(out, ixFaceNear{id, s.person[i], c})
+			out = append(out, ixFaceNear{id, s.person[i], c, int32(i)})
 		}
 	}
 	sort.Slice(out, func(a, b int) bool { return out[a].sim > out[b].sim })
@@ -211,6 +291,7 @@ func ixCosF(a, b []float32) float32 {
 
 func (a *App) ixFaceTask(ctx context.Context, c *ixMLClient) *ixMLTask {
 	a.ixMLDoneSet(ctx, "faces", ixFaceModel, `SELECT key FROM ix_face_done WHERE model=?`)
+	a.ixFaceRegroupKick(ctx) // faces stored under older rules are grouped again
 	return &ixMLTask{
 		name: "faces", model: ixFaceModel, errTable: "ix_ml_err", par: 3,
 		wanted: func(it *ixMItem) bool { return it.Type == "photo" || it.Type == "video" },
@@ -220,8 +301,11 @@ func (a *App) ixFaceTask(ctx context.Context, c *ixMLClient) *ixMLTask {
 			_, err := c.faces(ctx, ixMLTestPicture())
 			return err
 		},
-		note:   a.ixMLTaskNoter("faces"),
-		finish: func(ctx context.Context) { a.ixRegroupFaces(ctx, 300) },
+		note: a.ixMLTaskNoter("faces"),
+		finish: func(ctx context.Context) {
+			a.ixRegroupFaces(ctx, 300)
+			a.ixFacePeopleSoon(ctx)
+		},
 	}
 }
 
@@ -270,28 +354,40 @@ func (a *App) ixFaceItem(ctx context.Context, c *ixMLClient, it *ixMItem) error 
 		return a.ixMLReadErr(ctx, err)
 	}
 	// Faces of all frames; one person seen in several frames is kept once,
-	// by its clearest face.
+	// by their best face. Two faces in one frame are always kept as two.
 	type kept struct {
-		f   ixFaceFound
-		pic []byte
+		f     ixFaceFound
+		img   image.Image
+		frame int
+		blur  float64
+		q     float32
 	}
 	var found []kept
-	for _, pic := range pics {
+	for fi, pic := range pics {
 		fs, err := c.faces(ctx, pic)
 		if err != nil {
 			return ixMLFileErrOf(ctx, err)
 		}
+		if len(fs) == 0 {
+			continue
+		}
+		img, _, _ := image.Decode(bytes.NewReader(pic))
 	next:
 		for _, f := range fs {
+			blur := float64(ixFaceBlurUnknown)
+			if img != nil {
+				blur = ixFaceSharpness(img, ixFaceRect(img.Bounds(), f))
+			}
+			k := kept{f, img, fi, blur, ixFaceQuality(f.Score, f.Px, blur)}
 			for i := range found {
-				if ixCosF(found[i].f.Vec, f.Vec) >= ixFaceSameSim {
-					if f.Score > found[i].f.Score {
-						found[i] = kept{f, pic}
+				if found[i].frame != fi && ixCosF(found[i].f.Vec, f.Vec) >= ixFaceSameSim {
+					if k.q > found[i].q {
+						found[i] = k
 					}
 					continue next
 				}
 			}
-			found = append(found, kept{f, pic})
+			found = append(found, k)
 		}
 	}
 	box := a.ixMLBox()
@@ -305,6 +401,16 @@ func (a *App) ixFaceItem(ctx context.Context, c *ixMLClient, it *ixMItem) error 
 		return err
 	}
 	defer tx.Rollback()
+	var gone []int64
+	if rows, err := tx.QueryContext(ctx, `SELECT id FROM ix_faces WHERE key=? AND model=? AND manual=0 AND person=0`, it.Key, ixFaceModel); err == nil {
+		for rows.Next() {
+			var id int64
+			if rows.Scan(&id) == nil {
+				gone = append(gone, id)
+			}
+		}
+		rows.Close()
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM ix_faces WHERE key=? AND model=? AND manual=0 AND person=0`, it.Key, ixFaceModel); err != nil {
 		return err
 	}
@@ -317,8 +423,8 @@ func (a *App) ixFaceItem(ctx context.Context, c *ixMLClient, it *ixMItem) error 
 		for j, x := range q {
 			blob[j] = byte(x)
 		}
-		res, err := tx.ExecContext(ctx, `INSERT INTO ix_faces(key,model,x1,y1,x2,y2,score,vec,person,at) VALUES(?,?,?,?,?,?,?,?,0,?)`,
-			it.Key, ixFaceModel, f.X1, f.Y1, f.X2, f.Y2, f.Score, blob, ixNowMs())
+		res, err := tx.ExecContext(ctx, `INSERT INTO ix_faces(key,model,x1,y1,x2,y2,score,vec,person,at,frame,px,blur) VALUES(?,?,?,?,?,?,?,?,0,?,?,?,?)`,
+			it.Key, ixFaceModel, f.X1, f.Y1, f.X2, f.Y2, f.Score, blob, ixNowMs(), k.frame, f.Px, k.blur)
 		if err != nil {
 			return err
 		}
@@ -332,21 +438,23 @@ func (a *App) ixFaceItem(ctx context.Context, c *ixMLClient, it *ixMItem) error 
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	decoded := map[*byte]image.Image{}
+	box.faces.mu.Lock()
+	for _, id := range gone {
+		box.faces.dropLocked(id)
+	}
 	for i, k := range found {
-		box.faces.mu.Lock()
-		box.faces.addLocked(ids[i], qs[i], 0)
-		box.faces.mu.Unlock()
-		jpegClock := ixMLClock(ctx, ixStJPEG)
-		img, seen := decoded[&k.pic[0]]
-		if !seen {
-			img, _, _ = image.Decode(bytes.NewReader(k.pic))
-			decoded[&k.pic[0]] = img
+		box.faces.addLocked(ids[i], qs[i], 0, ixFaceInfo{key: it.Key, frame: k.frame, score: k.f.Score, px: k.f.Px, blur: k.blur})
+	}
+	box.faces.mu.Unlock()
+	jpegClock := ixMLClock(ctx, ixStJPEG)
+	for i, k := range found {
+		if k.img != nil {
+			a.ixWriteFaceCrop(ids[i], k.img, k.f)
 		}
-		if img != nil {
-			a.ixWriteFaceCrop(ids[i], img, k.f)
-		}
-		jpegClock()
+	}
+	jpegClock()
+	// Grouped once all the file's faces are known.
+	for i := range found {
 		if err := a.ixGroupFace(ctx, ids[i], qs[i]); err != nil {
 			return err
 		}
@@ -356,39 +464,98 @@ func (a *App) ixFaceItem(ctx context.Context, c *ixMLClient, it *ixMItem) error 
 	return nil
 }
 
-// ixGroupFace puts a new face with a person: the person of its closest
-// grouped look-alike, or a new person when enough ungrouped faces look
-// alike.
+// ixGroupFace puts a face with a person: the person of its closest grouped
+// look-alike, or a new person when enough faces look alike.
 func (a *App) ixGroupFace(ctx context.Context, id int64, v []int8) error {
 	box := a.ixMLBox()
 	// Grouping and a person's changes (merge, taking a face out) take turns,
 	// so a face never joins a person merged away a moment before.
 	box.faces.group.Lock()
 	defer box.faces.group.Unlock()
-	box.faces.mu.Lock()
-	near := box.faces.nearLocked(v, ixFaceSameSim, id)
-	box.faces.mu.Unlock()
-	for _, n := range near {
-		if n.person > 0 {
-			return a.ixSetFacePerson(ctx, []int64{id}, n.person)
-		}
-	}
-	var loose []int64
-	for _, n := range near {
-		if n.person == 0 {
-			loose = append(loose, n.id)
-		}
-	}
-	if len(loose)+1 < ixFaceMinFaces {
+	return a.ixGroupFaceLocked(ctx, id, v, a.ixFaceUnitOf(), nil)
+}
+
+// ixGroupFaceLocked does ixGroupFace with the grouping lock held. The rules:
+//   - unusable faces are never grouped;
+//   - a face joins the person of its closest grouped look-alike, at the
+//     likeness the pair needs (stricter when either face is weak);
+//   - otherwise a good face starts a new person when good look-alikes not
+//     yet grouped are seen in at least ixFaceMinFaces different files
+//     (copies of one file, and frames of one video, count once). It takes
+//     those faces with it, and the weak ones that are clearly alike.
+//
+// reuse, when set, may give an existing empty person for the new one (and
+// the faces that may go to them).
+func (a *App) ixGroupFaceLocked(ctx context.Context, id int64, v []int8, unit func(string) string, reuse func([]int64) (int64, []int64)) error {
+	box := a.ixMLBox()
+	s := &box.faces
+	rejected := a.ixFaceRejects(ctx, id) // people a person took this face out of
+	s.mu.RLock()
+	me, ok := s.index[id]
+	if !ok || s.person[me] != 0 || s.tier[me] == ixFaceJunk {
+		s.mu.RUnlock()
 		return nil
 	}
-	now := ixNowMs()
-	res, err := a.db.Writer.ExecContext(ctx, `INSERT INTO ix_people(name,created_at,updated_at) VALUES('',?,?)`, now, now)
-	if err != nil {
-		return err
+	tier := s.tier[me]
+	myShot := s.shotLocked(me)
+	type cand struct {
+		ixFaceNear
+		tier int8
+		unit string
 	}
-	person, _ := res.LastInsertId()
-	return a.ixSetFacePerson(ctx, append(loose, id), person)
+	var grouped, loose []cand
+	shots := map[int64]bool{myShot: true} // cannot-link: one face per picture or frame
+	for _, n := range s.nearLocked(v, ixFaceSameSim, id) {
+		t := s.tier[n.idx]
+		if t == ixFaceJunk || n.sim < ixFacePairSim(tier, t) {
+			continue
+		}
+		c := cand{n, t, ""}
+		switch {
+		case n.person > 0:
+			if !rejected[n.person] && !s.inShotLocked(n.person, myShot, id) {
+				grouped = append(grouped, c)
+			}
+		case n.person == 0:
+			if sh := s.shotLocked(n.idx); !shots[sh] {
+				shots[sh] = true
+				c.unit = unit(s.keys[s.key[n.idx]])
+				loose = append(loose, c)
+			}
+		}
+	}
+	myUnit := unit(s.keys[s.key[me]])
+	s.mu.RUnlock()
+	if len(grouped) > 0 {
+		return a.ixSetFacePerson(ctx, []int64{id}, grouped[0].person)
+	}
+	if tier != ixFaceGood {
+		return nil // weak faces only join
+	}
+	units := map[string]bool{myUnit: true}
+	take := []int64{id}
+	for _, n := range loose {
+		if n.tier == ixFaceGood {
+			units[n.unit] = true
+		}
+		take = append(take, n.id)
+	}
+	if len(units) < ixFaceMinFaces {
+		return nil
+	}
+	var person int64
+	if reuse != nil {
+		person, take = reuse(take)
+	}
+	if person == 0 {
+		now := ixNowMs()
+		res, err := a.db.Writer.ExecContext(ctx, `INSERT INTO ix_people(name,created_at,updated_at) VALUES('',?,?)`, now, now)
+		if err != nil {
+			return err
+		}
+		person, _ = res.LastInsertId()
+	}
+	return a.ixSetFacePerson(ctx, take, person)
 }
 
 // ixRegroupFaces gives ungrouped faces another chance: a person may have
@@ -438,13 +605,7 @@ func (a *App) ixRegroupFaces(ctx context.Context, n int) {
 func (a *App) ixSetFacePerson(ctx context.Context, ids []int64, person int64) error {
 	box := a.ixMLBox()
 	// A person merged into another is that other person now.
-	for i := 0; i < 20; i++ {
-		var into int64
-		if a.db.Reader.QueryRowContext(ctx, `SELECT merged_into FROM ix_people WHERE id=?`, person).Scan(&into) != nil || into == 0 {
-			break
-		}
-		person = into
-	}
+	person = a.ixPersonResolve(ctx, person)
 	for _, id := range ids {
 		if _, err := a.db.Writer.ExecContext(ctx, `UPDATE ix_faces SET person=? WHERE id=? AND manual=0`, person, id); err != nil {
 			return err
@@ -491,31 +652,109 @@ type ixPerson struct {
 	Hidden bool   `json:"hidden,omitempty"`
 	Faces  int    `json:"faces"`
 	Files  int    `json:"files"`
-	Cover  int64  `json:"cover"` // the clearest face
+	Cover  int64  `json:"cover"` // the face chosen for the picture, else the clearest near the middle
 }
 
+// ixPeople lists the people with faces: named first, then by files.
 func (a *App) ixPeople(ctx context.Context) ([]ixPerson, error) {
-	rows, err := a.db.Reader.QueryContext(ctx, `SELECT p.id, p.name, p.hidden, COUNT(f.id), COUNT(DISTINCT f.key),
-			(SELECT f2.id FROM ix_faces f2 WHERE f2.person=p.id ORDER BY f2.score DESC, f2.id LIMIT 1)
-		FROM ix_people p JOIN ix_faces f ON f.person=p.id WHERE p.merged_into=0 GROUP BY p.id ORDER BY (p.name='') , COUNT(DISTINCT f.key) DESC, p.id`)
+	type acc struct {
+		p                  ixPerson
+		cover, auto        int64
+		haveCover, haveAut bool
+		best               int64
+		bestQ              float32
+		keys               map[string]bool
+	}
+	people := map[int64]*acc{}
+	rows, err := a.db.Reader.QueryContext(ctx, `SELECT id, name, hidden, cover, auto_cover FROM ix_people WHERE merged_into=0`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		r := &acc{keys: map[string]bool{}, bestQ: -1}
+		if rows.Scan(&r.p.ID, &r.p.Name, &r.p.Hidden, &r.cover, &r.auto) == nil {
+			people[r.p.ID] = r
+		}
+	}
+	rows.Close()
+	rows, err = a.db.Reader.QueryContext(ctx, `SELECT id, person, key, score, px, blur FROM ix_faces WHERE person>0 ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := []ixPerson{}
 	for rows.Next() {
-		var p ixPerson
-		var cover sql.NullInt64
-		if rows.Scan(&p.ID, &p.Name, &p.Hidden, &p.Faces, &p.Files, &cover) == nil {
-			p.Cover = cover.Int64
-			out = append(out, p)
+		var id, person int64
+		var key string
+		var score, px, blur float64
+		if rows.Scan(&id, &person, &key, &score, &px, &blur) != nil {
+			continue
+		}
+		r := people[person]
+		if r == nil {
+			continue
+		}
+		r.p.Faces++
+		r.keys[key] = true
+		r.haveCover = r.haveCover || id == r.cover
+		r.haveAut = r.haveAut || id == r.auto
+		if q := ixFaceQuality(score, px, blur); q > r.bestQ {
+			r.best, r.bestQ = id, q
 		}
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Files are counted once per cluster: faces stay stored under a copy
+	// that was the best copy before (a merge, a keeper, a better download),
+	// and that copy is the same file.
+	unit := a.ixFaceUnitOf()
+	out := []ixPerson{}
+	for _, r := range people {
+		if r.p.Faces == 0 {
+			continue
+		}
+		units := map[string]bool{}
+		for k := range r.keys {
+			units[unit(k)] = true
+		}
+		r.p.Files = len(units)
+		switch {
+		case r.haveCover:
+			r.p.Cover = r.cover
+		case r.haveAut:
+			r.p.Cover = r.auto
+		default:
+			r.p.Cover = r.best
+		}
+		out = append(out, r.p)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		x, y := out[i], out[j]
+		if (x.Name == "") != (y.Name == "") {
+			return x.Name != ""
+		}
+		if x.Files != y.Files {
+			return x.Files > y.Files
+		}
+		return x.ID < y.ID
+	})
+	return out, nil
 }
 
-// ixPersonChange: rename, hide, show, merge (into another person), or take
-// a face out (it is never put with anyone again by itself).
+// ixPersonCover is the face shown for one person (see ixPerson.Cover).
+func (a *App) ixPersonCover(ctx context.Context, id int64) int64 {
+	var face int64
+	_ = a.db.Reader.QueryRowContext(ctx, `SELECT f.id FROM ix_people p JOIN ix_faces f ON f.person=p.id AND f.id IN (p.cover, p.auto_cover)
+		WHERE p.id=? ORDER BY f.id=p.cover DESC LIMIT 1`, id).Scan(&face)
+	if face == 0 {
+		_ = a.db.Reader.QueryRowContext(ctx, `SELECT id FROM ix_faces WHERE person=? ORDER BY score DESC, id LIMIT 1`, id).Scan(&face)
+	}
+	return face
+}
+
+// ixPersonChange: rename, hide, show, merge (into another person), say two
+// people are not the same, choose the face shown, or take a face out (it
+// is never put with this person again).
 func (a *App) ixPersonChange(ctx context.Context, id int64, action, name string, other, face int64) error {
 	box := a.ixMLBox()
 	box.faces.group.Lock()
@@ -542,33 +781,37 @@ func (a *App) ixPersonChange(ctx context.Context, id int64, action, name string,
 		if err := a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM ix_people WHERE id=? AND merged_into=0`, other).Scan(&exists); err != nil || exists == 0 {
 			return errors.New("no such person to merge into")
 		}
-		tx, terr := a.db.Writer.BeginTx(ctx, nil)
-		if terr != nil {
-			return terr
+		err = a.ixMergePeopleLocked(ctx, id, other)
+	case "not-same":
+		// "Same person?" answered no: never suggested (or merged by
+		// itself) again, also after either is merged with someone else.
+		if other == id || other <= 0 {
+			return errors.New("choose another person")
 		}
-		if _, err = tx.ExecContext(ctx, `UPDATE ix_faces SET person=? WHERE person=?`, other, id); err == nil {
-			_, err = tx.ExecContext(ctx, `UPDATE ix_people SET merged_into=?, updated_at=? WHERE id=?`, other, now, id)
+		lo, hi := min(id, other), max(id, other)
+		_, err = a.db.Writer.ExecContext(ctx, `INSERT INTO ix_person_pair(a,b,state,at) VALUES(?,?,'no',?)
+			ON CONFLICT(a,b) DO UPDATE SET state='no', at=excluded.at`, lo, hi, now)
+	case "cover":
+		// The face shown for the person; 0 goes back to the clearest one.
+		if face != 0 {
+			var n int
+			if err := a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM ix_faces WHERE id=? AND person=?`, face, id).Scan(&n); err != nil || n == 0 {
+				return errors.New("that face is not this person's")
+			}
 		}
-		if err == nil {
-			// A merged person keeps the name it had when the other has none.
-			_, err = tx.ExecContext(ctx, `UPDATE ix_people SET name=(SELECT name FROM ix_people WHERE id=?), updated_at=? WHERE id=? AND name=''`, id, now, other)
-		}
-		if err != nil {
-			tx.Rollback()
-			return err
-		}
-		if err = tx.Commit(); err == nil {
-			box.faces.repoint(id, other)
-		}
+		_, err = a.db.Writer.ExecContext(ctx, `UPDATE ix_people SET cover=?, updated_at=? WHERE id=?`, face, now, id)
 	case "remove-face":
+		// As in Ente: the face is never put with this person again (nor with
+		// anyone this person is merged with), but may go to someone else.
 		var res sql.Result
-		res, err = a.db.Writer.ExecContext(ctx, `UPDATE ix_faces SET person=-1, manual=1 WHERE id=? AND person=?`, face, id)
+		res, err = a.db.Writer.ExecContext(ctx, `UPDATE ix_faces SET person=0 WHERE id=? AND person=?`, face, id)
 		if err == nil {
 			if n, _ := res.RowsAffected(); n == 0 {
 				return errors.New("that face is not this person's")
 			}
+			_, err = a.db.Writer.ExecContext(ctx, `INSERT OR IGNORE INTO ix_face_reject(face,person,at) VALUES(?,?,?)`, face, id, now)
 			box.faces.mu.Lock()
-			box.faces.setPersonLocked(face, -1)
+			box.faces.setPersonLocked(face, 0)
 			box.faces.mu.Unlock()
 		}
 	default:
@@ -627,6 +870,15 @@ func (a *App) ixLoadPeople(ctx context.Context, m *ixModel) {
 			m.PersonKeys[id] = map[string]bool{}
 		}
 		m.PersonKeys[id][key] = true
+		// Faces found on a copy that is no longer the best one still count
+		// for the file's best copy (the browser looks people up by it).
+		if ii, ok := m.ByKey[key]; ok && int(ii) < len(m.Items) {
+			if c := m.Items[ii].Cluster; c >= 0 && int(c) < len(m.Clusters) {
+				if ci := m.Clusters[c].Canon; ci >= 0 && int(ci) < len(m.Items) && m.Items[ci].Key != "" {
+					m.PersonKeys[id][m.Items[ci].Key] = true
+				}
+			}
+		}
 		m.PersonName[id] = name
 	}
 }
@@ -639,9 +891,13 @@ func (a *App) handleIxPeople(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	var loose int
-	_ = a.db.Reader.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM ix_faces WHERE person=0`).Scan(&loose)
-	writeJSON(w, http.StatusOK, map[string]any{"people": list, "ungrouped": loose, "status": a.ixMLStatusNow(r.Context()).Tasks["faces"]})
+	// Faces too small or blurred to group are counted on their own.
+	var loose, unusable int
+	_ = a.db.Reader.QueryRowContext(r.Context(), `SELECT COALESCE(SUM(NOT `+ixFaceJunkSQL+`),0), COALESCE(SUM(`+ixFaceJunkSQL+`),0) FROM ix_faces WHERE person=0`).Scan(&loose, &unusable)
+	a.ixFaceRegroupKick(r.Context()) // also when the recognition service is away
+	writeJSON(w, http.StatusOK, map[string]any{"people": list, "ungrouped": loose, "unusable": unusable,
+		"suggest": a.ixPeopleSuggestions(r.Context(), list, 12), "regroup": a.ixFaceRegroupStatus(r.Context()),
+		"status": a.ixMLStatusNow(r.Context()).Tasks["faces"]})
 }
 
 func (a *App) handleIxPerson(w http.ResponseWriter, r *http.Request) {
@@ -699,6 +955,7 @@ func (a *App) handleIxPerson(w http.ResponseWriter, r *http.Request) {
 	}
 	p.Files = len(hits)
 	p.Faces = len(faces)
+	p.Cover = a.ixPersonCover(ctx, id)
 	writeJSON(w, http.StatusOK, map[string]any{"person": p, "faces": faces, "cards": cards})
 }
 
@@ -714,6 +971,14 @@ func (a *App) handleIxPersonChange(w http.ResponseWriter, r *http.Request) {
 			return n
 		}
 		return 0
+	}
+	if toString(b["action"]) == "regroup" { // all faces, not one person
+		if err := a.ixFaceRegroupAsk(r.Context()); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		return
 	}
 	if err := a.ixPersonChange(r.Context(), id, toString(b["action"]), toString(b["name"]), num("into"), num("face")); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
