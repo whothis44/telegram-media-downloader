@@ -120,6 +120,8 @@ type ixJCard struct {
 	Deleted   bool           `json:"deleted,omitempty"`
 	Families  int            `json:"families,omitempty"` // a media set's families
 	Roles     map[string]int `json:"roles,omitempty"`
+	Why       []string       `json:"why,omitempty"`  // a search: where it matched (caption, text, speech, name, looks)
+	Weak      bool           `json:"weak,omitempty"` // a search: only a weak likeness, shown as nothing closer stands out
 }
 
 func ixPathURL(rel string) string {

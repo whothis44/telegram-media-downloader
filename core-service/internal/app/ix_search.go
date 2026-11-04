@@ -2,7 +2,10 @@ package app
 
 import (
 	"context"
+	"errors"
 	"sort"
+	"strings"
+	"sync"
 )
 
 // Search in the browser: one box for words (captions, text in pictures,
@@ -81,6 +84,122 @@ func (s *ixEmbStore) scan(q []float32, k float64, n int, keep func(string) bool,
 		out.hits = out.hits[:n]
 	}
 	return out
+}
+
+// ---------- what pictures show, for a description ----------
+
+const (
+	ixCutK       = 3   // a picture matches a description this many deviations above the rest (Things use 4)
+	ixWeakFloor  = 12  // shown even when fewer stand out, as weak matches
+	ixLooksDepth = 200 // pictures taken into the ranking
+)
+
+// ixQueryVecs caches the embeddings of typed descriptions (model|text).
+type ixQueryVecs struct {
+	mu   sync.Mutex
+	vecs map[string][]float32
+}
+
+var ixQueryState sync.Map // *App -> *ixQueryVecs
+
+func (a *App) ixQueryBox() *ixQueryVecs {
+	v, _ := ixQueryState.LoadOrStore(a, &ixQueryVecs{vecs: map[string][]float32{}})
+	return v.(*ixQueryVecs)
+}
+
+// ixQueryVector embeds a description. A short one (five words or fewer)
+// is also embedded as "a photo of ...", and the two are averaged: short
+// queries match better that way.
+func (a *App) ixQueryVector(ctx context.Context, c *ixMLClient, text string) ([]float32, error) {
+	text = strings.Join(strings.Fields(text), " ")
+	key := c.model + "|" + text
+	box := a.ixQueryBox()
+	box.mu.Lock()
+	v := box.vecs[key]
+	box.mu.Unlock()
+	if v != nil {
+		return v, nil
+	}
+	v, err := c.embed(ctx, nil, text)
+	if err != nil {
+		return nil, err
+	}
+	if len(strings.Fields(text)) <= 5 {
+		w, err := c.embed(ctx, nil, "a photo of "+text)
+		if err != nil {
+			return nil, err
+		}
+		if len(w) == len(v) {
+			sum := make([]float32, len(v))
+			for i := range v {
+				sum[i] = v[i] + w[i]
+			}
+			if ixNormalise(sum) {
+				v = sum
+			}
+		}
+	}
+	box.mu.Lock()
+	if len(box.vecs) >= 500 {
+		box.vecs = map[string][]float32{} // a small cache: start again
+	}
+	box.vecs[key] = v
+	box.mu.Unlock()
+	return v, nil
+}
+
+// ixLooks: the pictures closest to a description, best first. The first
+// strong of them stand out from the archive (see outliers); the rest, when
+// fewer than ixWeakFloor stand out, are the closest anyway, as weak matches.
+type ixLooks struct {
+	hits   []ixEmbHit
+	strong int
+	cutoff float32
+}
+
+func (a *App) ixLooksFor(ctx context.Context, m *ixModel, text string, n int, keep func(string) bool) (ixLooks, error) {
+	c := a.ixMLClientNow(ctx)
+	if c == nil {
+		return ixLooks{}, errors.New("image recognition is off (Archive → Settings)")
+	}
+	box := a.ixMLBox()
+	if err := box.store.load(ctx, a.db.Reader, c.model); err != nil {
+		return ixLooks{}, err
+	}
+	q, err := a.ixQueryVector(ctx, c, text)
+	if err != nil {
+		return ixLooks{}, err
+	}
+	want := max(n, ixWeakFloor)
+	ask := want + want/4 + 8
+	var sc ixEmbScan
+	var hits []ixEmbHit
+	for {
+		sc = box.store.scan(q, ixCutK, ask, keep, true)
+		hits = ixUniqueHits(m, sc.hits, want)
+		if len(hits) >= want || len(sc.hits) < ask {
+			break
+		}
+		ask *= 2
+	}
+	out := ixLooks{cutoff: sc.thr}
+	shown := 0
+	for _, h := range hits {
+		if h.Sim < sc.thr {
+			break
+		}
+		shown++
+	}
+	// All that stand out, not only those shown.
+	var above []string
+	for _, k := range sc.above {
+		if keep == nil || keep(k) {
+			above = append(above, k)
+		}
+	}
+	out.strong = max(shown, ixDistinctFiles(m, above))
+	out.hits = hits[:max(min(shown, n), min(len(hits), ixWeakFloor))]
+	return out, nil
 }
 
 // ---------- one hit per duplicate set ----------

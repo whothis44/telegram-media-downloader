@@ -169,16 +169,26 @@ func (a *App) handleIxSimilar(w http.ResponseWriter, r *http.Request) {
 	}
 	keep := ixMLFilter(m, q.Get("group"), q.Get("category"), typ)
 	var hits []ixEmbHit
-	if thing != "" {
+	cutoff := float32(-2)
+	strong := -1
+	switch {
+	case thing != "":
 		hits, err = a.ixThingHits(ctx, thing, limit, keep)
-	} else {
+	case like != "":
 		hits, err = a.ixMLSearch(ctx, m, text, like, limit, keep)
+	default:
+		// A description: only pictures that stand out, or the closest few
+		// as weak matches when none do.
+		var lk ixLooks
+		lk, err = a.ixLooksFor(ctx, m, text, limit, keep)
+		hits, cutoff, strong = lk.hits, lk.cutoff, lk.strong
 	}
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	cards := []ixJCard{}
+	weak := 0
 	for _, h := range hits {
 		ii, ok := m.ByKey[h.Key]
 		if !ok {
@@ -186,9 +196,17 @@ func (a *App) handleIxSimilar(w http.ResponseWriter, r *http.Request) {
 		}
 		c := m.mediaCard(ii)
 		c.Items[0].Sim = h.Sim
+		if h.Sim < cutoff {
+			c.Weak = true
+			weak++
+		}
 		cards = append(cards, c)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"cards": cards, "total": len(cards), "next": 0, "built": m.Built.UnixMilli()})
+	total := len(cards)
+	if strong >= 0 {
+		total = strong
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"cards": cards, "total": total, "weak": weak, "cutoff": cutoff, "next": 0, "built": m.Built.UnixMilli()})
 }
 
 func (a *App) handleIxMLCheck(w http.ResponseWriter, r *http.Request) {

@@ -43,6 +43,7 @@ button.b:disabled{opacity:.5;cursor:default}button.link{border:0;background:none
 .badge{font-size:11.5px;font-weight:600;padding:1px 7px;border-radius:999px;border:1px solid var(--line);white-space:nowrap;color:var(--muted);background:var(--bg)}
 .badge.rep{color:var(--accent);border-color:var(--accent);cursor:pointer}.badge.merged{color:var(--new);border-color:var(--new)}.badge.del{color:var(--bad);border-color:var(--bad)}
 .badge.set{color:var(--new);border-color:var(--new);cursor:pointer}.badge.held{color:var(--warn);border-color:var(--warn)}
+.badge.why{color:var(--ok);border-color:var(--ok)}.badge.weak{color:var(--muted);border-style:dashed}
 .tile .lab.sim{left:auto;right:5px;bottom:auto;top:5px}.tile.fixed{outline:2px solid var(--accent);outline-offset:-2px}.fixmode .tile{cursor:crosshair}
 .setsec{margin:12px 0 4px;font-size:14px}#sd-files .mosaic{grid-template-columns:repeat(auto-fill,minmax(104px,1fr));background:none}.setsec .muted{font-weight:400}.badge.miss{color:var(--bad);border-color:var(--bad)}
 .mosaic{display:grid;gap:2px;background:var(--line)}
@@ -267,10 +268,20 @@ function mosaicHTML(items, cardKey) {
   const cls = n === 1 ? 'n1' : n === 2 ? 'n2' : n === 3 ? 'n3' : n === 4 ? 'n4' : 'nmany';
   return `<div class="mosaic ${cls}">${items.map((it, i) => tileHTML(it, i, cardKey)).join('')}</div>`;
 }
+// Where a search matched: small badges on its card.
+const whyText = { caption: 'caption', text: 'text in picture', speech: 'speech', name: 'file name', looks: 'looks like it' };
+function whyBadges(c) {
+  const out = (c.why || []).map((w) => `<span class="badge why" title="Matched in its ${esc(whyText[w] || w)}">${esc(whyText[w] || w)}</span>`);
+  if (c.weak) out.push('<span class="badge weak" title="Nothing closer stands out: only a faint likeness">weak match</span>');
+  return out;
+}
 function cardHTML(c, key) {
   if (c.kind === 'media') {
     const it = c.items[0];
-    return `<div class="card" data-key="${key}">${mosaicHTML([it], key)}<div class="meta"><div class="where"><b>${esc(c.groupName)}</b><span>${fmtDay(c.date)}</span></div>${c.posts > 1 ? `<div class="badges"><span class="badge rep" data-fam="${c.family}">in ${c.posts} posts</span></div>` : ''}</div></div>`;
+    const mb = [];
+    if (c.posts > 1) mb.push(`<span class="badge rep" data-fam="${c.family}">in ${c.posts} posts</span>`);
+    mb.push(...whyBadges(c));
+    return `<div class="card" data-key="${key}">${mosaicHTML([it], key)}<div class="meta"><div class="where"><b>${esc(c.groupName)}</b><span>${fmtDay(c.date)}</span></div>${mb.length ? `<div class="badges">${mb.join('')}</div>` : ''}</div></div>`;
   }
   const badges = [];
   if (c.kind === 'set') {
@@ -328,7 +339,8 @@ async function loadMore() {
   S.cursor = r.data.next; S.done = !r.data.next;
   const what = { families: 'originals', sets: 'sets', posts: 'posts', media: 'pictures and videos' }[S.view];
   if (S.like || S.thing || (S.ml && S.q)) {
-    $('#feed-note').innerHTML = (S.like ? 'Most like the chosen ' + esc(S.likeName) : S.thing ? 'Pictures showing “' + esc(S.thing) + '”' : 'Closest to “' + esc(S.q) + '”') + ', best first (' + r.data.total + ') · <button class="link" id="like-clear">back to browsing</button>';
+    const strong = S.like || S.thing ? ', best first (' + r.data.total + ')' : r.data.total ? ': ' + r.data.total.toLocaleString() + ' close match' + (r.data.total === 1 ? '' : 'es') + (r.data.weak ? ', then weaker ones' : '') : ': nothing stands out, these are only the closest (weak matches)';
+    $('#feed-note').innerHTML = (S.like ? 'Most like the chosen ' + esc(S.likeName) : S.thing ? 'Pictures showing “' + esc(S.thing) + '”' : 'Closest to “' + esc(S.q) + '”') + strong + ' · <button class="link" id="like-clear">back to browsing</button>';
     $('#like-clear').onclick = () => { S.like = ''; S.thing = ''; S.ml = false; $('#qml').checked = false; resetFeed(); };
   } else if (S.person) {
     $('#feed-note').innerHTML = esc(r.data.total.toLocaleString() + ' ' + what) + ' with <b>' + esc(S.personName || 'this person') + '</b> · <button class="link" id="person-clear">everyone</button>';

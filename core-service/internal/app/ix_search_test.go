@@ -3,9 +3,11 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync"
 	"testing"
 )
 
@@ -227,5 +229,102 @@ func TestIxSetRoutesNeedAnAdmin(t *testing.T) {
 		if rec.Code != http.StatusUnauthorized {
 			t.Fatalf("%s %s without a session: %d", r.Method, r.URL.Path, rec.Code)
 		}
+	}
+}
+
+// ---------- the cut-off ----------
+
+// ix8CountingML is ix8FakeML, counting the requests it answers.
+func ix8CountingML(t *testing.T, calls *int) *httptest.Server {
+	inner := ix8FakeML(t)
+	t.Cleanup(inner.Close)
+	h := inner.Config.Handler
+	var mu sync.Mutex
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/predict" {
+			mu.Lock()
+			*calls++
+			mu.Unlock()
+		}
+		h.ServeHTTP(w, r)
+	}))
+}
+
+// ixLooksScene: the scene, embedded, with recognition on.
+func ixLooksScene(t *testing.T, settings map[string]any) (*App, context.Context, *ixModel, *int) {
+	calls := new(int)
+	srv := ix8CountingML(t, calls)
+	t.Cleanup(srv.Close)
+	if settings == nil {
+		settings = map[string]any{}
+	}
+	settings["mlUrl"] = srv.URL
+	a, ctx := ix8App(t, settings)
+	m := ixSetScene()
+	for i := range m.Items {
+		m.Items[i].Path = "x/" + m.Items[i].Key + ".jpg"
+	}
+	a.ixModelBox().model = m
+	ixTestStore(t, a, ctx, ixSceneKeys(m), nil)
+	return a, ctx, m, calls
+}
+
+func TestIxDescriptionSearchHasACutOff(t *testing.T) {
+	a, ctx, m, calls := ixLooksScene(t, nil)
+	res := ixGetJSON(t, a.handleIxSimilar, "/api/ix/browse/similar", url.Values{"q": {"x9"}, "limit": {"240"}})
+	keys := ixCardKeys(res)
+	if res["total"].(float64) != 13 || len(keys) != 13 || res["weak"].(float64) != 0 {
+		t.Fatalf("x9: total %v weak %v cards %v", res["total"], res["weak"], keys)
+	}
+	for _, k := range keys {
+		if k[0] != 'x' && k[0] != 'y' {
+			t.Fatalf("x9 found %s", k)
+		}
+	}
+	if c := res["cutoff"].(float64); c <= 0 || c >= 1 {
+		t.Fatalf("cutoff %v", c)
+	}
+	// The description is embedded once (as typed and as "a photo of ..."),
+	// then remembered.
+	if *calls != 2 {
+		t.Fatalf("embedding requests: %d", *calls)
+	}
+	ixGetJSON(t, a.handleIxSimilar, "/api/ix/browse/similar", url.Values{"q": {"x9"}})
+	if *calls != 2 {
+		t.Fatalf("embedding requests after the same search: %d", *calls)
+	}
+	if _, err := a.ixQueryVector(ctx, a.ixMLClientNow(ctx), "one two three four five six"); err != nil || *calls != 3 {
+		t.Fatalf("a long description: %d requests, %v", *calls, err)
+	}
+	// Something no picture shows: the closest twelve, all marked weak.
+	found := false
+	for i := 0; i < 200 && !found; i++ {
+		q := fmt.Sprintf("q%d", i)
+		lk, err := a.ixLooksFor(ctx, m, q, 240, ixMLFilter(m, "", "", ""))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if lk.strong != 0 {
+			continue
+		}
+		found = true
+		res := ixGetJSON(t, a.handleIxSimilar, "/api/ix/browse/similar", url.Values{"q": {q}})
+		cards := res["cards"].([]any)
+		if res["total"].(float64) != 0 || len(cards) != ixWeakFloor || res["weak"].(float64) != ixWeakFloor {
+			t.Fatalf("%s: total %v weak %v cards %d", q, res["total"], res["weak"], len(cards))
+		}
+		for _, c := range cards {
+			if c.(map[string]any)["weak"] != true {
+				t.Fatalf("%s: a card not marked weak", q)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no description without a match in the scene")
+	}
+	// Within one chat: only its pictures.
+	res = ixGetJSON(t, a.handleIxSimilar, "/api/ix/browse/similar", url.Values{"q": {"x9"}, "group": {"E"}})
+	if res["total"].(float64) != 7 {
+		t.Fatalf("x9 in E: %v", res["total"])
 	}
 }
