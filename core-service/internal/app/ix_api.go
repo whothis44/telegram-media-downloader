@@ -194,6 +194,8 @@ func (a *App) handleIxStatus(w http.ResponseWriter, r *http.Request) {
 		"pictures":  a.ixMediaStatus(),
 		"backup":    a.ixBackupOverview(ctx),
 		"readonly":  a.ixGoneState(),
+		"lowq":      a.ixLowqStatus(ctx),
+		"staging":   a.ixStagingStatus(ctx),
 	}
 	if exportErr != nil {
 		out["exportDirError"] = exportErr.Error()
@@ -391,6 +393,10 @@ func (a *App) handleIxSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err = a.ixExportDir(s); err != nil && s.ExportDir != "" {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err = a.ixCheckStageDir(s.StageDir); err != nil && s.StageDir != old.StageDir {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}

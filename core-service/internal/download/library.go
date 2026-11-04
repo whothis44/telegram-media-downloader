@@ -38,7 +38,9 @@ type Item struct {
 	// not catalogued again. Reposts and forwards of one photo or clip
 	// otherwise each became an entry pointing at the same file.
 	SkipDuplicates bool
-	generation     int64
+	// NoStage: write straight to the library even when a staging folder is set.
+	NoStage    bool `json:"-"`
+	generation int64
 }
 
 type Record struct {
@@ -50,6 +52,9 @@ type Record struct {
 	// entry was made for this one (Item.SkipDuplicates). ID is the existing
 	// entry.
 	Skipped bool
+	// Staged: the file is complete and verified in the local staging folder
+	// and is copied to the library later; ID is 0 until then (OnStaged).
+	Staged bool
 }
 
 // Library uses the existing downloads table as its durable identity index.
@@ -60,6 +65,13 @@ type Library struct {
 	// item's exact bytes, checked on Telegram without a full download. The
 	// item is then catalogued like a forward of that file.
 	Substitute func(context.Context, Item, Client) (string, bool)
+	// Staging (optional) names a local folder downloads are written to
+	// first, then copied to the library (staging.go). OnStaged is told when
+	// such a file is in the library; StageHold is held while it is added.
+	Staging   func(context.Context) Staging
+	OnStaged  func(context.Context, Item, Record)
+	StageHold func(context.Context) (func(), error)
+	stage     stageState
 
 	writer, reader *sql.DB
 	root           string
@@ -158,6 +170,9 @@ func (l *Library) Ingest(ctx context.Context, item Item, client Client) (Record,
 	if record, found, err := l.reuse(ctx, item, `d.telegram_media_kind=? AND d.telegram_media_id=? AND (d.telegram_media_size=? OR (d.telegram_media_size IS NULL AND d.file_size=?))`, item.Identity.Kind, item.Identity.ID, item.Identity.Size, item.Identity.Size); err != nil || found {
 		return record, err
 	}
+	if record, found, err := l.followStaged(ctx, item); err != nil || found {
+		return record, err
+	}
 	if client == nil {
 		return Record{}, errors.New("Telegram download client is unavailable")
 	}
@@ -167,6 +182,9 @@ func (l *Library) Ingest(ctx context.Context, item Item, client Client) (Record,
 				return record, err
 			}
 		}
+	}
+	if st := l.stagingFor(ctx, item); st.Dir != "" {
+		return l.ingestStaged(ctx, item, client, st)
 	}
 	relative, err := l.destination(item)
 	if err != nil {
@@ -275,6 +293,18 @@ func safeComponent(value string) string {
 }
 
 func (l *Library) destination(item Item) (string, error) {
+	dir, name, err := destinationName(item)
+	if err != nil {
+		return "", err
+	}
+	if err := l.ensureDir(dir); err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, name), nil
+}
+
+// destinationName is a new unique name for the item, without touching disk.
+func destinationName(item Item) (dir, name string, err error) {
 	group := item.GroupName
 	if strings.TrimSpace(group) == "" {
 		group = item.GroupID
@@ -292,14 +322,26 @@ func (l *Library) destination(item Item) (string, error) {
 	case "gif":
 		folder = "gifs"
 	}
-	dir := filepath.Join(safeComponent(group), folder)
+	dir = filepath.Join(safeComponent(group), folder)
+	name = safeComponent(item.Name)
+	extension := filepath.Ext(name)
+	random := make([]byte, 16)
+	if _, err := rand.Read(random); err != nil {
+		return "", "", err
+	}
+	name = strings.TrimSuffix(name, extension) + "_" + strconv.FormatInt(item.MessageID, 10) + "_" + hex.EncodeToString(random) + extension
+	return dir, name, nil
+}
+
+// ensureDir creates dir under the library root and refuses symlinks on it.
+func (l *Library) ensureDir(dir string) error {
 	root, err := os.OpenRoot(l.root)
 	if err != nil {
-		return "", err
+		return err
 	}
 	defer root.Close()
 	if err := root.MkdirAll(dir, 0700); err != nil {
-		return "", err
+		return err
 	}
 	// No user-controlled directory symlink may be used by the transfer path.
 	parts := strings.Split(dir, string(filepath.Separator))
@@ -308,20 +350,13 @@ func (l *Library) destination(item Item) (string, error) {
 		prefix = filepath.Join(prefix, part)
 		info, err := root.Lstat(prefix)
 		if err != nil {
-			return "", err
+			return err
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			return "", errors.New("media destination contains a symlink")
+			return errors.New("media destination contains a symlink")
 		}
 	}
-	name := safeComponent(item.Name)
-	extension := filepath.Ext(name)
-	random := make([]byte, 16)
-	if _, err := rand.Read(random); err != nil {
-		return "", err
-	}
-	name = strings.TrimSuffix(name, extension) + "_" + strconv.FormatInt(item.MessageID, 10) + "_" + hex.EncodeToString(random) + extension
-	return filepath.Join(dir, name), nil
+	return nil
 }
 
 type candidate struct {

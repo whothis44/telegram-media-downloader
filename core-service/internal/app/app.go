@@ -240,6 +240,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		return nil, err
 	}
 	a.library.Substitute = a.ixSubstitute // archive: exact re-uploads are checked, not downloaded
+	a.ixWireStaging()                     // archive: optional local staging folder
 	if err = a.library.Recover(ctx); err != nil {
 		a.Close()
 		return nil, fmt.Errorf("recover media ingestion: %w", err)

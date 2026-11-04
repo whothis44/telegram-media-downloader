@@ -225,8 +225,7 @@ func (a *App) ingestWork(ctx context.Context, work *engine.Work, message *tg.Mes
 			return engine.ErrFiltered
 		}
 	}
-	_, err = a.ingestTelegram(ctx, message, work.GroupID, work.GroupName, work.AccountID, transport)
-	return err
+	return a.ixIngestWork(ctx, work, message, transport)
 }
 func (a *App) monitorEvent(state string, err error) {
 	a.ixNoteEngine(err)

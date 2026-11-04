@@ -381,6 +381,9 @@ func ixEnsureSchema(ctx context.Context, db *sql.DB) error {
 	if err := ixEnsureAlbumSchema(ctx, db); err != nil {
 		return err
 	}
+	if _, err := db.ExecContext(ctx, ixSchemaLowq); err != nil {
+		return err
+	}
 	if err := ixAddColumns(ctx, db, "ix_moves", [][2]string{{"rows", "TEXT NOT NULL DEFAULT ''"}, {"src_stored", "TEXT NOT NULL DEFAULT ''"}}); err != nil {
 		return err
 	}

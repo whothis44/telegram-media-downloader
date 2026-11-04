@@ -232,7 +232,7 @@ ${(() => {
   }
   if ((d.days || []).length) x += `<div class="muted">Downloaded per day: ${d.days.map((y) => `${esc(y.day.slice(5))} <b>${fmtNum(y.files)}</b> files, ${fmtSize(y.bytes)}`).join(' · ')}</div>`;
   return x;
-})()}
+})()}${transferNotes()}
 <div class="muted">A failed file is first retried a few times by the download engine. ${state.status.settings.autoRetry ? `After that, it goes back in the queue every ${Math.round(d.retryAfterMin / 60)} hours, up to ${d.retryRounds} times (Settings).` : 'Automatic retries every few hours are <b>off</b> (Settings).'} A group's files pass also tries its failed files again.</div>`;
   if (d.errors && d.errors.length) {
     h += `<div class="list" style="margin-top:8px"><table><tr><th>Why files failed</th><th>Files</th></tr>${d.errors.map((e) => `<tr><td class="muted">${esc(e.error)}</td><td class="n">${fmtNum(e.count)}</td></tr>`).join('')}</table></div>`;
@@ -262,6 +262,17 @@ function viewCopies() {
   const n = (x) => `<b>${fmtNum((x || {}).files || 0)}</b> (${fmtSize((x || {}).bytes || 0)})`;
   let x = `<div style="margin-top:6px"><b>Copies in the queue:</b> of ${n(q.all)} queued, ${n(q.same)} are the same Telegram file as one saved or queued before (never downloaded twice) and ${n(q.held)} are probable copies held at the back: ${fmtNum((q.vsSaved || {}).files || 0)} of saved videos, ${fmtNum((q.vsQueued || {}).files || 0)} lesser copies of queued ones, ${fmtNum((q.recog || {}).files || 0)} found by image recognition; ${n(q.confirmed)} confirmed by their first frames.</div>`;
   if (k.measured) x += `<div class="muted">Everything seen in messages and not downloaded: ${n(k.missing)}; ${n(k.same)} are the same Telegram file as another, ${n(k.held)} are held, and ${n(k.likely)} more videos look like copies (they will be held when queued).${c.previews ? ` ${fmtNum(c.previews)} Telegram preview(s) kept for files not downloaded.` : ''}</div>`;
+  return x;
+}
+
+// Big videos saved in a lower quality first, and the local staging folder.
+function transferNotes() {
+  const q = state.status.lowq || {}; const g = state.status.staging || {};
+  let x = '';
+  if (q.saved) x += `<div class="muted">${fmtNum(q.saved)} big video(s) saved in a lower quality first (${fmtSize(q.savedBytes)} instead of ${fmtSize(q.origBytes)}); ${fmtNum(q.upgraded)} upgraded to the original${q.extraBytes ? ` (their lower qualities cost ${fmtSize(q.extraBytes)} extra)` : ''}${q.waiting ? `, ${fmtNum(q.waiting)} original(s) still to come after everything else` : ''}.</div>`;
+  if (g.on || g.waiting) {
+    x += `<div class="muted">Local staging folder: ${fmtNum(g.waiting || 0)} file(s), ${fmtSize(g.bytes || 0)}, waiting to be copied to the downloads folder${g.failing ? ` · <span class="warn">${fmtNum(g.failing)} copy attempt(s) failing; they are retried and the local files are kept</span>` : ''}${g.stuck ? ` · <span class="bad">${fmtNum(g.stuck)} need you: their local files are kept (see the diagnostics report)</span>` : ''}.</div>`;
+  }
   return x;
 }
 
@@ -481,6 +492,13 @@ ${state.diag ? `<textarea id="diag" readonly style="width:100%;min-height:260px;
 <div class="muted">Leave the folder empty to use a folder next to your downloads folder. It can't be inside the downloads folder.</div>
 <label><input type="checkbox" data-set="backupEnabled" ${s.backupOff ? '' : 'checked'}> Also back up the Telegram session and the database every night, into a folder next to the index copy${state.status.backup && state.status.backup.dir ? ` (<code>${esc(state.status.backup.dir)}</code>)` : ''}. The last 7 nights are kept.</label>
 <div class="muted">The session files are copied as they are, still encrypted. The key that opens them (<code>secret.key</code> in the app's data folder) is never copied there, so restoring also needs the app's secret key from its data folder: keep a copy of that folder somewhere safe. Saved with the Save settings button below.</div></div>
+<div class="card"><h2>Big videos and the NAS</h2>
+<label><input type="checkbox" data-set="lowqFirst" ${s.lowqFirst ? 'checked' : ''}> Save a lower quality of very large videos first when time is short: when a deletion date is set and a video of 200 MB or more would not be reached in time, a smaller copy Telegram keeps of it (at least 480p, at most 40% of the size) is saved first; the original follows after everything else and then replaces it. Not done for likely copies.</label>
+<label style="margin-left:22px"><input type="checkbox" data-set="lowqKeep" ${s.lowqKeep ? 'checked' : ''}> …and keep the lower quality after the original arrives</label>
+<div class="btns">Download first to this folder on this computer: <input class="t" data-set-text="stageDir" value="${esc(s.stageDir || '')}" placeholder="empty = off; for example ${esc((state.status.staging || {}).suggest || '')}" style="flex:1;min-width:240px"></div>
+<div class="btns">Space it may use: <input class="t" data-set-text="stageCapGb" value="${esc(String(s.stageCapGb || 20))}" style="width:70px"> GB</div>
+<div class="muted">Downloads are written to this local folder, checked, then copied to the downloads folder (your NAS) and checked again before the local copy is removed, so a network hiccup on the share doesn't fail a download. A copy that fails is retried for as long as it takes; nothing on the NAS is ever replaced. The folder must exist and must not be inside the downloads folder. When it is full, new downloads wait for copies to finish.</div>
+<div class="btns"><button class="b primary" data-act="set-save">Save settings</button></div></div>
 <div class="card"><h2>Account safety</h2>
 <label>Pace of rescans: <select class="t" data-set-select="pace"><option value="normal" ${s.pace === 'normal' ? 'selected' : ''}>Normal</option><option value="gentle" ${s.pace === 'gentle' ? 'selected' : ''}>Gentle (pauses more often, smaller download batches)</option></select></label>
 <div class="btns">Quiet hours (no new group starts): <input class="t" data-set-text="quietStart" value="${esc(s.quietStart)}" placeholder="22:00" style="width:80px"> to <input class="t" data-set-text="quietEnd" value="${esc(s.quietEnd)}" placeholder="07:00" style="width:80px"> <span class="muted">empty = none</span></div>

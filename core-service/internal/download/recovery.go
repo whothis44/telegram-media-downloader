@@ -126,6 +126,9 @@ func (l *Library) Recover(ctx context.Context) error {
 			return err
 		}
 	}
+	if err = l.recoverStaging(ctx); err != nil {
+		return err
+	}
 	return l.CleanDerived(ctx)
 }
 
