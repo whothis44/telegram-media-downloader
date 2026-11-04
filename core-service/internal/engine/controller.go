@@ -973,6 +973,7 @@ func (c *Controller) accept(ctx context.Context, run *running, accountID string,
 	}
 	return nil
 }
+
 // An idle worker (its last claim found nothing) looks again after
 // workerIdlePoll, then after twice as long each time it again finds
 // nothing, up to workerIdlePollMax. A queue whose files all wait (for the
