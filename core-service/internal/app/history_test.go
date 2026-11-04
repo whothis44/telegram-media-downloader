@@ -433,7 +433,7 @@ func TestHistoryBackpressureHonorsConfiguredStallDeadline(t *testing.T) {
 	var transfers, pages atomic.Int64
 	page := func(context.Context, telegram.HistoryRequest) (telegram.HistoryPage, error) {
 		pages.Add(1)
-		return historyMessages(10), nil
+		return historyMessages(10, 9, 8, 7, 6, 5, 4, 3, 2, 1), nil // the limit's worth (10)
 	}
 	a, err := newConfiguredTestApp(context.Background(), Config{DataDir: t.TempDir(), AccountFactory: historyFactory(t, page, nil, &transfers)})
 	if err != nil {
@@ -445,7 +445,7 @@ func TestHistoryBackpressureHonorsConfiguredStallDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ensureMap(cfg, "advanced")["history"] = map[string]any{"backpressureCap": 1, "backpressureMaxWaitMs": 1}
+	ensureMap(cfg, "advanced")["history"] = map[string]any{"backpressureCap": 10, "backpressureMaxWaitMs": 1}
 	if err = a.config.Save(context.Background(), cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -454,7 +454,7 @@ func TestHistoryBackpressureHonorsConfiguredStallDeadline(t *testing.T) {
 	}
 	res := historyHTTP(t, a, "POST", "/api/history", `{"groupId":"-1000000000042"}`)
 	j := historyFinished(t, a, res["jobId"].(string))
-	if j.State != "error" || j.Processed != 1 || j.Error == nil || !strings.Contains(*j.Error, "stall deadline") || pages.Load() != 1 || transfers.Load() != 0 {
+	if j.State != "error" || j.Processed != 10 || j.Error == nil || !strings.Contains(*j.Error, "stall deadline") || pages.Load() != 1 || transfers.Load() != 0 {
 		t.Fatalf("backpressure job=%+v pages=%d transfers=%d", j, pages.Load(), transfers.Load())
 	}
 }

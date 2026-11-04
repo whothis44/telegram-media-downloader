@@ -186,16 +186,20 @@ func (a *App) ixLastProgress(ctx context.Context) time.Time {
 // comes in behind them, and the backfill stops bringing new files.
 //
 // Files of 1 GB or more waiting for the big-file lane (engine.BigFileLane)
-// do not count either: only a few of them download at once, so a queue
-// filled with them (as queues of earlier versions are) would stop the
-// backfill for days while the workers have nothing else to take.
-func (a *App) ixWaitingApart(ctx context.Context) int {
-	var n int
-	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM tgdl_work w WHERE w.status='pending' AND w.origin<>'live' AND (
+// do not count either, up to ixBigApartTimes the backfill's limit (cap):
+// only a few of them download at once, so a queue filled with them (as
+// queues of earlier versions are) would stop the backfill for days while
+// the workers have nothing else to take. Beyond that they count, so that
+// the backfills cannot queue big files without end.
+const ixBigApartTimes = 2
+
+func (a *App) ixWaitingApart(ctx context.Context, cap int) int {
+	var apart, big int
+	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COALESCE(SUM(w.paused=1),0), COALESCE(SUM(w.paused=0),0) FROM tgdl_work w WHERE w.status='pending' AND w.origin<>'live' AND (
 		w.paused=1 AND (
 		EXISTS (SELECT 1 FROM ix_held h WHERE h.work_id=w.id AND h.released_at=0 AND h.reason<>'')
 		OR EXISTS (SELECT 1 FROM ix_deferred x WHERE x.work_id=w.id AND x.released_at=0)
 		OR EXISTS (SELECT 1 FROM ix_lowq q WHERE q.work_id=w.id AND q.state='saved'))
-		OR ? > 0 AND w.paused=0 AND w.ttl_seconds=0 AND w.file_size>=?)`, engine.BigFileLane(), engine.BigFileSize).Scan(&n)
-	return n
+		OR ? > 0 AND w.paused=0 AND w.ttl_seconds=0 AND w.file_size>=?)`, engine.BigFileLane(), engine.BigFileSize).Scan(&apart, &big)
+	return apart + min(big, ixBigApartTimes*max(0, cap))
 }

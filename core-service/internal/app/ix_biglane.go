@@ -21,7 +21,8 @@ import (
 //     most 2 of them download at once, twice that when nothing smaller can
 //     be claimed;
 //   - those waiting for the lane do not count towards a backfill's queue
-//     limit (ixWaitingApart), so the backfill keeps bringing smaller files;
+//     limit (ixWaitingApart), up to twice that limit, so the backfill keeps
+//     bringing smaller files and still cannot queue big ones without end;
 //   - with the deadline order on, files the rescans have not queued yet
 //     count as work of the smallest band (ixUnqueuedBand), so the big files
 //     queued are set aside rather than filling the queue limit.
@@ -94,7 +95,7 @@ func (a *App) ixBigFilesNow(ctx context.Context) ixBigFiles {
 	// As the backfill counts (history_runner.go): every queued item not of
 	// live monitoring, less those that wait apart.
 	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM tgdl_work WHERE origin<>'live' AND status IN ('pending','processing')`).Scan(&b.QueueCount)
-	b.QueueCount = max(0, b.QueueCount-a.ixWaitingApart(ctx))
+	b.QueueCount = max(0, b.QueueCount-a.ixWaitingApart(ctx, b.QueueCap))
 	b.CapPaused = b.Backfills > 0 && b.QueueCount >= b.QueueCap
 	return b
 }

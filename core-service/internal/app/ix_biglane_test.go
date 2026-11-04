@@ -323,3 +323,41 @@ func TestIxStuckRescansDoNotKeepFilesAside(t *testing.T) {
 		t.Fatalf("workers took %d big and %d small files", big, small)
 	}
 }
+
+// Big files waiting for their lane stay out of the backfill's count only
+// up to twice its limit: beyond that they count, so the backfills cannot
+// queue big files without end. The limit is kept to what the settings
+// allow.
+func TestIxBigFilesApartAreBounded(t *testing.T) {
+	ixTestLane(t, 2)
+	a, ctx := ix8App(t, map[string]any{"deadlineOrder": "off"})
+	cfg, err := a.config.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ensureMap(cfg, "advanced")["history"] = map[string]any{"backpressureCap": 20}
+	if err = a.config.Save(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 30; i++ {
+		ixOldQueueRow(t, a, "-1001", i, 1<<30+int64(i)<<20)
+	}
+	ixTestBackfill(t, a, ctx, "-1002")
+	if b := a.ixBigFilesNow(ctx); b.QueueCap != 20 || b.QueueCount != 0 || b.CapPaused {
+		t.Fatalf("30 big files, limit 20: %+v", b)
+	}
+	for i := 31; i <= 70; i++ {
+		ixOldQueueRow(t, a, "-1001", i, 1<<30+int64(i)<<20)
+	}
+	if n := a.ixWaitingApart(ctx, 20); n != 40 {
+		t.Fatalf("apart: %d, want 40", n)
+	}
+	if b := a.ixBigFilesNow(ctx); b.QueueCount != 30 || !b.CapPaused {
+		t.Fatalf("70 big files, limit 20: %+v", b)
+	}
+	for v, want := range map[float64]int{1: 10, 5: 10, 500: 500, 50000: 50000, 1e6: 100000} {
+		if got := historyBackpressureCap(map[string]any{"advanced": map[string]any{"history": map[string]any{"backpressureCap": v}}}); got != want {
+			t.Fatalf("limit %v read as %d, want %d", v, got, want)
+		}
+	}
+}

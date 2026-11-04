@@ -36,7 +36,7 @@ func sanitizeAdvancedConfig(a map[string]any) {
 	d["idleSleepMs"] = clampConfigInt(d["idleSleepMs"], 50, 10000, 200)
 
 	h := configBlock(a, "history")
-	h["backpressureCap"] = clampConfigInt(h["backpressureCap"], 10, 100000, 500)
+	h["backpressureCap"] = clampConfigInt(h["backpressureCap"], historyCapMin, historyCapMax, 500)
 	h["backpressureMaxWaitMs"] = clampConfigInt(h["backpressureMaxWaitMs"], 5000, 3600000, 900000)
 	h["shortBreakEveryN"] = clampConfigInt(h["shortBreakEveryN"], 0, 100000, 100)
 	h["longBreakEveryN"] = clampConfigInt(h["longBreakEveryN"], 0, 1000000, 1000)

@@ -111,7 +111,7 @@ func (a *App) runHistory(ctx context.Context, id string) error {
 		if j.MessagesOnly {
 			pending = 0 // archive: this walk queues nothing, so the queue never holds it back
 		} else {
-			pending = max(0, pending-a.ixWaitingApart(ctx)) // archive: held copies, set-aside files and upgrades wait apart, they do not fill the queue
+			pending = max(0, pending-a.ixWaitingApart(ctx, cap)) // archive: held copies, set-aside files and upgrades wait apart, they do not fill the queue
 		}
 		// Progress is a shrinking queue or bytes still arriving: several
 		// backfills feeding one queue with large files can keep it full for
@@ -515,9 +515,16 @@ func (a *App) startHistoryDrain(restart bool) {
 
 // historyBackpressureCap is how many queued items a backfill that queues
 // files waits below.
+// It is kept to the range the settings allow (sanitizeAdvancedConfig).
 func historyBackpressureCap(cfg map[string]any) int {
-	return max(1, min(10000, int(number(objectAt(cfg, "advanced", "history")["backpressureCap"], 500))))
+	return int(clampConfigInt(objectAt(cfg, "advanced", "history")["backpressureCap"], historyCapMin, historyCapMax, 500))
 }
+
+// The range of the backfill's queue limit.
+const (
+	historyCapMin = 10
+	historyCapMax = 100000
+)
 
 // historyPageRetries are the waits before asking again for a history page
 // whose connection dropped.
