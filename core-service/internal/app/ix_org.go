@@ -314,7 +314,10 @@ func (a *App) ixPlanDuplicateCopies(ctx context.Context) ([]ixMoveOp, error) {
 			break
 		}
 	}
-	return ops, rows.Err()
+	if err := rows.Err(); err != nil || len(ops) >= ixMaxPlanOps {
+		return ops, err
+	}
+	return a.ixPlanNearCopies(ctx, ops) // near-identical videos too (ix_copies_clean.go)
 }
 
 // ixPlanCopy plans copying (or moving) the given files into a folder,
@@ -592,6 +595,9 @@ func (a *App) ixApplyPlan(ctx context.Context, id int64) error {
 		switch o.Op {
 		case "copy":
 			opErr = ixCopyVerified(a.ixAbs(o.Src), a.ixAbs(o.Dst), o.SHA256)
+		case ixNearOp:
+			opErr = a.ixApplyNear(ctx, id, o) // checks, moves and points the entries itself
+			o.Repoint = ""
 		case "move", "trash":
 			if o.Op == "trash" {
 				opErr = a.ixCheckKeeper(o)
@@ -649,7 +655,7 @@ func (a *App) ixUndoPlan(ctx context.Context, id int64) error {
 	sort.Slice(ops, func(i, j int) bool { return ops[i].Seq > ops[j].Seq })
 	var failure error
 	for _, o := range ops {
-		landed := (o.State == "running" || o.State == "failed") && (o.Op == "move" || o.Op == "trash") && a.ixLanded(o)
+		landed := (o.State == "running" || o.State == "failed") && (o.Op == "move" || o.Op == "trash" || o.Op == ixNearOp) && a.ixLanded(o)
 		if o.State != "done" && !landed {
 			continue
 		}
@@ -659,6 +665,8 @@ func (a *App) ixUndoPlan(ctx context.Context, id int64) error {
 			if got, _, err := ixHashFile(a.ixAbs(o.Dst)); err == nil && (o.SHA256 == "" || strings.EqualFold(got, o.SHA256)) {
 				opErr = os.Remove(a.ixAbs(o.Dst)) // the original is still where it was
 			}
+		case ixNearOp:
+			opErr = a.ixUndoNear(ctx, id, o)
 		case "move", "trash":
 			opErr = ixMoveVerified(a.ixAbs(o.Dst), a.ixAbs(o.Src), o.SHA256)
 			if opErr == nil && o.Repoint != "" {

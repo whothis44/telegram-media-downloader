@@ -1095,7 +1095,7 @@ func (a *App) handleIxMovePlan(w http.ResponseWriter, r *http.Request) {
 	switch kind {
 	case "duplicate-copies":
 		ops, err = a.ixPlanDuplicateCopies(ctx)
-		title = "Move extra byte-identical copies to _trash"
+		title = "Move extra copies to _trash (byte-identical files, and near-identical videos: the best copy stays)"
 	case "collection", "originals":
 		m, merr := a.ixModelNow(ctx)
 		if m == nil {
