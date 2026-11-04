@@ -521,7 +521,8 @@ ${state.diag ? `<textarea id="diag" readonly style="width:100%;min-height:260px;
 <div class="btns"><button class="b primary" data-act="set-save">Save settings</button></div>
 ${state.setMsg ? `<div class="muted">${esc(state.setMsg)}</div>` : ''}</div>
 ${viewCopySettings(s)}
-<div class="card"><h2>Image recognition (optional)</h2>
+<div class="card"><h2>Image recognition (recommended)</h2>
+<div class="muted"><b>Without it, these stop working:</b> copy checks by how alike the previews look (and their calibration), search by what pictures show, “more like this”, Things, look-alikes, faces and people, text in pictures, and album suggestions by likeness. <b>These keep working:</b> downloads, the forward, exact re-upload and likely video copy checks, sampling of big videos, the deadline order, backups and browsing.</div>
 <div class="muted">Lets the archive browser find pictures and videos by what they show (“bikes in the snow”, in any language), show “more like this”, set apart files in a set that don't look like the rest, list what pictures show (Things), and, if you turn them on, read the text in pictures and group faces into people. It uses the machine-learning part of Immich (a self-hosted photo app), running in Docker on this PC; nothing is sent anywhere else, and only addresses on this computer or your local network are accepted. Each distinct picture is looked at once, in the background. Instructions: docs/image-recognition.md.</div>
 <div class="btns">Address: <input class="t" data-set-text="mlUrl" value="${esc(s.mlUrl || '')}" placeholder="http://127.0.0.1:3003 (empty = off)" style="flex:1;min-width:240px"></div>
 <div class="btns">Model: <input class="t" data-set-text="mlModel" value="${esc(s.mlModel || '')}" placeholder="ViT-B-16-SigLIP2__webli" style="flex:1;min-width:240px"></div>
