@@ -2,7 +2,9 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -11,6 +13,76 @@ import (
 // Search in the browser: one box for words (captions, text in pictures,
 // speech, file names) and for what pictures show (image recognition), with
 // copies of one file counted once.
+
+// ---------- words in pictures and speech, indexed ----------
+
+// Text read from pictures and speech written out get full-text indexes
+// (ranked, no full scans). A row's rowid is that of its ix_ocr / ix_stt
+// row; they are filled where those are saved (ix_text.go), and from the
+// rows already there the first time.
+const ixSchemaSearch = `
+CREATE VIRTUAL TABLE IF NOT EXISTS ix_ocr_fts USING fts5(text, tokenize='unicode61 remove_diacritics 2');
+CREATE VIRTUAL TABLE IF NOT EXISTS ix_stt_fts USING fts5(text, tokenize='unicode61 remove_diacritics 2');
+`
+
+// ixEnsureMediaSearch adds the indexes when SQLite has FTS5 (without it,
+// search falls back to a plain text scan) and indexes rows not in them yet.
+func ixEnsureMediaSearch(ctx context.Context, db *sql.DB) {
+	if _, err := db.ExecContext(ctx, ixSchemaSearch); err != nil {
+		return
+	}
+	for _, t := range []string{"ix_ocr", "ix_stt"} {
+		_, _ = db.ExecContext(ctx, `INSERT INTO `+t+`_fts(rowid, text) SELECT rowid, text FROM `+t+` WHERE text<>'' AND rowid NOT IN (SELECT rowid FROM `+t+`_fts)`)
+	}
+}
+
+// ixIndexMediaText puts a file's text (table ix_ocr or ix_stt, just saved)
+// in its full-text index, in place of what was there.
+func (a *App) ixIndexMediaText(ctx context.Context, table, key, text string) {
+	if table != "ix_ocr" && table != "ix_stt" {
+		return
+	}
+	var rowid int64
+	if a.db.Writer.QueryRowContext(ctx, `SELECT rowid FROM `+table+` WHERE key=?`, key).Scan(&rowid) != nil {
+		return
+	}
+	if _, err := a.db.Writer.ExecContext(ctx, `DELETE FROM `+table+`_fts WHERE rowid=?`, rowid); err != nil {
+		return // no index (SQLite without FTS5)
+	}
+	if strings.TrimSpace(text) != "" {
+		_, _ = a.db.Writer.ExecContext(ctx, `INSERT INTO `+table+`_fts(rowid, text) VALUES(?,?)`, rowid, text)
+	}
+}
+
+// ixMediaTextKeys lists the files whose pictures show (ix_ocr) or whose
+// recordings say (ix_stt) the words searched for, best first.
+func (a *App) ixMediaTextKeys(ctx context.Context, table, q string) []string {
+	var keys []string
+	collect := func(rows *sql.Rows) error {
+		defer rows.Close()
+		keys = nil
+		for rows.Next() {
+			var k string
+			if rows.Scan(&k) == nil {
+				keys = append(keys, k)
+			}
+		}
+		return rows.Err()
+	}
+	if fq := ixFTSQuery(q); fq != "" {
+		rows, err := a.db.Reader.QueryContext(ctx, `SELECT t.key FROM `+table+`_fts f JOIN `+table+` t ON t.rowid=f.rowid WHERE `+table+`_fts MATCH ? ORDER BY bm25(`+table+`_fts) LIMIT 20000`, fq)
+		if err == nil && collect(rows) == nil {
+			return keys
+		}
+	}
+	// No index: a plain scan, unranked.
+	keys = nil
+	like := "%" + strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(q) + "%"
+	if rows, err := a.db.Reader.QueryContext(ctx, `SELECT key FROM `+table+` WHERE text LIKE ? ESCAPE '\' LIMIT 20000`, like); err == nil {
+		_ = collect(rows)
+	}
+	return keys
+}
 
 // ---------- one pass over the embeddings ----------
 
@@ -38,17 +110,32 @@ func (s *ixEmbStore) scan(q []float32, k float64, n int, keep func(string) bool,
 	}
 	d := s.dim
 	sims := make([]float32, len(s.keys))
+	// A few cores share the comparisons (each a part of the store).
+	workers := max(1, min(runtime.GOMAXPROCS(0), 4, len(s.keys)/8192))
+	part := (len(s.keys) + workers - 1) / workers
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		lo, hi := w*part, min(len(s.keys), (w+1)*part)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := lo; i < hi; i++ {
+				if s.norms[i] == 0 {
+					sims[i] = -2
+					continue
+				}
+				sims[i] = float32(ixDot8(qq, s.vecs[i*d:(i+1)*d])) / (qn * s.norms[i])
+			}
+		}()
+	}
+	wg.Wait()
 	all := make([]float64, 0, len(s.keys))
 	out.top = -2
-	for i := range s.keys {
-		if s.norms[i] == 0 {
-			sims[i] = -2
-			continue
+	for _, c := range sims {
+		if c > -2 {
+			all = append(all, float64(c))
+			out.top = max(out.top, c)
 		}
-		c := float32(ixDot8(qq, s.vecs[i*d:(i+1)*d])) / (qn * s.norms[i])
-		sims[i] = c
-		all = append(all, float64(c))
-		out.top = max(out.top, c)
 	}
 	if len(all) >= 20 {
 		out.thr = float32(ixOutlierThr(all, k))

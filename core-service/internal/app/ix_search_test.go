@@ -232,6 +232,224 @@ func TestIxSetRoutesNeedAnAdmin(t *testing.T) {
 	}
 }
 
+// ---------- one search box ----------
+
+// ixWordsScene gives the scene words: captions, text in pictures, speech
+// and a file name, all mentioning a xylophone (the fake recognition places
+// "xylophone" with the x/y pictures, as it does every word starting with x).
+func ixWordsScene(t *testing.T, a *App, ctx context.Context, m *ixModel) {
+	t.Helper()
+	for _, row := range [][2]string{{"A", "xylophone concert"}, {"C", "xylophone"}, {"F", "nothing to see"}} {
+		if _, err := a.db.Writer.Exec(`INSERT INTO ix_messages(group_id, message_id, date, text, media_type) VALUES (?, 1, 100, ?, 'photo')`, row[0], row[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, row := range [][3]string{{"ix_ocr", "z0", "XYLOPHONE LESSONS"}, {"ix_stt", "o5", "playing the xylophone"}} {
+		if _, err := a.db.Writer.Exec(`INSERT INTO `+row[0]+`(key, model, text) VALUES (?, 'm', ?)`, row[1], row[2]); err != nil {
+			t.Fatal(err)
+		}
+		a.ixIndexMediaText(ctx, row[0], row[1], row[2])
+	}
+	m.Items[m.ByKey["s10"]].Name = "Xylophone.jpg"
+}
+
+type ixFoundCard struct {
+	group string
+	why   string
+	weak  bool
+	kind  string
+	key   string
+	sim   float64
+}
+
+func ixFound(res map[string]any) []ixFoundCard {
+	var out []ixFoundCard
+	for _, c := range res["cards"].([]any) {
+		cm := c.(map[string]any)
+		fc := ixFoundCard{kind: cm["kind"].(string), weak: cm["weak"] == true}
+		fc.group, _ = cm["group"].(string)
+		if w, ok := cm["why"].([]any); ok {
+			for i, x := range w {
+				if i > 0 {
+					fc.why += "+"
+				}
+				fc.why += x.(string)
+			}
+		}
+		if items, ok := cm["items"].([]any); ok && len(items) > 0 {
+			it := items[0].(map[string]any)
+			fc.key, _ = it["key"].(string)
+			fc.sim, _ = it["sim"].(float64)
+		}
+		out = append(out, fc)
+	}
+	return out
+}
+
+func TestIxOneSearchBoxFindsWordsAndLooks(t *testing.T) {
+	a, ctx, m, _ := ixLooksScene(t, nil)
+	// A repost of x0 in G: found once per original, in every post holding it.
+	ixSceneCopy(m, "G", 1, 500, "x0b", "x0")
+	ixAssignSets(m, ixSetFixes{}, nil)
+	ixTestStore(t, a, ctx, ixSceneKeys(m), map[string]string{"x0b": "x0"})
+	ixWordsScene(t, a, ctx, m)
+	search := func(view, match string, extra ...string) map[string]any {
+		q := url.Values{"q": {"xylophone"}, "view": {view}, "rank": {"relevance"}, "match": {match}}
+		for i := 0; i+1 < len(extra); i += 2 {
+			q.Set(extra[i], extra[i+1])
+		}
+		return ixGetJSON(t, a.handleIxBrowseFeed, "/api/ix/browse/feed", q)
+	}
+	why := func(cards []ixFoundCard) map[string]string {
+		out := map[string]string{}
+		for _, c := range cards {
+			out[c.group] = c.why
+		}
+		return out
+	}
+	// Both: every way of matching, each post once, best first.
+	res := search("posts", "both")
+	cards := ixFound(res)
+	got := why(cards)
+	want := map[string]string{"A": "caption", "B": "name", "C": "caption+speech", "D": "looks", "E": "looks", "F": "text", "G": "looks"}
+	if len(cards) != len(want) {
+		t.Fatalf("posts found: %+v", cards)
+	}
+	for g, w := range want {
+		if got[g] != w {
+			t.Fatalf("why %s: %q, want %q (%v)", g, got[g], w, got)
+		}
+	}
+	if cards[0].group != "C" {
+		t.Fatalf("best first: %+v", cards)
+	}
+	s := res["search"].(map[string]any)
+	if s["match"] != "both" || s["looks"].(float64) != 13 || s["pinned"] != false {
+		t.Fatalf("search info: %v", s)
+	}
+	// Originals: the repost folds into its original.
+	if res := search("families", "both"); res["total"].(float64) != 6 {
+		t.Fatalf("originals found: %v", res["total"])
+	}
+	// The media grid: only the files found, with their likeness.
+	res = search("media", "both")
+	tiles := ixFound(res)
+	byKey := map[string]ixFoundCard{}
+	for _, c := range tiles {
+		if _, dup := byKey[c.key]; dup {
+			t.Fatalf("a file twice: %s", c.key)
+		}
+		byKey[c.key] = c
+	}
+	if c := byKey["x3"]; c.why != "looks" || c.sim <= 0 {
+		t.Fatalf("x3 tile: %+v", c)
+	}
+	if _, ok := byKey["x0b"]; ok {
+		t.Fatal("the copy of x0 has a tile of its own")
+	}
+	if c := byKey["o5"]; c.why != "caption+speech" {
+		t.Fatalf("o5 tile: %+v", c)
+	}
+	if _, ok := byKey["z1"]; ok {
+		t.Fatal("z1 is shown: only z0 has the words")
+	}
+	// Words only, looks only.
+	if got := why(ixFound(search("posts", "words"))); len(got) != 4 || got["D"] != "" {
+		t.Fatalf("words: %v", got)
+	}
+	if got := why(ixFound(search("posts", "looks"))); len(got) != 3 || got["D"] != "looks" || got["A"] != "" {
+		t.Fatalf("looks: %v", got)
+	}
+	// Every filter still applies: one chat, kind, date.
+	if got := why(ixFound(search("posts", "both", "group", "E"))); len(got) != 1 || got["E"] != "looks" {
+		t.Fatalf("in E: %v", got)
+	}
+	if got := ixFound(search("posts", "both", "type", "video")); len(got) != 0 {
+		t.Fatalf("videos: %+v", got)
+	}
+	if got := why(ixFound(search("posts", "both", "from", "250", "to", "450"))); len(got) != 2 || got["C"] == "" || got["F"] == "" {
+		t.Fatalf("dated 250-450: %v", got)
+	}
+	// Sets and newest first work too.
+	if res := search("sets", "both"); res["total"].(float64) != 2 {
+		t.Fatalf("sets found: %v", res["total"])
+	}
+	res = ixGetJSON(t, a.handleIxBrowseFeed, "/api/ix/browse/feed", url.Values{"q": {"xylophone"}, "view": {"posts"}})
+	if cards := ixFound(res); len(cards) != 7 || cards[0].group != "G" {
+		t.Fatalf("newest first: %+v", cards)
+	}
+}
+
+func TestIxSearchPutsAFarBetterCaptionFirst(t *testing.T) {
+	a, ctx, m, _ := ixLooksScene(t, nil)
+	_ = ctx
+	for _, row := range [][2]string{
+		{"F", "zebra zebra zebra"},
+		{"A", "a zebra among the many horses, donkeys and cows grazing in a wide field near the river on a sunny day"},
+		{"B", "the zebra seen once from the road past the farm with the old barn, the silos and the tractors"},
+	} {
+		if _, err := a.db.Writer.Exec(`INSERT INTO ix_messages(group_id, message_id, date, text, media_type) VALUES (?, 1, 100, ?, 'photo')`, row[0], row[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res := ixGetJSON(t, a.handleIxBrowseFeed, "/api/ix/browse/feed", url.Values{"q": {"zebra"}, "view": {"posts"}, "rank": {"relevance"}, "match": {"words"}})
+	cards := ixFound(res)
+	if res["search"].(map[string]any)["pinned"] != true || len(cards) != 3 || cards[0].group != "F" {
+		t.Fatalf("pinned: %v %+v", res["search"], cards)
+	}
+	// Two captions alike: nothing is put first.
+	if _, err := a.db.Writer.Exec(`UPDATE ix_messages SET text='zebra zebra zebra!' WHERE group_id='A'`); err != nil {
+		t.Fatal(err)
+	}
+	res = ixGetJSON(t, a.handleIxBrowseFeed, "/api/ix/browse/feed", url.Values{"q": {"zebra"}, "view": {"posts"}, "rank": {"relevance"}, "match": {"words"}})
+	if res["search"].(map[string]any)["pinned"] != false {
+		t.Fatalf("pinned between equals: %v", res["search"])
+	}
+	_ = m
+}
+
+func TestIxTextInPicturesAndSpeechIsIndexed(t *testing.T) {
+	a, ctx := ix8App(t, nil)
+	m := ixSetScene()
+	// Rows saved before the index existed are indexed once.
+	if _, err := a.db.Writer.Exec(`INSERT INTO ix_ocr(key, model, text) VALUES ('s01', 'm', 'Old Harbour Road'), ('s02', 'm', '')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Writer.Exec(`INSERT INTO ix_stt(key, model, text) VALUES ('z0', 'm', 'meet me at the harbour')`); err != nil {
+		t.Fatal(err)
+	}
+	ixEnsureMediaSearch(ctx, a.db.Writer)
+	ixEnsureMediaSearch(ctx, a.db.Writer) // twice: nothing indexed twice
+	var n int
+	_ = a.db.Reader.QueryRow(`SELECT COUNT(*) FROM ix_ocr_fts`).Scan(&n)
+	if n != 1 {
+		t.Fatalf("indexed pictures: %d", n)
+	}
+	if keys := a.ixMediaTextKeys(ctx, "ix_ocr", "harbour"); len(keys) != 1 || keys[0] != "s01" {
+		t.Fatalf("picture text: %v", keys)
+	}
+	if keys := a.ixMediaTextKeys(ctx, "ix_stt", "harb"); len(keys) != 1 || keys[0] != "z0" {
+		t.Fatalf("speech (a word begun): %v", keys)
+	}
+	// Read again with other words: the old ones are gone from the index.
+	if _, err := a.db.Writer.Exec(`UPDATE ix_ocr SET text='New Bridge' WHERE key='s01'`); err != nil {
+		t.Fatal(err)
+	}
+	a.ixIndexMediaText(ctx, "ix_ocr", "s01", "New Bridge")
+	if keys := a.ixMediaTextKeys(ctx, "ix_ocr", "harbour"); len(keys) != 0 {
+		t.Fatalf("old words still found: %v", keys)
+	}
+	hits := map[int32]bool{}
+	a.ixSearchMediaText(ctx, m, "bridge", hits)
+	if len(hits) != 2 || !hits[0] || !hits[2] { // s01 is in A:1 and C:1
+		t.Fatalf("posts: %v", hits)
+	}
+	// Words that are not a full-text query still search.
+	if keys := a.ixMediaTextKeys(ctx, "ix_ocr", `"`); keys != nil {
+		t.Fatalf("a lone quote: %v", keys)
+	}
+}
+
 // ---------- the cut-off ----------
 
 // ix8CountingML is ix8FakeML, counting the requests it answers.

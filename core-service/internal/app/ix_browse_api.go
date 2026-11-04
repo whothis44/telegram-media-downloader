@@ -308,12 +308,14 @@ type ixFeedQuery struct {
 	From, To   int64
 	Cursor     int
 	Limit      int
+	Match      string // a search: words, looks or both
+	Rank       bool   // a search: best match first
 }
 
 func ixParseFeed(r *http.Request) ixFeedQuery {
 	q := r.URL.Query()
 	f := ixFeedQuery{View: q.Get("view"), Group: q.Get("group"), Category: q.Get("category"), Type: q.Get("type"), Sort: q.Get("sort"), Q: strings.TrimSpace(q.Get("q")),
-		Dups: q.Get("dups") == "1", Status: q.Get("status")}
+		Dups: q.Get("dups") == "1", Status: q.Get("status"), Match: q.Get("match"), Rank: q.Get("rank") == "relevance"}
 	f.Collection, _ = strconv.ParseInt(q.Get("collection"), 10, 64)
 	f.Person, _ = strconv.ParseInt(q.Get("person"), 10, 64)
 	f.From, _ = strconv.ParseInt(q.Get("from"), 10, 64)
@@ -327,48 +329,6 @@ func ixParseFeed(r *http.Request) ixFeedQuery {
 		f.View = "families"
 	}
 	return f
-}
-
-// ixSearchPosts finds the posts whose messages match a text search.
-func (a *App) ixSearchPosts(ctx context.Context, m *ixModel, q string) map[int32]bool {
-	out := map[int32]bool{}
-	var fts int
-	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE name='ix_fts'`).Scan(&fts)
-	var rowsErr error
-	collect := func(query string, args ...any) {
-		rows, err := a.db.Reader.QueryContext(ctx, query, args...)
-		if err != nil {
-			rowsErr = err
-			return
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var g string
-			var msg int
-			if rows.Scan(&g, &msg) == nil {
-				if pi, ok := m.ByMsg[g+":"+strconv.Itoa(msg)]; ok {
-					out[pi] = true
-				}
-			}
-		}
-	}
-	if fts > 0 {
-		collect(`SELECT m.group_id, m.message_id FROM ix_fts JOIN ix_messages m ON m.rowid=ix_fts.rowid WHERE ix_fts MATCH ? LIMIT 20000`, ixFTSQuery(q))
-	}
-	if fts == 0 || rowsErr != nil {
-		like := "%" + strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(q) + "%"
-		collect(`SELECT group_id, message_id FROM ix_messages WHERE text LIKE ? ESCAPE '\' LIMIT 20000`, like)
-	}
-	// Text read from pictures and speech written out.
-	a.ixSearchMediaText(ctx, m, q, out)
-	// File names too.
-	lower := strings.ToLower(q)
-	for i := range m.Items {
-		if m.Items[i].Name != "" && strings.Contains(strings.ToLower(m.Items[i].Name), lower) {
-			out[m.Items[i].Post] = true
-		}
-	}
-	return out
 }
 
 func (m *ixModel) postMatches(pi int32, f ixFeedQuery, hits map[int32]bool) bool {
@@ -441,9 +401,19 @@ func (a *App) handleIxBrowseFeed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f := ixParseFeed(r)
-	var hits map[int32]bool
+	var rank *ixRank
 	if f.Q != "" {
-		hits = a.ixSearchPosts(ctx, m, f.Q)
+		rank = a.ixHybridSearch(ctx, m, f) // words and looks, fused (ix_search_rank.go)
+	}
+	a.ixWriteFeed(ctx, w, m, f, rank)
+}
+
+// ixWriteFeed answers a page of the feed: the posts that match f (and the
+// search, when rank is set), in the view asked for.
+func (a *App) ixWriteFeed(ctx context.Context, w http.ResponseWriter, m *ixModel, f ixFeedQuery, rank *ixRank) {
+	var hits map[int32]bool
+	if rank != nil {
+		hits = rank.hits()
 	}
 	if f.Collection > 0 {
 		refs, err := a.ixCollectionRefs(ctx, f.Collection)
@@ -467,9 +437,19 @@ func (a *App) handleIxBrowseFeed(w http.ResponseWriter, r *http.Request) {
 		}
 		hits = in
 	}
-	var cards []ixJCard
-	total := 0
+	cards, total, next := m.ixFeedPage(f, hits, rank)
+	out := map[string]any{"cards": cards, "total": total, "next": next, "built": m.Built.UnixMilli()}
+	if rank != nil {
+		out["search"] = rank.info
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// ixFeedPage lists the matching cards of a view, one page from f.Cursor:
+// by date, or best match first when rank says so.
+func (m *ixModel) ixFeedPage(f ixFeedQuery, hits map[int32]bool, rank *ixRank) (cards []ixJCard, total, next int) {
 	newest := f.Sort != "old"
+	byScore := rank.ordered()
 	page := func(n int, card func(int) ixJCard) {
 		total = n
 		for i := f.Cursor; i < n && len(cards) < f.Limit; i++ {
@@ -479,7 +459,28 @@ func (a *App) handleIxBrowseFeed(w http.ResponseWriter, r *http.Request) {
 	switch f.View {
 	case "sets":
 		list := m.ixSetFeed(f, hits)
-		page(len(list), func(i int) ixJCard { return m.setCard(list[i]) })
+		if byScore {
+			score := map[int32]float64{}
+			for _, si := range list {
+				for _, fi := range m.Sets[si].Families {
+					for _, pi := range m.Families[fi].Posts {
+						if s, ok := rank.post[pi]; ok && s > score[si] && m.postMatches(pi, f, hits) {
+							score[si] = s
+						}
+					}
+				}
+			}
+			sort.SliceStable(list, func(i, j int) bool { return score[list[i]] > score[list[j]] })
+		}
+		page(len(list), func(i int) ixJCard {
+			c := m.setCard(list[i])
+			var posts []int32
+			for _, fi := range m.Sets[list[i]].Families {
+				posts = append(posts, m.Families[fi].Posts...)
+			}
+			rank.decorate(m, &c, posts, nil)
+			return c
+		})
 	case "posts":
 		var list []int32
 		for pi := range m.Posts {
@@ -488,13 +489,22 @@ func (a *App) handleIxBrowseFeed(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		sort.SliceStable(list, func(i, j int) bool {
+			if byScore {
+				if x, y := rank.post[list[i]], rank.post[list[j]]; x != y {
+					return x > y
+				}
+			}
 			a, b := &m.Posts[list[i]], &m.Posts[list[j]]
 			if a.Date != b.Date {
 				return a.Date > b.Date == newest
 			}
 			return (list[i] > list[j]) == newest
 		})
-		page(len(list), func(i int) ixJCard { return m.postCard(list[i]) })
+		page(len(list), func(i int) ixJCard {
+			c := m.postCard(list[i])
+			rank.decorate(m, &c, list[i:i+1], nil)
+			return c
+		})
 	case "media":
 		// One tile per duplicate set (its best copy), placed where it first appeared.
 		type tile struct {
@@ -516,6 +526,11 @@ func (a *App) handleIxBrowseFeed(w http.ResponseWriter, r *http.Request) {
 				if seen[c] {
 					continue
 				}
+				if rank != nil {
+					if _, ok := rank.cluster[c]; !ok {
+						continue // a search: only the files found
+					}
+				}
 				seen[c] = true
 				show := m.Clusters[c].Canon
 				if f.Status != "" {
@@ -525,41 +540,64 @@ func (a *App) handleIxBrowseFeed(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		sort.SliceStable(list, func(i, j int) bool {
+			if byScore {
+				x, y := rank.cluster[m.Items[list[i].item].Cluster], rank.cluster[m.Items[list[j].item].Cluster]
+				if x != y {
+					return x > y
+				}
+			}
 			if list[i].date != list[j].date {
 				return list[i].date > list[j].date == newest
 			}
 			return (list[i].item > list[j].item) == newest
 		})
-		page(len(list), func(i int) ixJCard { return m.mediaCard(list[i].item) })
+		page(len(list), func(i int) ixJCard {
+			c := m.mediaCard(list[i].item)
+			rank.decorate(m, &c, nil, []int32{m.Items[list[i].item].Cluster})
+			return c
+		})
 	default:
 		// Originals only: one card per family that has a matching post.
 		seen := map[int32]bool{}
+		score := map[int32]float64{}
 		var list []int32
 		for pi := range m.Posts {
 			fam := m.Posts[pi].Family
-			if fam < 0 || seen[fam] || !m.postMatches(int32(pi), f, hits) {
+			if fam < 0 || seen[fam] && !byScore || !m.postMatches(int32(pi), f, hits) {
 				continue
 			}
-			seen[fam] = true
-			list = append(list, fam)
+			if byScore {
+				score[fam] = max(score[fam], rank.post[int32(pi)])
+			}
+			if !seen[fam] {
+				seen[fam] = true
+				list = append(list, fam)
+			}
 		}
 		sort.SliceStable(list, func(i, j int) bool {
+			if x, y := score[list[i]], score[list[j]]; x != y {
+				return x > y
+			}
 			a, b := &m.Families[list[i]], &m.Families[list[j]]
 			if a.First != b.First {
 				return a.First > b.First == newest
 			}
 			return (list[i] > list[j]) == newest
 		})
-		page(len(list), func(i int) ixJCard { return m.familyCard(list[i]) })
+		page(len(list), func(i int) ixJCard {
+			c := m.familyCard(list[i])
+			rank.decorate(m, &c, m.Families[list[i]].Posts, nil)
+			return c
+		})
 	}
-	next := f.Cursor + len(cards)
+	next = f.Cursor + len(cards)
 	if next >= total {
 		next = 0
 	}
 	if cards == nil {
 		cards = []ixJCard{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"cards": cards, "total": total, "next": next, "built": m.Built.UnixMilli()})
+	return cards, total, next
 }
 
 func errString(err error) string {

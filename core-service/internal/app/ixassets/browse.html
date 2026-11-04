@@ -120,10 +120,14 @@ mark{background:#fff1a8;color:#111}
           <button data-v="media" title="One tile per picture or video, duplicates folded">Media grid</button>
         </div>
         <input class="t search" id="q" type="search" placeholder="Search captions, messages, file names, text in pictures and speech">
-        <label class="chk" id="qml-wrap" hidden title="Search what pictures and videos show (image recognition), in any language the model knows"><input type="checkbox" id="qml"> by what they show</label>
+        <div class="seg" id="match" hidden title="What the search looks at">
+          <button data-m="words" title="Captions, messages, text in pictures, speech and file names">Words</button>
+          <button data-m="looks" title="What pictures and videos show (image recognition), in any language the model knows">Looks</button>
+          <button data-m="both" class="on" title="Words and looks together, best match first">Both</button>
+        </div>
         <select class="t" id="type"><option value="">All kinds</option><option value="photo">Pictures</option><option value="video">Videos</option><option value="album">Albums</option><option value="other">Files, audio</option></select>
         <select class="t" id="status"><option value="">Any state</option><option value="held">Held back (likely copies)</option><option value="missing">Not downloaded</option><option value="subst">Same file as another upload</option></select>
-        <select class="t" id="sort"><option value="new">Newest first</option><option value="old">Oldest first</option></select>
+        <select class="t" id="sort"><option value="best" hidden>Best match first</option><option value="new">Newest first</option><option value="old">Oldest first</option></select>
         <label class="chk"><input type="checkbox" id="dups"> Only reposted</label>
       </div>
       <div id="feed-note" class="muted" style="margin-bottom:8px"></div>
@@ -198,7 +202,7 @@ const fmtDur = (s) => { if (!s) return ''; s = Math.round(s); const h = Math.flo
 const roleText = { original: 'original', repost: 'repost', adds: 'adds new files' };
 const statusText = { held: 'waiting – likely a copy', missing: 'not downloaded', subst: 'same file as another upload' };
 
-const S = { info: null, view: 'families', group: '', category: '', q: '', type: '', status: '', sort: 'new', dups: false, collection: 0, cursor: 0, loading: false, done: false, tab: 'browse', cards: [], ml: false, like: '', likeName: '', tieFrom: '' };
+const S = { info: null, view: 'families', group: '', category: '', q: '', match: 'both', type: '', status: '', sort: 'new', dups: false, collection: 0, cursor: 0, loading: false, done: false, tab: 'browse', cards: [], like: '', likeName: '', tieFrom: '' };
 const roleName = { core: 'Shared', member: 'Belongs', loose: 'Probably not part of it', elsewhere: 'Belongs to another set' };
 
 // ---------- info, sidebar ----------
@@ -228,7 +232,8 @@ function renderSide() {
   }
   const ml = info.ml || {};
   const mlLine = !ml.enabled ? '' : `<br>Image recognition: ${ml.reachable ? (ml.embedded || 0).toLocaleString() + ' looked at' + (ml.pending ? ', ' + ml.pending.toLocaleString() + ' to go' : '') + (ml.failed ? ', ' + ml.failed + ' unreadable' : '') : '<span class="bad">' + esc(ml.lastError || 'not reachable') + '</span>'}`;
-  $('#qml-wrap').hidden = !ml.enabled;
+  $('#match').hidden = !ml.enabled;
+  $('#q').placeholder = ml.enabled ? 'Search words, and what pictures and videos show' : 'Search captions, messages, file names, text in pictures and speech';
   $('#tab-things').hidden = !ml.enabled;
   $('#tab-people').hidden = !(ml.tasks && ml.tasks.faces && ml.tasks.faces.on);
   h += `<h3>Index</h3><div class="muted" style="padding:0 8px">${(info.sets || 0).toLocaleString()} sets · ${info.families.toLocaleString()} originals · ${info.repostPosts.toLocaleString()} reposts folded in · ${info.mergedAlbums.toLocaleString()} merged albums · ${info.held} held back · ${info.missing.toLocaleString()} not downloaded<br>Pictures indexed: ${info.media.done.toLocaleString()} / ${info.media.total.toLocaleString()} · videos: ${info.videos.done.toLocaleString()} / ${info.videos.total.toLocaleString()}${mlLine}<br><button class="link" id="rebuild">Rebuild now</button></div>`;
@@ -289,6 +294,7 @@ function cardHTML(c, key) {
     badges.push(`<span class="badge set" data-set="${c.id}">set · ${c.families} posts${c.chats > 1 ? ' in ' + c.chats + ' chats' : ''}</span>`);
     badges.push(`<span class="badge" title="Files in two or more of its posts / in one">${r.core || 0} shared · ${r.member || 0} more</span>`);
     if (r.loose) badges.push(`<span class="badge held" data-set="${c.id}" title="In one post but unlike the rest (image recognition)">${r.loose} unsure</span>`);
+    badges.push(...whyBadges(c));
     return `<div class="card" data-key="${key}">${mosaicHTML(c.items, key)}${c.more ? `<div class="more">+${c.more} more</div>` : ''}
     <div class="meta"><div class="where"><b title="${esc(c.groupName)}">${esc(c.groupName)}</b><span>${fmtDate(c.date)}</span></div>
     ${c.caption ? `<div class="cap">${esc(c.caption)}</div>` : ''}<div class="badges">${badges.join('')}</div></div></div>`;
@@ -301,6 +307,7 @@ function cardHTML(c, key) {
     else if (c.posts > 1) badges.push(`<span class="badge rep" data-fam="${c.family}">original · ${c.posts - 1} repost(s)</span>`);
   }
   if (c.deleted) badges.push(`<span class="badge del">deleted on Telegram</span>`);
+  badges.push(...whyBadges(c));
   return `<div class="card" data-key="${key}">${mosaicHTML(c.items, key)}${c.more ? `<div class="more">+${c.more} more</div>` : ''}
     <div class="meta"><div class="where"><b title="${esc(c.groupName)}">${esc(c.groupName)}</b><span>${fmtDate(c.date)}</span></div>
     ${c.caption ? `<div class="cap">${esc(c.caption)}</div>` : ''}
@@ -312,15 +319,16 @@ function cardHTML(c, key) {
         <button data-act="tie">${S.tieFrom ? 'Put in the same set as the post chosen' : 'Put in the same set as another post…'}</button></span></span></div></div></div>`;
 }
 function feedURL() {
-  if (S.like || S.thing || (S.ml && S.q)) {
+  if (S.like || S.thing) {
     const p = new URLSearchParams({ limit: '240' });
-    if (S.like) p.set('like', S.like); else if (S.thing) p.set('thing', S.thing); else p.set('q', S.q);
+    if (S.like) p.set('like', S.like); else p.set('thing', S.thing);
     for (const k of ['group', 'category']) if (S[k]) p.set(k, S[k]);
     if (S.type === 'photo' || S.type === 'video') p.set('type', S.type);
     return '/api/ix/browse/similar?' + p;
   }
-  const p = new URLSearchParams({ view: S.view, sort: S.sort, cursor: String(S.cursor), limit: S.view === 'media' ? '120' : '48' });
+  const p = new URLSearchParams({ view: S.view, sort: S.sort === 'best' ? 'new' : S.sort, cursor: String(S.cursor), limit: S.view === 'media' ? '120' : '48' });
   for (const k of ['group', 'category', 'q', 'type', 'status']) if (S[k]) p.set(k, S[k]);
+  if (S.q) { p.set('match', S.match); if (S.sort === 'best') p.set('rank', 'relevance'); }
   if (S.dups) p.set('dups', '1');
   if (S.collection) p.set('collection', String(S.collection));
   if (S.person) p.set('person', String(S.person));
@@ -338,30 +346,49 @@ async function loadMore() {
   feed.insertAdjacentHTML('beforeend', r.data.cards.map((c, i) => cardHTML(c, start + i)).join(''));
   S.cursor = r.data.next; S.done = !r.data.next;
   const what = { families: 'originals', sets: 'sets', posts: 'posts', media: 'pictures and videos' }[S.view];
-  if (S.like || S.thing || (S.ml && S.q)) {
-    const strong = S.like || S.thing ? ', best first (' + r.data.total + ')' : r.data.total ? ': ' + r.data.total.toLocaleString() + ' close match' + (r.data.total === 1 ? '' : 'es') + (r.data.weak ? ', then weaker ones' : '') : ': nothing stands out, these are only the closest (weak matches)';
-    $('#feed-note').innerHTML = (S.like ? 'Most like the chosen ' + esc(S.likeName) : S.thing ? 'Pictures showing “' + esc(S.thing) + '”' : 'Closest to “' + esc(S.q) + '”') + strong + ' · <button class="link" id="like-clear">back to browsing</button>';
-    $('#like-clear').onclick = () => { S.like = ''; S.thing = ''; S.ml = false; $('#qml').checked = false; resetFeed(); };
+  if (S.like || S.thing) {
+    $('#feed-note').innerHTML = (S.like ? 'Most like the chosen ' + esc(S.likeName) : 'Pictures showing “' + esc(S.thing) + '”') + ', best first (' + r.data.total + ') · <button class="link" id="like-clear">back to browsing</button>';
+    $('#like-clear').onclick = () => { S.like = ''; S.thing = ''; resetFeed(); };
+  } else if (S.q) {
+    $('#feed-note').innerHTML = esc(r.data.total.toLocaleString() + ' ' + what) + ' match “' + esc(S.q) + '”' + searchNote(r.data.search || {});
   } else if (S.person) {
     $('#feed-note').innerHTML = esc(r.data.total.toLocaleString() + ' ' + what) + ' with <b>' + esc(S.personName || 'this person') + '</b> · <button class="link" id="person-clear">everyone</button>';
     $('#person-clear').onclick = () => { S.person = 0; resetFeed(); };
   } else $('#feed-note').textContent = r.data.total.toLocaleString() + ' ' + what + (S.view === 'families' ? ' (reposts and copies folded in)' : S.view === 'sets' ? ' (posts that share some of the same pictures)' : '');
   $('#sentinel').textContent = S.done ? (S.cards.length ? 'End' : 'Nothing here') : '';
 }
+// What a search found, after the count.
+function searchNote(s) {
+  const parts = [];
+  if (s.match === 'looks') parts.push('by what the pictures show');
+  else if (s.match === 'words') parts.push('by their words');
+  if (s.looks !== undefined && s.match !== 'words') parts.push(s.looks ? s.looks.toLocaleString() + ' picture(s) look like it' : 'no picture stands out as looking like it');
+  if (s.weak) parts.push('the closest pictures are added as weak matches');
+  if (s.pinned) parts.push('the caption that matches best comes first');
+  if (s.looksError) parts.push('<span class="warn">looks: ' + esc(s.looksError) + '</span>');
+  return parts.length ? ' · ' + parts.join(' · ') : '';
+}
 function resetFeed() {
   S.cursor = 0; S.done = false; S.cards = [];
-  S.showSim = !!(S.like || S.thing || (S.ml && S.q));
-  $('#feed').innerHTML = ''; $('#feed').className = 'grid' + (S.view === 'media' || S.showSim ? ' media' : '');
+  S.showSim = !!(S.like || S.thing || (S.q && S.match !== 'words'));
+  $('#feed').innerHTML = ''; $('#feed').className = 'grid' + (S.view === 'media' || S.like || S.thing ? ' media' : '');
   loadMore();
 }
 new IntersectionObserver((e) => { if (e[0].isIntersecting && S.tab === 'browse') loadMore(); }, { rootMargin: '800px' }).observe($('#sentinel'));
 
 $('#view').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; S.view = b.dataset.v; $$('#view button').forEach((x) => x.classList.toggle('on', x === b)); resetFeed(); });
-// A new search replaces "more like this" and a subject.
-let qTimer; $('#q').addEventListener('input', () => { clearTimeout(qTimer); qTimer = setTimeout(() => { S.q = $('#q').value.trim(); S.like = ''; S.thing = ''; resetFeed(); }, 350); });
+// A new search replaces "more like this" and a subject; it is shown best
+// match first unless another order was chosen.
+function setQuery(q) {
+  if (q && !S.q && S.sort === 'new') S.sort = 'best';
+  if (!q && S.sort === 'best') S.sort = 'new';
+  S.q = q; S.like = ''; S.thing = '';
+  $('#sort option[value="best"]').hidden = !q; $('#sort').value = S.sort;
+}
+let qTimer; $('#q').addEventListener('input', () => { clearTimeout(qTimer); qTimer = setTimeout(() => { setQuery($('#q').value.trim()); resetFeed(); }, 350); });
 for (const id of ['type', 'status', 'sort']) $('#' + id).addEventListener('change', () => { S[id] = $('#' + id).value; resetFeed(); });
 $('#dups').addEventListener('change', () => { S.dups = $('#dups').checked; resetFeed(); });
-$('#qml').addEventListener('change', () => { S.ml = $('#qml').checked; S.like = ''; S.thing = ''; resetFeed(); });
+$('#match').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; S.match = b.dataset.m; $$('#match button').forEach((x) => x.classList.toggle('on', x === b)); S.like = ''; S.thing = ''; if (S.q) resetFeed(); });
 
 // A card's menu is placed over the page (cards clip what overflows them),
 // below the button, or above it when there is no room below.
