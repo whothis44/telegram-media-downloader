@@ -28,8 +28,12 @@ import (
 // video) and describes each by an embedding; faces whose embeddings are
 // close are the same person. They are grouped the way Immich groups them:
 // a face joins the person of its closest grouped look-alike, and a new
-// person is made once enough faces look alike. A person can then be named,
-// merged with another, hidden, and a face taken out of a person.
+// person is made once enough faces look alike in different files. Poor
+// faces may only join, and more strictly (ix_faces_quality.go); two faces
+// of one picture are never one person. People that look close are offered
+// as "Same person?" (ix_faces_people.go). A person can be named, merged
+// with another, hidden, given a picture, and a face taken out of a person.
+// Stored faces are grouped again when these rules change (ix_faces_regroup.go).
 
 const (
 	ixFaceModel    = "buffalo_l"
