@@ -37,12 +37,19 @@ import (
 // Order: private chats first (no public username), then the newest
 // messages; messages deleted on Telegram after the rest. A file posted in
 // several messages is fetched once.
+//
+// A chat's previews are read through the account that queues its files,
+// or the running account when that one cannot be opened (removed, or not
+// running). An answer about the whole chat (CHANNEL_PRIVATE, FROZEN_*,
+// CHAT_*) leaves the chat's other files alone for ixPreviewAllChatSkip
+// rather than asking for each of them; one chat never ends the round.
 
 const (
 	ixPreviewAllBatch      = 100 // files per round, then the order is read again
 	ixPreviewAllFloodPause = 5 * time.Minute
 	ixPreviewAllPremiumMin = time.Minute
 	ixPreviewAllGapMax     = 16 // times ixPreviewAllGap, after speed-limit waits
+	ixPreviewAllChatSkip   = 6 * time.Hour
 )
 
 var (
@@ -72,6 +79,7 @@ type ixPreviewAllInfo struct {
 	Remaining   int64  `json:"remaining"`   // still to fetch
 	Unavailable int64  `json:"unavailable"` // Telegram has none, or it failed a few times
 	FetchedRun  int64  `json:"fetchedRun"`  // fetched by this pass since the archive started
+	ChatsLeft   int    `json:"chatsLeft"`   // chats left alone for now: Telegram refused the whole chat
 	PausedUntil int64  `json:"pausedUntil,omitempty"`
 	Why         string `json:"why,omitempty"` // why it is not fetching now
 	At          int64  `json:"at,omitempty"`
@@ -86,6 +94,7 @@ type ixPreviewAllBox struct {
 	sigSeen     bool
 	lastFloods  int
 	lastPremium int
+	skipChats   map[string]time.Time // chats left alone until then (an answer about the whole chat)
 }
 
 var ixPreviewAllState sync.Map // *App -> *ixPreviewAllBox
@@ -150,6 +159,7 @@ func (a *App) ixPreviewAllMeasure(ctx context.Context) ixPreviewAllInfo {
 		b.info.Remaining = max(0, known-fetched-unavailable)
 		b.info.At = time.Now().UnixMilli()
 	}
+	b.info.ChatsLeft = len(b.skippedLocked(time.Now()))
 	b.info.PausedUntil = 0
 	if time.Now().Before(b.pauseUntil) {
 		b.info.PausedUntil = b.pauseUntil.UnixMilli()
@@ -161,10 +171,45 @@ func (a *App) ixPreviewAllDiag(ctx context.Context) string {
 	p := a.ixPreviewAllMeasure(ctx)
 	line := fmt.Sprintf("  previews of files not downloaded (%s, %s): %d photos/videos · 320 px preview kept %d · to fetch %d · none available %d · fetched since start %d",
 		p.Mode, map[bool]string{true: "on", false: "off"}[p.On], p.Known, p.Fetched, p.Remaining, p.Unavailable, p.FetchedRun)
+	if p.ChatsLeft > 0 {
+		line += fmt.Sprintf(" · chats left alone for now %d", p.ChatsLeft)
+	}
 	if p.Why != "" {
 		line += " · " + p.Why
 	}
 	return line
+}
+
+// skippedLocked are the chats left alone now (expired ones are dropped).
+func (b *ixPreviewAllBox) skippedLocked(now time.Time) []any {
+	var out []any
+	for g, until := range b.skipChats {
+		if now.Before(until) {
+			out = append(out, g)
+		} else {
+			delete(b.skipChats, g)
+		}
+	}
+	return out
+}
+
+// ixPreviewAllSkipChat leaves a chat alone for ixPreviewAllChatSkip.
+func (a *App) ixPreviewAllSkipChat(group string) {
+	b := a.ixPreviewAllBox()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.skipChats == nil {
+		b.skipChats = map[string]time.Time{}
+	}
+	b.skipChats[group] = time.Now().Add(ixPreviewAllChatSkip)
+}
+
+// ixPreviewChatWide: Telegram's answer is about the whole chat (or the
+// account in it), not this file: asking for the chat's other files would
+// get the same.
+func ixPreviewChatWide(err error) bool {
+	s := err.Error()
+	return strings.Contains(s, "CHANNEL_PRIVATE") || strings.Contains(s, "CHANNEL_INVALID") || strings.Contains(s, "FROZEN_") || strings.Contains(s, "CHAT_")
 }
 
 func (a *App) ixPreviewAllSetWhy(why string) {
@@ -184,14 +229,24 @@ type ixPreviewAllJob struct {
 	account string
 }
 
-// ixPreviewAllJobs lists up to n files without a kept preview, in order.
+// ixPreviewAllJobs lists up to n files without a kept preview, in order,
+// leaving out the chats left alone for now.
 func (a *App) ixPreviewAllJobs(ctx context.Context, n int) ([]ixPreviewAllJob, error) {
+	b := a.ixPreviewAllBox()
+	b.mu.Lock()
+	skip := b.skippedLocked(time.Now())
+	b.mu.Unlock()
+	notIn := ""
+	if len(skip) > 0 {
+		notIn = ` AND m.group_id NOT IN (` + strings.TrimSuffix(strings.Repeat("?,", len(skip)), ",") + `)`
+	}
+	args := append(append([]any{}, skip...), ixPreviewTries, n*2)
 	rows, err := a.db.Reader.QueryContext(ctx, `SELECT m.group_id, m.message_id, m.media_key, m.tl FROM ix_messages m
 		LEFT JOIN ix_group_info g ON g.group_id=m.group_id
-		WHERE `+ixPreviewAllWhere+`
+		WHERE `+ixPreviewAllWhere+notIn+`
 		AND NOT EXISTS (SELECT 1 FROM ix_copy_thumb t WHERE t.ident=m.media_key AND (t.path<>'' OR t.tries>=?))
 		ORDER BY COALESCE(g.username,'')='' DESC, m.deleted_at=0 DESC, m.date DESC, m.group_id, m.message_id DESC
-		LIMIT ?`, ixPreviewTries, n*2)
+		LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -421,26 +476,53 @@ func (a *App) ixPreviewAllRound(ctx context.Context) time.Duration {
 	b.premiumSeen = false
 	b.mu.Unlock()
 	pacer := &ixPreviewPacer{gap: a.ixPreviewAllGapNow}
-	readers := map[string]ixCopyReader{}
+	readers := map[string]ixCopyReader{} // by the account asked for
+	var opened []ixCopyReader
 	defer func() {
-		for _, r := range readers {
+		for _, r := range opened {
 			r.Close()
 		}
 	}()
+	// open is the reader for an account: that account's, or the running
+	// account's when it cannot be opened; nil when neither can.
+	open := func(account string) ixCopyReader {
+		if r, ok := readers[account]; ok {
+			return r
+		}
+		raw, err := ixOpenCopyReader(a, ctx, account)
+		if err != nil && account != "" {
+			r := readers[""]
+			if _, tried := readers[""]; !tried {
+				if raw, err = ixOpenCopyReader(a, ctx, ""); err == nil {
+					r = &ixPacedReader{ixCopyReader: raw, ctx: ctx, pacer: pacer, check: a.ixPreviewAllSignalled}
+					opened = append(opened, r)
+				}
+				readers[""] = r
+			}
+			readers[account] = r
+			return r
+		}
+		var r ixCopyReader
+		if err == nil {
+			r = &ixPacedReader{ixCopyReader: raw, ctx: ctx, pacer: pacer, check: a.ixPreviewAllSignalled}
+			opened = append(opened, r)
+		}
+		readers[account] = r
+		return r
+	}
 	a.ixPreviewAllSetWhy("")
+	leftAlone := map[string]bool{} // chats left for this round
 	for _, j := range jobs {
 		if ctx.Err() != nil || a.ixIsGone() {
 			return time.Minute
 		}
-		r := readers[j.account]
+		if leftAlone[j.group] {
+			continue
+		}
+		r := open(j.account)
 		if r == nil {
-			raw, err := ixOpenCopyReader(a, ctx, j.account)
-			if err != nil {
-				a.ixPreviewAllSetWhy("waiting for the Telegram engine")
-				return 5 * time.Minute // quietly: the engine is stopped or starting
-			}
-			r = &ixPacedReader{ixCopyReader: raw, ctx: ctx, pacer: pacer, check: a.ixPreviewAllSignalled}
-			readers[j.account] = r
+			leftAlone[j.group] = true // no account can read it now: the next round tries again
+			continue
 		}
 		data, w, h, err := ixFetchPreview(r, j.body)
 		if err != nil {
@@ -451,6 +533,10 @@ func (a *App) ixPreviewAllRound(ctx context.Context) time.Duration {
 				return a.ixPreviewAllPause(err)
 			}
 			a.ixPreviewAllFailed(ctx, j, err)
+			if ixPreviewChatWide(err) {
+				a.ixPreviewAllSkipChat(j.group)
+				leftAlone[j.group] = true
+			}
 			continue
 		}
 		if err := a.ixPreviewAllKeep(ctx, j, data, w, h); err != nil {
@@ -462,6 +548,10 @@ func (a *App) ixPreviewAllRound(ctx context.Context) time.Duration {
 		b.mu.Lock()
 		b.info.FetchedRun++
 		b.mu.Unlock()
+	}
+	if len(opened) == 0 {
+		a.ixPreviewAllSetWhy("waiting for the Telegram engine")
+		return 5 * time.Minute // quietly: the engine is stopped or starting
 	}
 	// A whole round without a speed-limit wait: back to the usual pace.
 	b.mu.Lock()

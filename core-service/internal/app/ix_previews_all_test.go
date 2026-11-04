@@ -5,6 +5,7 @@ import (
 	"errors"
 	"image"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -355,5 +356,66 @@ func TestIxCopyCheckReusesKeptPreviews(t *testing.T) {
 	_ = a.db.Reader.QueryRow(`SELECT model, length(vec) FROM ix_copy_thumb WHERE ident=?`, ixAllIdent(v)).Scan(&model, &n)
 	if model != "test-model" || n == 0 {
 		t.Fatalf("not looked at: %q %d", model, n)
+	}
+}
+
+// An account that cannot be opened (removed, or not running) no longer
+// ends every round on the same chat: the running account reads it. A
+// chat Telegram refuses as a whole is asked once, then left alone.
+func TestIxPreviewsAllAccountFallbackAndChatWideErrors(t *testing.T) {
+	a, ctx := ixTestApp(t)
+	ixAllDeadline(t, a, ctx)
+	const other = 4244
+	picA1, picA2 := ixTestPhoto(1, ixTestChannel, 1101, 500), ixTestPhoto(2, ixTestChannel, 1102, 400)
+	var picsB []*tg.Message
+	for i := 0; i < 3; i++ {
+		picsB = append(picsB, ixTestPhoto(10+i, other, int64(1201+i), 900-100*i))
+	}
+	for _, m := range append([]*tg.Message{picA1, picA2}, picsB...) {
+		ixTestArchive(t, a, m)
+	}
+	ixTestQueue(t, a, picA1)
+	if _, err := a.db.Writer.Exec(`UPDATE tgdl_work SET account_id='removed'`); err != nil {
+		t.Fatal(err)
+	}
+	r := &ixAllReader{preview: ixTestJPEG(t, image.NewRGBA(image.Rect(0, 0, 32, 24)), 80),
+		fail: map[int64]error{1201: errors.New("rpc error code 406: CHANNEL_PRIVATE")}}
+	ixAllUse(t, r, 0)
+	var opens []string
+	ixOpenCopyReader = func(_ *App, _ context.Context, account string) (ixCopyReader, error) {
+		opens = append(opens, account)
+		if account == "removed" {
+			return nil, errors.New("account removed cannot resolve Telegram messages")
+		}
+		return r, nil
+	}
+	a.ixPreviewAllRound(ctx)
+	if len(r.asked) != 3 || r.asked[0] != 1201 || r.asked[1] != 1101 || r.asked[2] != 1102 {
+		t.Fatalf("asked %v (opened %v)", r.asked, opens)
+	}
+	if len(opens) != 2 || opens[0] != "" && opens[1] != "" {
+		t.Fatalf("opened %v", opens)
+	}
+	if p := a.ixPreviewAllNow(); p.ChatsLeft != 1 || p.Why != "" {
+		t.Fatalf("after the round: %+v", p)
+	}
+	// The refused chat is left alone in the next rounds.
+	a.ixPreviewAllRound(ctx)
+	if len(r.asked) != 3 {
+		t.Fatalf("asked the refused chat again: %v", r.asked)
+	}
+	if line := a.ixPreviewAllDiag(ctx); !strings.Contains(line, "chats left alone for now 1") {
+		t.Fatalf("diagnostics: %s", line)
+	}
+	// Once the time is up, it is tried again.
+	box := a.ixPreviewAllBox()
+	box.mu.Lock()
+	for g := range box.skipChats {
+		box.skipChats[g] = time.Now().Add(-time.Second)
+	}
+	box.mu.Unlock()
+	a.ixPreviewAllRound(ctx)
+	if len(r.asked) != 5 {
+		t.Fatalf("after the time: %v", r.asked)
 	}
 }
