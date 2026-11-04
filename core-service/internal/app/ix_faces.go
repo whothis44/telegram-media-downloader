@@ -192,6 +192,17 @@ func ixFaceShot(key int32, frame int16) int64 { return int64(key)<<16 | int64(ui
 
 func (s *ixFaceStore) shotLocked(i int32) int64 { return ixFaceShot(s.key[i], s.frame[i]) }
 
+// inShotLocked says whether person has a face (other than skip) in the
+// picture or frame: two faces seen together are never the same person.
+func (s *ixFaceStore) inShotLocked(person, shot, skip int64) bool {
+	for _, i := range s.shots[shot] {
+		if s.person[i] == person && s.ids[i] != skip {
+			return true
+		}
+	}
+	return false
+}
+
 // dropLocked forgets a face deleted from the table.
 func (s *ixFaceStore) dropLocked(id int64) {
 	if i, ok := s.index[id]; ok {
@@ -485,12 +496,14 @@ func (a *App) ixGroupFaceLocked(ctx context.Context, id int64, v []int8, unit fu
 		return nil
 	}
 	tier := s.tier[me]
+	myShot := s.shotLocked(me)
 	type cand struct {
 		ixFaceNear
 		tier int8
 		unit string
 	}
 	var grouped, loose []cand
+	shots := map[int64]bool{myShot: true} // cannot-link: one face per picture or frame
 	for _, n := range s.nearLocked(v, ixFaceSameSim, id) {
 		t := s.tier[n.idx]
 		if t == ixFaceJunk || n.sim < ixFacePairSim(tier, t) {
@@ -499,10 +512,15 @@ func (a *App) ixGroupFaceLocked(ctx context.Context, id int64, v []int8, unit fu
 		c := cand{n, t, ""}
 		switch {
 		case n.person > 0:
-			grouped = append(grouped, c)
+			if !s.inShotLocked(n.person, myShot, id) {
+				grouped = append(grouped, c)
+			}
 		case n.person == 0:
-			c.unit = unit(s.keys[s.key[n.idx]])
-			loose = append(loose, c)
+			if sh := s.shotLocked(n.idx); !shots[sh] {
+				shots[sh] = true
+				c.unit = unit(s.keys[s.key[n.idx]])
+				loose = append(loose, c)
+			}
 		}
 	}
 	myUnit := unit(s.keys[s.key[me]])

@@ -163,3 +163,33 @@ func TestIxFacesCountFilesNotFramesOrCopies(t *testing.T) {
 		t.Fatalf("H: %+v", p)
 	}
 }
+
+func TestIxFacesSeenTogetherAreTwoPeople(t *testing.T) {
+	srv := ix8FakeML(t)
+	defer srv.Close()
+	a, ctx := ix8App(t, map[string]any{"mlUrl": srv.URL, "mlFaces": true})
+	// b1 shows two very alike faces side by side (twins, or a mirror).
+	ix10Scan(t, a, ctx, map[string][]string{"b1": {"L,L"}, "b2": {"L"}}, nil)
+	if p := ix10People(t, a, ctx); len(p) != 0 {
+		t.Fatalf("two faces of one picture counted as two sightings: %+v", p)
+	}
+	ix10Scan(t, a, ctx, map[string][]string{"b3": {"L"}}, nil)
+	p := ix10People(t, a, ctx)
+	if len(p) != 1 || p[0].Faces != 3 {
+		t.Fatalf("L: %+v", p)
+	}
+	f := ix10Faces(t, a, "b1")
+	if len(f) != 2 || (f[0].Person == p[0].ID) == (f[1].Person == p[0].ID) {
+		t.Fatalf("faces of b1: %+v", f)
+	}
+	// Later, too: of two alike faces in one picture only one joins.
+	ix10Scan(t, a, ctx, map[string][]string{"b4": {"L,L"}}, nil)
+	if f := ix10Faces(t, a, "b4"); len(f) != 2 || f[0].Person != p[0].ID || f[1].Person != 0 {
+		t.Fatalf("faces of b4: %+v", f)
+	}
+	// Regrouping does not change that.
+	a.ixRegroupFaces(ctx, 100)
+	if f := ix10Faces(t, a, "b4"); f[1].Person != 0 {
+		t.Fatalf("regrouped into the person beside it: %+v", f)
+	}
+}
