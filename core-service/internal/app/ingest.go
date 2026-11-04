@@ -50,6 +50,9 @@ func (a *App) ingestTelegram(ctx context.Context, message *tg.Message, groupID, 
 		return download.Record{}, err
 	}
 	item.NoStage = forward // a forward needs the file in the library at once
+	if !forward {
+		item.Requeue = a.ixStageRequeue(ctx)
+	}
 	record, err := a.library.Ingest(ctx, item, telegram.AttachmentClient{Source: transport, Media: attachment})
 	if err != nil {
 		return record, err
