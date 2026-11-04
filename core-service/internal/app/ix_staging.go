@@ -100,7 +100,7 @@ func (a *App) ixStagedLost(ctx context.Context, item download.Item) error {
 	if queued {
 		a.ixLog("staging: the staged copy of message %d in %s was missing from the staging folder; it is queued again", item.MessageID, item.GroupID)
 	} else {
-		a.ixLog("staging: the staged copy of message %d in %s was missing from the staging folder; its queue item was skipped since, so it is not queued again", item.MessageID, item.GroupID)
+		a.ixLog("staging: the staged copy of message %d in %s was missing from the staging folder; its queue item was skipped or its group purged since, so it is not queued again", item.MessageID, item.GroupID)
 	}
 	return nil
 }

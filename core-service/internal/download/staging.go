@@ -103,6 +103,10 @@ func stageFreeSpace(dir string) (int64, bool) {
 // or file to finish. Not a failure; it is tried again shortly.
 var errStageLater = errors.New("waiting for another download of the same message")
 
+// errStageGone: the journal entry went while the move ran (its group was
+// purged). Nothing is left to do: the purge removes the local file.
+var errStageGone = errors.New("the staged file was removed from the journal")
+
 // stageDoubt is a problem a retry cannot fix: the local file is kept and
 // the move waits for a person.
 type stageDoubt struct{ msg string }
@@ -407,6 +411,7 @@ func (l *Library) MoveStaged(ctx context.Context) time.Duration {
 		err := l.moveStaged(ctx, mv)
 		switch {
 		case err == nil || ctx.Err() != nil:
+		case errors.Is(err, errStageGone):
 		case errors.Is(err, errStageLater):
 			_, _ = l.writer.ExecContext(context.WithoutCancel(ctx), `UPDATE tgdl_stage_moves SET next_at=? WHERE path=?`, time.Now().Add(stageLaterPause).UnixMilli(), mv.path)
 		default:
@@ -791,6 +796,20 @@ func (l *Library) stageDecide(ctx context.Context, locks *stageLocks, item Item,
 	if !locks.take("identity:"+mv.identity) || !locks.take(messageKey(item)) {
 		return d, errStageLater
 	}
+	// The journal entry as it is now: a purge may have removed it, or handed
+	// the file to another message, since the mover read it.
+	var payload string
+	var generation int64
+	err := l.reader.QueryRowContext(ctx, `SELECT item, generation FROM tgdl_stage_moves WHERE path=?`, mv.path).Scan(&payload, &generation)
+	if errors.Is(err, sql.ErrNoRows) {
+		return d, errStageGone
+	}
+	if err != nil {
+		return d, err
+	}
+	if payload != mv.payload || generation != mv.generation {
+		return d, errStageLater // read again on the next pass
+	}
 	followers, err := l.stageFollowers(ctx, mv.path)
 	if err != nil {
 		return d, err
@@ -823,7 +842,7 @@ type stageFate int
 
 const (
 	stageCurrent  stageFate = iota // the message's latest download
-	stageReplaced                  // a newer version is catalogued: not needed for it
+	stageReplaced                  // a newer version is catalogued, or the message was purged: not needed for it
 	stageLater                     // a newer version waits in the staging folder: that one goes first
 	stageAdopt                     // newer downloads failed or stopped: this is its only copy, kept
 )
@@ -835,7 +854,10 @@ func (l *Library) stageFateOf(ctx context.Context, item Item, path string) (stag
 	var current, registered int64
 	err := l.reader.QueryRowContext(ctx, `SELECT generation, registered FROM tgdl_message_generations WHERE group_id=? AND message_id=?`, item.GroupID, item.MessageID).Scan(&current, &registered)
 	if errors.Is(err, sql.ErrNoRows) {
-		return stageCurrent, nil // unknown: move it anyway, registration decides
+		// No download of the message is known: its group was purged (every
+		// download writes the row first). Nothing wants the file for it, and
+		// it is never queued again.
+		return stageReplaced, nil
 	}
 	if err != nil {
 		return 0, err
@@ -1004,6 +1026,103 @@ func (l *Library) recoverStaging(ctx context.Context) error {
 		})
 	}
 	return nil
+}
+
+// stagingTableIn reports whether the staging journal exists (staging used).
+func stagingTableIn(ctx context.Context, tx *sql.Tx) (bool, error) {
+	var n int
+	err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tgdl_stage_moves'`).Scan(&n)
+	return n > 0, err
+}
+
+// PurgeStaged removes from the staging journal, inside the purge's
+// transaction, the staged files of groupID (all: of every group), so that
+// none is catalogued or downloaded again after the purge. A file another
+// group's message waits for (a follower) is handed to that message instead.
+// It returns the local files to remove once the transaction is committed
+// (RemoveStagedFiles).
+func PurgeStaged(ctx context.Context, tx *sql.Tx, groupID string, all bool) ([]string, error) {
+	if ok, err := stagingTableIn(ctx, tx); err != nil || !ok {
+		return nil, err
+	}
+	where, args := `json_extract(item,'$.GroupID')=?`, []any{groupID}
+	followers := `DELETE FROM tgdl_stage_followers WHERE group_id=?`
+	if all {
+		where, args, followers = "1=1", nil, `DELETE FROM tgdl_stage_followers`
+	}
+	if _, err := tx.ExecContext(ctx, followers, args...); err != nil {
+		return nil, err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT path, stage_dir FROM tgdl_stage_moves WHERE `+where+` ORDER BY path`, args...)
+	if err != nil {
+		return nil, err
+	}
+	type staged struct{ path, dir string }
+	var list []staged
+	for rows.Next() {
+		var s staged
+		if err := rows.Scan(&s.path, &s.dir); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		list = append(list, s)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	var files []string
+	for _, s := range list {
+		var item, group string
+		var generation, message int64
+		err := tx.QueryRowContext(ctx, `SELECT item, generation, group_id, message_id FROM tgdl_stage_followers WHERE path=? ORDER BY rowid LIMIT 1`, s.path).Scan(&item, &generation, &group, &message)
+		switch {
+		case err == nil:
+			if _, err := tx.ExecContext(ctx, `UPDATE tgdl_stage_moves SET item=?, generation=? WHERE path=?`, item, generation, s.path); err != nil {
+				return nil, err
+			}
+			if _, err := tx.ExecContext(ctx, `DELETE FROM tgdl_stage_followers WHERE path=? AND group_id=? AND message_id=?`, s.path, group, message); err != nil {
+				return nil, err
+			}
+			continue
+		case !errors.Is(err, sql.ErrNoRows):
+			return nil, err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM tgdl_stage_moves WHERE path=?`, s.path); err != nil {
+			return nil, err
+		}
+		if rel := filepath.FromSlash(s.path); filepath.IsLocal(rel) && filepath.IsAbs(s.dir) {
+			files = append(files, filepath.Join(s.dir, rel))
+		}
+	}
+	return files, nil
+}
+
+// RemoveStagedFiles removes local staged files PurgeStaged let go (a file
+// already gone is fine) and lets waiting downloads use the room freed.
+func (l *Library) RemoveStagedFiles(files []string) error {
+	var errs []error
+	for _, f := range files {
+		if err := os.Remove(f); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			errs = append(errs, err)
+		}
+	}
+	l.stageSignal()
+	return errors.Join(errs...)
+}
+
+// RekeyStaged follows a group whose ID changed (a recovered group, see
+// app/recovery_resolve.go) in the staging journal, inside its transaction.
+func RekeyStaged(ctx context.Context, tx *sql.Tx, from, to, name string) error {
+	if ok, err := stagingTableIn(ctx, tx); err != nil || !ok {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE tgdl_stage_moves SET item=json_set(item,'$.GroupID',?,'$.GroupName',?) WHERE json_extract(item,'$.GroupID')=?`, to, name, from); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE tgdl_stage_followers SET group_id=?, item=json_set(item,'$.GroupID',?,'$.GroupName',?) WHERE group_id=?`, to, to, name, from)
+	return err
 }
 
 // StagingStatus is what the staging folder holds, for the dashboard and

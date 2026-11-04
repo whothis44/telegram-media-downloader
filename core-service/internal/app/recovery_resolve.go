@@ -15,6 +15,7 @@ import (
 	"unicode/utf16"
 	"unicode/utf8"
 
+	"github.com/botnick/telegram-media-downloader/core-service/internal/download"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/engine"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/ws"
 )
@@ -237,6 +238,9 @@ func (a *App) applyRecoveryPlan(ctx context.Context, plan recoveryPlan) (map[str
 				}
 			}
 			if _, err := tx.ExecContext(ctx, `UPDATE tgdl_ingest_files SET item=json_set(item,'$.GroupID',?,'$.GroupName',?) WHERE json_extract(item,'$.GroupID')=?`, target, name, plan.id); err != nil {
+				return nil, err
+			}
+			if err := download.RekeyStaged(ctx, tx, plan.id, target, name); err != nil {
 				return nil, err
 			}
 			if err := rekeyRecoveryHistory(ctx, tx, plan.id, target, name); err != nil {

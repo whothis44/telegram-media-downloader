@@ -23,6 +23,10 @@ func TestRequeueLostPutsAFinishedMessageBackInTheQueue(t *testing.T) {
 	if err := s.Finish(ctx, w, nil, false, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
+	// The download of it is known (the library writes this row first).
+	if _, err := s.writer.Exec(`INSERT INTO tgdl_message_generations(group_id,message_id,generation) SELECT group_id,message_id,1 FROM tgdl_work WHERE message_id=20`); err != nil {
+		t.Fatal(err)
+	}
 	var status string
 	var body int
 	if err := s.reader.QueryRow(`SELECT status, length(body) FROM tgdl_work WHERE message_id=20`).Scan(&status, &body); err != nil || status != "completed" || body != 0 {
@@ -62,5 +66,34 @@ func TestRequeueLostPutsAFinishedMessageBackInTheQueue(t *testing.T) {
 	}
 	if ok, err := s.RequeueLost(ctx, "one", Target{}, msg, "live"); err != nil || ok {
 		t.Fatalf("skipped: %t %v", ok, err)
+	}
+}
+
+// After a purge no download of the message is known (no generations row):
+// a staged file of it found missing is not downloaded again.
+func TestRequeueLostRefusesAPurgedMessage(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	msg := testMessage(21, 0, 21)
+	if ok, err := s.RequeueLost(ctx, "one", Target{}, msg, "history"); err != nil || ok {
+		t.Fatalf("purged, no queue item: %t %v", ok, err)
+	}
+	var n int
+	if err := s.reader.QueryRow(`SELECT COUNT(*) FROM tgdl_work`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("queued anew after a purge: %d %v", n, err)
+	}
+	// A queue item left behind is not touched either.
+	if _, _, err := s.Enqueue(ctx, "one", Target{}, msg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.writer.Exec(`UPDATE tgdl_work SET status='completed', body=X''`); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := s.RequeueLost(ctx, "one", Target{}, msg, "history"); err != nil || ok {
+		t.Fatalf("purged, finished item: %t %v", ok, err)
+	}
+	var status string
+	if err := s.reader.QueryRow(`SELECT status FROM tgdl_work`).Scan(&status); err != nil || status != "completed" {
+		t.Fatalf("finished item changed: %s %v", status, err)
 	}
 }

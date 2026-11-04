@@ -342,8 +342,10 @@ func (s *WorkStore) RetryAll(ctx context.Context) (int, error) {
 // as done but whose file was lost before it reached the library (a staged
 // copy removed from the staging folder). The finished item gets message's
 // body back and goes again; an item still waiting or running is left as it
-// is; a removed one is queued anew. queued is false only when the item was
-// skipped (filtered out or cancelled since) and stays so.
+// is; a removed one is queued anew. queued is false when the item was
+// skipped (filtered out or cancelled since) and stays so, and when no
+// download of the message is known any more (tgdl_message_generations has
+// no row: its group was purged), which is never queued again.
 func (s *WorkStore) RequeueLost(ctx context.Context, accountID string, target Target, message *tg.Message, origin string) (queued bool, err error) {
 	media, err := telegram.MessageAttachment(message)
 	if err != nil {
@@ -361,8 +363,20 @@ func (s *WorkStore) RequeueLost(ctx context.Context, accountID string, target Ta
 	if err = message.Encode(&buffer); err != nil {
 		return false, err
 	}
+	tx, err := s.writer.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var known bool
+	if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tgdl_message_generations WHERE group_id=? AND message_id=?)`, target.ID, media.MessageID).Scan(&known); err != nil {
+		return false, err
+	}
+	if !known {
+		return false, nil
+	}
 	var status string
-	err = s.writer.QueryRowContext(ctx, `UPDATE tgdl_work SET status=CASE WHEN status IN ('completed','failed') THEN 'pending' ELSE status END,
+	err = tx.QueryRowContext(ctx, `UPDATE tgdl_work SET status=CASE WHEN status IN ('completed','failed') THEN 'pending' ELSE status END,
  body=CASE WHEN status IN ('completed','failed') THEN ? ELSE body END,
  generation=CASE WHEN status IN ('completed','failed') THEN generation+1 ELSE generation END,
  attempts=CASE WHEN status IN ('completed','failed') THEN 0 ELSE attempts END,
@@ -374,10 +388,15 @@ func (s *WorkStore) RequeueLost(ctx context.Context, accountID string, target Ta
 		if accountID == "" {
 			return false, errors.New("the queue item is gone and its account is unknown")
 		}
-		_, _, err = enqueueWork(ctx, s.writer, accountID, target, message, 0, origin)
-		return err == nil, err
+		if _, _, err = enqueueWork(ctx, tx, accountID, target, message, 0, origin); err != nil {
+			return false, err
+		}
+		return true, tx.Commit()
 	}
-	return err == nil && status != "skipped", err
+	if err != nil {
+		return false, err
+	}
+	return status != "skipped", tx.Commit()
 }
 
 func (s *WorkStore) DismissJob(ctx context.Context, key string) (bool, error) {
