@@ -55,6 +55,10 @@ const suggestName = (name) => { const m = String(name || '').trim().match(/^(.*?
 // A suggestion from the name (sports-3 → sports), or else from what the group posts.
 const suggestG = (g) => suggestName(g.name) || g.contentSuggest || '';
 const suggestWhy = (g) => suggestName(g.name) ? 'from its name' : g.contentSuggest ? `shares ${Math.round((g.contentShare || 0) * 100)}% of its pictures and videos with ${g.contentSuggest}` : '';
+// Complete: every message Telegram counts is saved (checked by a full
+// rescan) and no file of them is still to come (likely copies held aside do
+// not count). Unknown file counts are not complete.
+const groupComplete = (g) => !!(g.tgCount && g.lastWalk && g.tgCount - (g.messages - g.deleted) <= 0 && g.filesToGo === 0);
 const natural = (a, b) => String(a).localeCompare(String(b), undefined, { sensitivity: 'base', numeric: true });
 
 async function api(method, url, body) {
@@ -188,14 +192,17 @@ ${ex.finishedAt && !ex.running ? `<div class="muted">Last written ${esc(fmtTime(
   h += viewDownloads();
   h += viewKeeping();
   h += `<div class="card"><h2>Messages captured</h2><div class="muted">${fmtNum(total)} messages saved across ${gs.length} group(s). ${notYet ? `<b>${notYet} group(s) have not had a full rescan yet</b> — use the Rescan tab to capture their history.` : 'Every group has had a full rescan.'} New posts are saved as the monitor sees them.</div>
-<div class="btns"><button class="b" data-act="g-finish-complete" ${gs.some((g) => !g.finishedAt && g.tgCount && g.lastWalk && g.tgCount - (g.messages - g.deleted) <= 0) ? '' : 'disabled'} title="Every group marked ✓ complete is set to finished; rescans then leave it alone">✓ Finish all complete groups</button><span class="muted">Finished groups are skipped by every rescan. To finish or reopen several at once, tick them in Rescan → Choose groups.</span></div>
-<div class="muted">Complete: every message Telegram says the group holds has been saved, checked at each rescan. Groups rescanned before version ix.5 may show a few short: system notices (pins, renames) are only saved from ix.5 on; a new rescan fills them in.</div>
+<div class="btns"><button class="b" data-act="g-finish-complete" ${gs.some((g) => !g.finishedAt && groupComplete(g)) ? '' : 'disabled'} title="Every group marked ✓ complete (all messages and all files saved) is set to finished; rescans then leave it alone">✓ Finish all complete groups</button><span class="muted">Finished groups are skipped by every rescan. To finish or reopen several at once, tick them in Rescan → Choose groups.</span></div>
+<div class="muted">Complete: every message Telegram says the group holds has been saved (checked at each rescan) <b>and</b> every file of those messages is saved. Files waiting as likely copies of saved files do not count against it. “Messages ✓ · N files to go” means the messages are all in but files are still queued or not queued yet. Groups rescanned before version ix.5 may show a few short: system notices (pins, renames) are only saved from ix.5 on; a new rescan fills them in.</div>
 <div class="list"><table><tr><th>Group</th><th>Category</th><th>Messages saved</th><th>Telegram says</th><th>Complete?</th><th>Finished</th><th>Deleted on Telegram</th><th>Files</th><th>Dates</th><th>Last full rescan</th></tr>`;
   for (const g of gs) {
     const saved = g.messages - g.deleted;
     const short = g.tgCount ? g.tgCount - saved : null;
     const complete = short === null ? '<span class="muted" title="Telegram\'s count is read at the next rescan">not checked yet</span>'
-      : short <= 0 ? (g.lastWalk ? '<span class="ok">✓ complete</span>' : '<span class="muted">all seen so far</span>')
+      : short <= 0 ? (!g.lastWalk ? '<span class="muted">all seen so far</span>'
+        : g.filesToGo === undefined ? '<span class="muted" title="The file count appears once the media browser\'s index is built (about a minute after start)">messages ✓ · files not counted yet</span>'
+        : g.filesToGo > 0 ? `<span class="warn" title="Every message is saved, but files of those messages are not: queued, set aside, or not queued yet">messages ✓ · ${fmtNum(g.filesToGo)} file(s) to go</span>`
+        : `<span class="ok">✓ complete</span>${g.filesHeld ? `<div class="muted" title="Not downloaded: each is most likely a copy of a file already saved">${fmtNum(g.filesHeld)} likely copies held</div>` : ''}`)
       : `<span class="warn">${fmtNum(short)} short</span>`;
     const ids = g.maxId ? `<div class="muted" title="Every message number from 1 to the newest is either saved here or confirmed gone on Telegram (checked at the end of each messages pass)">IDs 1–${fmtNum(g.maxId)}: ${fmtNum(Math.min(g.maxId, g.messages + g.gone))} accounted for${g.maxId - g.messages - g.gone > 0 ? `, <span class="warn">${fmtNum(g.maxId - g.messages - g.gone)} unchecked</span>` : ''}</div>` : '';
     const link = g.username ? `<div class="muted"><a href="https://t.me/${esc(g.username)}" target="_blank" rel="noopener">t.me/${esc(g.username)}</a></div>` : g.invite ? `<div class="muted" title="Invite link">${esc(g.invite)}</div>` : '';
@@ -712,9 +719,13 @@ $app.addEventListener('click', async (ev) => {
       if (r.ok) { state.pick.clear(); state.pickOnly = false; } else state.error = errText(r);
       load(); break;
     }
-    case 'g-finish': case 'g-open': { const r = await api('POST', '/api/ix/groups/finished', { groupIds: [id], finished: act === 'g-finish' }); if (!r.ok) state.error = errText(r); load(); break; }
+    case 'g-finish': case 'g-open': {
+      const g = (state.status.groups || []).find((x) => x.id === id);
+      if (act === 'g-finish' && g && g.filesToGo > 0 && !confirm(`${fmtNum(g.filesToGo)} file(s) of this group are not saved yet. Rescans skip finished groups, so files not queued yet would never be downloaded. Finish it anyway?`)) break;
+      const r = await api('POST', '/api/ix/groups/finished', { groupIds: [id], finished: act === 'g-finish' }); if (!r.ok) state.error = errText(r); load(); break;
+    }
     case 'g-finish-complete': {
-      const ids = (state.status.groups || []).filter((g) => !g.finishedAt && g.tgCount && g.lastWalk && g.tgCount - (g.messages - g.deleted) <= 0).map((g) => g.id);
+      const ids = (state.status.groups || []).filter((g) => !g.finishedAt && groupComplete(g)).map((g) => g.id);
       if (!ids.length || !confirm(`Mark ${ids.length} complete group(s) as finished? Rescans will leave them alone (you can undo each one).`)) break;
       const r = await api('POST', '/api/ix/groups/finished', { groupIds: ids, finished: true }); if (!r.ok) state.error = errText(r); load(); break;
     }
