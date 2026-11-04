@@ -28,7 +28,9 @@ jobs:
           unformatted="$(gofmt -l .)"
           if [ -n "$unformatted" ]; then echo "$unformatted"; exit 1; fi
       - run: go vet ./...
-      - run: go test -race ./...
+      # The archive package alone runs for several minutes under the race
+      # detector on a GitHub runner; the default 10-minute limit is too short.
+      - run: go test -race -timeout 25m ./...
       - name: Build the production server
         run: CGO_ENABLED=0 go build -trimpath -o tgdl-server ./cmd/tgdl-server
       - name: Launcher from outside the checkout
