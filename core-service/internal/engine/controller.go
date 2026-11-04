@@ -1024,7 +1024,7 @@ func (c *Controller) worker(run *running, index int) {
 		poll = workerIdlePoll
 		if woken {
 			woken = false
-			// disabled
+			c.wake(run) // there may be more: let the next idle worker look
 		}
 		ctx, cancel := context.WithCancel(run.ctx)
 		ctx = WithOrigin(ctx, work.Origin)
