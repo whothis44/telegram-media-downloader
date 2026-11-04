@@ -345,10 +345,11 @@ function resetFeed() {
 new IntersectionObserver((e) => { if (e[0].isIntersecting && S.tab === 'browse') loadMore(); }, { rootMargin: '800px' }).observe($('#sentinel'));
 
 $('#view').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; S.view = b.dataset.v; $$('#view button').forEach((x) => x.classList.toggle('on', x === b)); resetFeed(); });
-let qTimer; $('#q').addEventListener('input', () => { clearTimeout(qTimer); qTimer = setTimeout(() => { S.q = $('#q').value.trim(); resetFeed(); }, 350); });
+// A new search replaces "more like this" and a subject.
+let qTimer; $('#q').addEventListener('input', () => { clearTimeout(qTimer); qTimer = setTimeout(() => { S.q = $('#q').value.trim(); S.like = ''; S.thing = ''; resetFeed(); }, 350); });
 for (const id of ['type', 'status', 'sort']) $('#' + id).addEventListener('change', () => { S[id] = $('#' + id).value; resetFeed(); });
 $('#dups').addEventListener('change', () => { S.dups = $('#dups').checked; resetFeed(); });
-$('#qml').addEventListener('change', () => { S.ml = $('#qml').checked; S.like = ''; resetFeed(); });
+$('#qml').addEventListener('change', () => { S.ml = $('#qml').checked; S.like = ''; S.thing = ''; resetFeed(); });
 
 // A card's menu is placed over the page (cards clip what overflows them),
 // below the button, or above it when there is no room below.

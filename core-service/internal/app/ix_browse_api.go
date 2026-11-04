@@ -399,33 +399,36 @@ func (m *ixModel) postMatches(pi int32, f ixFeedQuery, hits map[int32]bool) bool
 	if f.Dups && (p.Family < 0 || len(m.Families[p.Family].Posts) < 2) {
 		return false
 	}
+	if f.Type == "album" && len(p.Items) < 2 {
+		return false
+	}
+	if f.Type == "" || f.Type == "album" {
+		if f.Status == "" {
+			return true
+		}
+	}
+	// One file must be of the kind and in the state asked for.
+	for _, ii := range p.Items {
+		if ixItemMatches(&m.Items[ii], f) {
+			return true
+		}
+	}
+	return false
+}
+
+// ixItemMatches: a file of the kind (photo, video, other) and state asked for.
+func ixItemMatches(it *ixMItem, f ixFeedQuery) bool {
 	switch f.Type {
 	case "photo", "video":
-		for _, ii := range p.Items {
-			if m.Items[ii].Type == f.Type {
-				return true
-			}
+		if it.Type != f.Type {
+			return false
 		}
-		return false
-	case "album":
-		return len(p.Items) > 1
 	case "other":
-		for _, ii := range p.Items {
-			if t := m.Items[ii].Type; t != "photo" && t != "video" {
-				return true
-			}
+		if it.Type == "photo" || it.Type == "video" {
+			return false
 		}
-		return false
 	}
-	if f.Status != "" {
-		for _, ii := range p.Items {
-			if m.Items[ii].Status == f.Status {
-				return true
-			}
-		}
-		return false
-	}
-	return true
+	return f.Status == "" || it.Status == f.Status
 }
 
 func (a *App) handleIxBrowseFeed(w http.ResponseWriter, r *http.Request) {
@@ -504,17 +507,19 @@ func (a *App) handleIxBrowseFeed(w http.ResponseWriter, r *http.Request) {
 			}
 			for _, ii := range m.Posts[pi].Items {
 				it := &m.Items[ii]
-				if f.Type == "photo" || f.Type == "video" {
-					if it.Type != f.Type {
-						continue
-					}
+				if !ixItemMatches(it, f) {
+					continue
 				}
 				c := it.Cluster
 				if seen[c] {
 					continue
 				}
 				seen[c] = true
-				list = append(list, tile{m.Clusters[c].Canon, m.Posts[pi].Origin})
+				show := m.Clusters[c].Canon
+				if f.Status != "" {
+					show = ii // the copy in the state asked for, not the best one
+				}
+				list = append(list, tile{show, m.Posts[pi].Origin})
 			}
 		}
 		sort.SliceStable(list, func(i, j int) bool {

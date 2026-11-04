@@ -1253,5 +1253,5 @@ func (a *App) ixMLSearch(ctx context.Context, m *ixModel, text, like string, lim
 		}
 		q = v
 	}
-	return box.store.nearest(q, limit, keep, like), nil
+	return ixNearestUnique(m, &box.store, q, limit, ixSkipCluster(m, like, keep)), nil // one hit per duplicate set (ix_search.go)
 }

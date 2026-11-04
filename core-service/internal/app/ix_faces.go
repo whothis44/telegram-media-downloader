@@ -531,7 +531,19 @@ func (a *App) ixPeople(ctx context.Context) ([]ixPerson, error) {
 			out = append(out, p)
 		}
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return out, err
+	}
+	rows.Close()
+	// Copies of one file count once.
+	a.ixPeopleFiles(ctx, a.ixModelLast(), out)
+	sort.SliceStable(out, func(i, j int) bool {
+		if (out[i].Name == "") != (out[j].Name == "") {
+			return out[i].Name != ""
+		}
+		return out[i].Files > out[j].Files
+	})
+	return out, nil
 }
 
 // ixPersonChange: rename, hide, show, merge (into another person), or take

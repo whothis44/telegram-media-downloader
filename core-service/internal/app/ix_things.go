@@ -63,6 +63,7 @@ type ixThing struct {
 	Count int     `json:"count"`
 	thr   float32 // likeness at or above which a picture shows it
 	vec   []float32
+	keys  []string // the files at or above thr (copies of one file included)
 }
 
 type ixThingsCache struct {
@@ -113,7 +114,7 @@ func (a *App) ixThings(ctx context.Context) ([]ixThing, error) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
 	if tc.stamp == stamp && tc.list != nil {
-		return tc.list, nil
+		return ixThingsCounted(a.ixModelLast(), tc.list), nil
 	}
 	var list []ixThing
 	for _, l := range labels {
@@ -126,11 +127,21 @@ func (a *App) ixThings(ctx context.Context) ([]ixThing, error) {
 			}
 			tc.text[k] = v
 		}
-		thr, n := box.store.outliers(v, 4)
-		list = append(list, ixThing{Label: l, Count: n, thr: thr, vec: v})
+		sc := box.store.scan(v, 4, 0, nil, true)
+		list = append(list, ixThing{Label: l, Count: len(sc.above), thr: sc.thr, vec: v, keys: sc.above})
 	}
 	tc.stamp, tc.list = stamp, list
-	return list, nil
+	return ixThingsCounted(a.ixModelLast(), list), nil
+}
+
+// ixThingsCounted counts each subject's files as duplicate sets, by the
+// browser's current model (copies of one file count once).
+func ixThingsCounted(m *ixModel, list []ixThing) []ixThing {
+	out := append([]ixThing(nil), list...)
+	for i := range out {
+		out[i].Count = ixDistinctFiles(m, out[i].keys)
+	}
+	return out
 }
 
 // outliers says how alike a picture must be to q to stand out, and how
@@ -153,11 +164,7 @@ func (s *ixEmbStore) outliers(q []float32, k float64) (float32, int) {
 		}
 		sims = append(sims, float64(ixDot8(qq, s.vecs[i*d:(i+1)*d]))/float64(qn*s.norms[i]))
 	}
-	sorted := append([]float64(nil), sims...)
-	sort.Float64s(sorted)
-	med, p25 := sorted[len(sorted)/2], sorted[len(sorted)/4]
-	sd := math.Max((med-p25)/0.674, 0.01)
-	thr := med + k*sd
+	thr := ixOutlierThr(sims, k)
 	count := 0
 	for _, c := range sims {
 		if c >= thr {
@@ -165,6 +172,19 @@ func (s *ixEmbStore) outliers(q []float32, k float64) (float32, int) {
 		}
 	}
 	return float32(thr), count
+}
+
+// ixOutlierThr is outliers' rule on a list of likenesses (in any order):
+// the median plus k deviations, estimated from the first quartile.
+func ixOutlierThr(sims []float64, k float64) float64 {
+	if len(sims) == 0 {
+		return 2
+	}
+	sorted := append([]float64(nil), sims...)
+	sort.Float64s(sorted)
+	med, p25 := sorted[len(sorted)/2], sorted[len(sorted)/4]
+	sd := math.Max((med-p25)/0.674, 0.01)
+	return med + k*sd
 }
 
 func (a *App) handleIxThings(w http.ResponseWriter, r *http.Request) {
@@ -187,7 +207,13 @@ func (a *App) ixThingHits(ctx context.Context, label string, limit int, keep fun
 	for _, t := range list {
 		if strings.EqualFold(t.Label, label) {
 			var out []ixEmbHit
-			for _, h := range a.ixMLBox().store.nearest(t.vec, limit, keep, "") {
+			var hits []ixEmbHit
+			if m := a.ixModelLast(); m != nil {
+				hits = ixNearestUnique(m, &a.ixMLBox().store, t.vec, limit, keep) // copies of one file once
+			} else {
+				hits = a.ixMLBox().store.nearest(t.vec, limit, keep, "")
+			}
+			for _, h := range hits {
 				if h.Sim >= t.thr {
 					out = append(out, h)
 				}

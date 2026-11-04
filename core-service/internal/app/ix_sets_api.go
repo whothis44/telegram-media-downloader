@@ -10,7 +10,7 @@ import (
 // The browser's media sets and its image-recognition search.
 
 func registerIxSetRoutes(mux *http.ServeMux, a *App) {
-	h := func(f http.HandlerFunc) http.Handler { return f }
+	h := func(f http.HandlerFunc) http.Handler { return a.requireAdmin(f) }
 	mux.Handle("GET /api/ix/browse/set", h(a.handleIxBrowseSet))
 	mux.Handle("POST /api/ix/browse/set/post", h(a.handleIxSetPost))
 	mux.Handle("POST /api/ix/browse/set/item", h(a.handleIxSetItem))
