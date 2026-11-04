@@ -329,6 +329,100 @@ func TestIxPersonCoverIsClearFaceOrChosen(t *testing.T) {
 	}
 }
 
+func TestIxFaceRegroupKeepsDecisions(t *testing.T) {
+	a, ctx := ix8App(t, map[string]any{})
+	e := func(d int) map[int]float64 { return map[int]float64{d: 1} }
+	var faces []ix10Face
+	put := func(id int64, key string, person int64, vec map[int]float64, score float64) {
+		faces = append(faces, ix10Face{id: id, key: key, person: person, vec: vec, score: score, blur: -1}) // as stored before: not measured
+	}
+	for i := int64(1); i <= 4; i++ {
+		put(i, fmt.Sprint("ka", i), 1, e(1), 0.95) // Ann (named)
+	}
+	put(5, "ka5", 1, e(1), 0.95)  // two faces of one picture in Ann
+	put(6, "ka5", 1, e(1), 0.95)  //
+	put(7, "kx", 1, e(5), 0.72)   // a poor face of someone else dragged into Ann
+	put(8, "kb1", 2, e(2), 0.95)  // person 2 (no decisions)
+	put(9, "kb2", 2, e(2), 0.95)  //
+	put(10, "kb3", 2, e(2), 0.95) //
+	put(11, "kj", 2, e(2), 0.95)  // blurred (its crop is flat)
+	put(12, "kc1", 3, e(3), 0.95) // person 3, hidden
+	put(13, "kc2", 3, e(3), 0.95)
+	put(14, "kc3", 3, e(3), 0.95)
+	put(15, "kd1", 4, e(4), 0.95) // person 4: two files only
+	put(16, "kd2", 4, e(4), 0.95)
+	put(17, "kr", -1, e(1), 0.95) // taken out under the old rule
+	put(18, "krr", 0, e(2), 0.95) // taken out of person 2
+	ix10Put(t, a, map[int64]string{1: "Ann", 2: "", 3: "", 4: "", 5: ""}, faces)
+	for _, q := range []string{`UPDATE ix_people SET hidden=1 WHERE id=3`, `UPDATE ix_people SET merged_into=1 WHERE id=5`,
+		`UPDATE ix_faces SET manual=1 WHERE id=17`, `INSERT INTO ix_face_reject(face,person) VALUES(18,2)`} {
+		if _, err := a.db.Writer.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sharp, _ := jpeg.Decode(bytes.NewReader(ix10FacePicture()))
+	flat, _ := jpeg.Decode(bytes.NewReader(ix10FlatPicture()))
+	box := ixFaceFound{X1: 0.1, Y1: 0.1, X2: 0.4, Y2: 0.5}
+	a.ixWriteFaceCrop(1, sharp, box)
+	a.ixWriteFaceCrop(11, flat, box)
+
+	check := func(round string) {
+		t.Helper()
+		person := map[int64]int64{}
+		rows, _ := a.db.Reader.Query(`SELECT id, person FROM ix_faces`)
+		for rows.Next() {
+			var id, p int64
+			_ = rows.Scan(&id, &p)
+			person[id] = p
+		}
+		rows.Close()
+		want := map[int64]int64{1: 1, 2: 1, 3: 1, 4: 1, 7: 0, 8: 2, 9: 2, 10: 2, 11: 0, 12: 3, 13: 3, 14: 3, 15: 0, 16: 0, 17: -1, 18: 0}
+		for id, p := range want {
+			if person[id] != p {
+				t.Fatalf("%s: face %d is with %d, not %d (%v)", round, id, person[id], p, person)
+			}
+		}
+		if (person[5] == 1) == (person[6] == 1) || person[5]+person[6] != 1 {
+			t.Fatalf("%s: faces of one picture: %d %d", round, person[5], person[6])
+		}
+		var name string
+		var hidden bool
+		_ = a.db.Reader.QueryRow(`SELECT name FROM ix_people WHERE id=1`).Scan(&name)
+		_ = a.db.Reader.QueryRow(`SELECT hidden FROM ix_people WHERE id=3`).Scan(&hidden)
+		if name != "Ann" || !hidden {
+			t.Fatalf("%s: decisions lost: %q %v", round, name, hidden)
+		}
+		if a.ixFaceMetaGet(ctx, "rules") != ixFaceRulesVersion || a.ixFaceMetaGet(ctx, "regroup") != "" {
+			t.Fatalf("%s: not finished", round)
+		}
+	}
+	if err := a.ixFaceRegroupRun(ctx); err != nil {
+		t.Fatal(err)
+	}
+	check("after the update")
+	// Faces were measured from their crops (or left unknown without one).
+	var px1, blur1, blur11, blur8 float64
+	_ = a.db.Reader.QueryRow(`SELECT px, blur FROM ix_faces WHERE id=1`).Scan(&px1, &blur1)
+	_ = a.db.Reader.QueryRow(`SELECT blur FROM ix_faces WHERE id=11`).Scan(&blur11)
+	_ = a.db.Reader.QueryRow(`SELECT blur FROM ix_faces WHERE id=8`).Scan(&blur8)
+	if px1 < ixFaceCorePx || blur1 < ixFaceCoreBlur || blur11 >= ixFaceJunkBlur || blur8 != ixFaceBlurUnknown {
+		t.Fatalf("measured: %.0f %.0f %.0f %.0f", px1, blur1, blur11, blur8)
+	}
+	// Asked again from the People tab: the same.
+	if err := a.ixFaceMetaSet(ctx, "regroup", "pending"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.ixFaceRegroupRun(ctx); err != nil {
+		t.Fatal(err)
+	}
+	check("asked again")
+	// Nothing left to do: no background work is started.
+	a.ixFaceRegroupKick(ctx)
+	if a.ixPeopleBox().regrouping {
+		t.Fatal("started with nothing to do")
+	}
+}
+
 func TestIxFacesSeenTogetherAreTwoPeople(t *testing.T) {
 	srv := ix8FakeML(t)
 	defer srv.Close()

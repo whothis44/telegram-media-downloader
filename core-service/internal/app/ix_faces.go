@@ -203,6 +203,17 @@ func (s *ixFaceStore) inShotLocked(person, shot, skip int64) bool {
 	return false
 }
 
+// vecOf gives a copy of a face's embedding and its kind.
+func (s *ixFaceStore) vecOf(id int64) ([]int8, int8, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	i, ok := s.index[id]
+	if !ok || s.norms[i] == 0 {
+		return nil, 0, false
+	}
+	return append([]int8(nil), s.vecs[int(i)*s.dim:int(i+1)*s.dim]...), s.tier[i], true
+}
+
 // dropLocked forgets a face deleted from the table.
 func (s *ixFaceStore) dropLocked(id int64) {
 	if i, ok := s.index[id]; ok {
@@ -280,6 +291,7 @@ func ixCosF(a, b []float32) float32 {
 
 func (a *App) ixFaceTask(ctx context.Context, c *ixMLClient) *ixMLTask {
 	a.ixMLDoneSet(ctx, "faces", ixFaceModel, `SELECT key FROM ix_face_done WHERE model=?`)
+	a.ixFaceRegroupKick(ctx) // faces stored under older rules are grouped again
 	return &ixMLTask{
 		name: "faces", model: ixFaceModel, errTable: "ix_ml_err", par: 3,
 		wanted: func(it *ixMItem) bool { return it.Type == "photo" || it.Type == "video" },
@@ -488,8 +500,9 @@ func (a *App) ixGroupFace(ctx context.Context, id int64, v []int8) error {
 //     (copies of one file, and frames of one video, count once). It takes
 //     those faces with it, and the weak ones that are clearly alike.
 //
-// reuse, when set, may give an existing empty person for the new one.
-func (a *App) ixGroupFaceLocked(ctx context.Context, id int64, v []int8, unit func(string) string, reuse func([]int64) int64) error {
+// reuse, when set, may give an existing empty person for the new one (and
+// the faces that may go to them).
+func (a *App) ixGroupFaceLocked(ctx context.Context, id int64, v []int8, unit func(string) string, reuse func([]int64) (int64, []int64)) error {
 	box := a.ixMLBox()
 	s := &box.faces
 	rejected := a.ixFaceRejects(ctx, id) // people a person took this face out of
@@ -548,7 +561,7 @@ func (a *App) ixGroupFaceLocked(ctx context.Context, id int64, v []int8, unit fu
 	}
 	var person int64
 	if reuse != nil {
-		person = reuse(take)
+		person, take = reuse(take)
 	}
 	if person == 0 {
 		now := ixNowMs()
@@ -897,8 +910,10 @@ func (a *App) handleIxPeople(w http.ResponseWriter, r *http.Request) {
 	// Faces too small or blurred to group are counted on their own.
 	var loose, unusable int
 	_ = a.db.Reader.QueryRowContext(r.Context(), `SELECT COALESCE(SUM(NOT `+ixFaceJunkSQL+`),0), COALESCE(SUM(`+ixFaceJunkSQL+`),0) FROM ix_faces WHERE person=0`).Scan(&loose, &unusable)
+	a.ixFaceRegroupKick(r.Context()) // also when the recognition service is away
 	writeJSON(w, http.StatusOK, map[string]any{"people": list, "ungrouped": loose, "unusable": unusable,
-		"suggest": a.ixPeopleSuggestions(r.Context(), list, 12), "status": a.ixMLStatusNow(r.Context()).Tasks["faces"]})
+		"suggest": a.ixPeopleSuggestions(r.Context(), list, 12), "regroup": a.ixFaceRegroupStatus(r.Context()),
+		"status": a.ixMLStatusNow(r.Context()).Tasks["faces"]})
 }
 
 func (a *App) handleIxPerson(w http.ResponseWriter, r *http.Request) {
@@ -972,6 +987,14 @@ func (a *App) handleIxPersonChange(w http.ResponseWriter, r *http.Request) {
 			return n
 		}
 		return 0
+	}
+	if toString(b["action"]) == "regroup" { // all faces, not one person
+		if err := a.ixFaceRegroupAsk(r.Context()); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		return
 	}
 	if err := a.ixPersonChange(r.Context(), id, toString(b["action"]), toString(b["name"]), num("into"), num("face")); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())

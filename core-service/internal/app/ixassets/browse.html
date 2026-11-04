@@ -542,6 +542,7 @@ async function loadPeople() {
   const st = r.data.status || {};
   let h = st.on === false && !list.length ? '<p class="muted">Faces are off. Turn them on in Archive → Settings → Image recognition.</p>' : '';
   if (st.pending) h += `<p class="muted">${st.pending.toLocaleString()} file(s) still to look at for faces.</p>`;
+  if (r.data.regroup) h += `<p class="muted">${esc(r.data.regroup)}</p>`;
   // "Same person?": people whose faces look close, but not close enough to merge unasked.
   const byId = Object.fromEntries(list.map((p) => [p.id, p]));
   const sug = (r.data.suggest || []).filter((s) => byId[s.a] && byId[s.b]);
@@ -554,7 +555,14 @@ async function loadPeople() {
   if (hidden.length) h += `<details style="margin-top:12px"><summary>${hidden.length} hidden</summary><div class="grid media" style="grid-template-columns:repeat(auto-fill,minmax(120px,1fr))">${hidden.map(card).join('')}</div></details>`;
   if (r.data.ungrouped) h += `<p class="muted">${r.data.ungrouped.toLocaleString()} face(s) not grouped with anyone yet.</p>`;
   if (r.data.unusable) h += `<p class="muted">${r.data.unusable.toLocaleString()} face(s) too small or too blurred to group.</p>`;
+  if (list.length && !r.data.regroup) h += `<p><button class="link" id="people-regroup">Group all faces again</button></p>`;
   $('#people').innerHTML = h;
+  if ($('#people-regroup')) $('#people-regroup').onclick = async () => {
+    if (!confirm('Group all faces again with the current rules? Names, merges, hidden people, chosen pictures and faces you took out are kept. It runs in the background.')) return;
+    const x = await api('POST', '/api/ix/browse/person/0', { action: 'regroup' });
+    toast(x.ok ? 'Grouping again in the background.' : errText(x));
+    if (x.ok) loadPeople();
+  };
   P.list = list;
   $$('#people [data-pid]').forEach((b) => b.onclick = () => showPerson(Number(b.dataset.pid)));
   $$('#people [data-pair]').forEach((row) => {
