@@ -2,11 +2,15 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"math/rand"
+	"net/http/httptest"
 	"sort"
+	"strings"
 	"testing"
+	"time"
 )
 
 // A synthetic world of self-filmed, low-quality faces (all invented: random
@@ -334,5 +338,59 @@ func TestIxFaceGatesFollowTheArchive(t *testing.T) {
 	// Unknown sizes and sharpness are left out.
 	if g := ixFaceGatesFrom(spread(300, 0.85, 0.99), make([]float32, 300), spread(300, -2, -1)); g != ixFaceGatesFixed {
 		t.Fatalf("unknown: %+v", g)
+	}
+}
+
+// Why faces are loose, in numbers only.
+func TestIxFaceLooseBreakdown(t *testing.T) {
+	a, ctx := ix8App(t, map[string]any{})
+	e := func(d int) map[int]float64 { return map[int]float64{d: 1} }
+	like := func(w float64) map[int]float64 { return map[int]float64{1: w, 20: math.Sqrt(1 - w*w)} }
+	ix10Put(t, a, map[int64]string{1: ""}, []ix10Face{
+		{id: 1, key: "k1", person: 1, vec: e(1)}, // a person
+		{id: 2, key: "k2", person: 1, vec: e(1)},
+		{id: 3, key: "k3", person: 1, vec: e(1)},
+		{id: 4, key: "k4", vec: e(1), px: 30, blur: 300},                            // small
+		{id: 5, key: "k5", vec: e(1), px: 180, blur: 5},                             // blurry
+		{id: 6, key: "k6", vec: like(0.55), score: 0.75},                            // weak (score), 0.55 alike to the person
+		{id: 7, key: "k7", vec: e(7), px: 60, blur: 30},                             // weak (size, sharpness), unlike anyone
+		{id: 8, key: "k8", vec: e(8)},                                               // good, alone
+		{id: 9, key: "k9", vec: e(9)},                                               // good, one look-alike in another file
+		{id: 10, key: "k10", vec: e(9)},                                             //
+		{id: 11, key: "k11", vec: like(0.9)},                                        // good, alike to the person
+		{id: 12, key: "k12", vec: map[int]float64{9: 0.55, 30: 0.835}, score: 0.72}, // weak, 0.55 alike to 9 and 10: too little to count
+	})
+	l := a.ixFaceLooseNow(ctx, time.Minute, 10*time.Second)
+	if l == nil {
+		t.Fatal("not worked out")
+	}
+	want := ixFaceLoose{Faces: 12, Loose: 9, Small: 1, Blurry: 1, Weak: 3, WeakScore: 2, WeakSize: 1, WeakSharp: 1, WeakNear: 1, Good: 4, Alone: 1, Few: 2, Ready: 1}
+	got := *l
+	got.Score, got.Px, got.Blur, got.Gates = [3]float64{}, [3]float64{}, [3]float64{}, ixFaceGates{}
+	if got != want {
+		t.Fatalf("breakdown\n got %+v\nwant %+v", got, want)
+	}
+	if l.Gates != ixFaceGatesFixed || l.Px != [3]float64{60, 180, 180} || l.Blur != [3]float64{30, 300, 300} || l.Score != [3]float64{0.75, 0.95, 0.95} {
+		t.Fatalf("spread %+v %+v %+v gates %+v", l.Score, l.Px, l.Blur, l.Gates)
+	}
+	// The report has it, as numbers only.
+	rep := a.ixDiagnostics(ctx)
+	for _, s := range []string{
+		"people 1 · faces 12 (9 not grouped)",
+		"  not grouped 9: unusable 2 (small 1, blurry 1) · weak 3 (score 2, size 1, sharpness 1; 1 only 0.5-0.6 alike to a person) · good 4 (alone 1, look-alikes in <3 files 2, could group now 1)",
+		"  all 12 faces p10/p50/p90: score 0.75/0.95/0.95 · box 60/180/180 px · sharpness 30/300/300 · start gates now: score 0.80, box 80 px, sharpness 50",
+	} {
+		if !strings.Contains(rep, s+"\n") {
+			t.Fatalf("report lacks %q:\n%s", s, rep)
+		}
+	}
+	// And the People tab.
+	rec := httptest.NewRecorder()
+	a.handleIxPeople(rec, httptest.NewRequest("GET", "/api/ix/browse/people", nil))
+	var body struct {
+		Why *ixFaceLoose `json:"why"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body.Why == nil || body.Why.Few != 2 || body.Why.Gates.Blur != 50 {
+		t.Fatalf("people tab: %v %s", err, rec.Body.String())
 	}
 }

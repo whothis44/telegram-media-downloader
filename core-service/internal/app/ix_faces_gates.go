@@ -127,4 +127,3 @@ func (s *ixFaceStore) gatesNow() ixFaceGates {
 	defer s.mu.RUnlock()
 	return s.gates
 }
-

@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Faces and people (optional, off unless switched on). Immich's face model
@@ -990,6 +991,7 @@ func (a *App) handleIxPeople(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"people": list, "total": total, "ungrouped": loose, "unusable": unusable,
 		"suggest": suggest, "regroup": a.ixFaceRegroupStatus(r.Context()),
+		"why":    a.ixFaceLooseNow(r.Context(), 2*time.Minute, 2*time.Second), // why faces are loose (numbers only; nil while worked out)
 		"status": a.ixMLStatusNow(r.Context()).Tasks["faces"]})
 }
 

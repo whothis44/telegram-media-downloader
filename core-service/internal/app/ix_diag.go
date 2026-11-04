@@ -219,6 +219,11 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 	var people, faces, ungrouped int
 	_ = a.db.Reader.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM ix_people WHERE merged_into=0), COUNT(*), COALESCE(SUM(person=0),0) FROM ix_faces`).Scan(&people, &faces, &ungrouped)
 	line("people %d · faces %d (%d not grouped)", people, faces, ungrouped)
+	if faces > 0 {
+		for _, l := range ixFaceLooseLines(a.ixFaceLooseNow(ctx, time.Minute, time.Minute)) {
+			line("%s", l)
+		}
+	}
 	dl := a.ixDeadlineEstimate(ctx, false)
 	line("still to download: %d distinct files / %d MB (+%d copies that come free)", dl.ToGetFiles, dl.ToGetBytes>>20, dl.Copies)
 	line("deadline order %s (active %v) · queued %d files / %d MB · speed %.1f MB/h (day), %.1f MB/h (hour) · finishes %s · set aside by band %v · groups not fully read %d",
