@@ -895,8 +895,14 @@ func (a *App) handleIxPeople(w http.ResponseWriter, r *http.Request) {
 	var loose, unusable int
 	_ = a.db.Reader.QueryRowContext(r.Context(), `SELECT COALESCE(SUM(NOT `+ixFaceJunkSQL+`),0), COALESCE(SUM(`+ixFaceJunkSQL+`),0) FROM ix_faces WHERE person=0`).Scan(&loose, &unusable)
 	a.ixFaceRegroupKick(r.Context()) // also when the recognition service is away
-	writeJSON(w, http.StatusOK, map[string]any{"people": list, "ungrouped": loose, "unusable": unusable,
-		"suggest": a.ixPeopleSuggestions(r.Context(), list, 12), "regroup": a.ixFaceRegroupStatus(r.Context()),
+	suggest := a.ixPeopleSuggestions(r.Context(), list, 12)
+	total := len(list)
+	if q := r.URL.Query(); q.Get("top") != "" || q.Get("q") != "" {
+		top, _ := strconv.Atoi(q.Get("top"))
+		list, total = ixPeopleTop(list, q.Get("q"), top) // the sidebar's list
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"people": list, "total": total, "ungrouped": loose, "unusable": unusable,
+		"suggest": suggest, "regroup": a.ixFaceRegroupStatus(r.Context()),
 		"status": a.ixMLStatusNow(r.Context()).Tasks["faces"]})
 }
 

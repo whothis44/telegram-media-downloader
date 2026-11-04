@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Archive browser</title>
 <style>
+.pface{width:22px;height:22px;border-radius:50%;object-fit:cover;vertical-align:middle;margin-right:6px}
 :root{--bg:#fff;--fg:#1f2328;--muted:#5d6670;--line:#d9dde3;--soft:#f3f5f7;--sunk:#e7ebef;--accent:#2481cc;--accent-fg:#fff;--ok:#1a7f37;--warn:#9a6700;--bad:#cf222e;--bubble:#fff;--bubble-line:#e3e7eb;--chatbg:#e6ebee;--new:#8250df}
 @media (prefers-color-scheme:dark){:root{--bg:#17212b;--fg:#e7edf3;--muted:#9aa7b4;--line:#2b3a49;--soft:#1f2c3a;--sunk:#24313f;--accent:#5eaaf0;--accent-fg:#0d1620;--ok:#4cc26a;--warn:#e3b341;--bad:#ff7b72;--bubble:#182533;--bubble-line:#26394b;--chatbg:#0e1621;--new:#c297ff}}
 *{box-sizing:border-box}html,body{margin:0;background:var(--bg);color:var(--fg);font:14.5px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
@@ -13,7 +14,7 @@ a{color:var(--accent)}button,input,select{font:inherit;color:inherit}
 header.top{position:sticky;top:0;z-index:20;background:var(--bg);border-bottom:1px solid var(--line);padding:8px 16px;display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center}
 header.top h1{font-size:18px;margin:0;white-space:nowrap}header.top .grow{flex:1}
 .tabs{display:flex;gap:4px;flex-wrap:wrap}.tab{border:1px solid var(--line);background:var(--soft);border-radius:8px;padding:5px 11px;cursor:pointer;font-size:13.5px}
-.tab.on{background:var(--accent);border-color:var(--accent);color:var(--accent-fg);font-weight:600}
+.tab.on{background:var(--accent);border-color:var(--accent);color:var(--accent-fg);font-weight:600}.tab.dis{opacity:.5;cursor:help}
 .tab .n{opacity:.8;margin-left:4px;font-size:12px}
 .layout{display:grid;grid-template-columns:250px minmax(0,1fr);min-height:calc(100vh - 50px)}
 aside{border-right:1px solid var(--line);padding:10px 8px 40px;overflow:auto;max-height:calc(100vh - 50px);position:sticky;top:50px}
@@ -43,6 +44,7 @@ button.b:disabled{opacity:.5;cursor:default}button.link{border:0;background:none
 .badge{font-size:11.5px;font-weight:600;padding:1px 7px;border-radius:999px;border:1px solid var(--line);white-space:nowrap;color:var(--muted);background:var(--bg)}
 .badge.rep{color:var(--accent);border-color:var(--accent);cursor:pointer}.badge.merged{color:var(--new);border-color:var(--new)}.badge.del{color:var(--bad);border-color:var(--bad)}
 .badge.set{color:var(--new);border-color:var(--new);cursor:pointer}.badge.held{color:var(--warn);border-color:var(--warn)}
+.badge.why{color:var(--ok);border-color:var(--ok)}.badge.weak{color:var(--muted);border-style:dashed}
 .tile .lab.sim{left:auto;right:5px;bottom:auto;top:5px}.tile.fixed{outline:2px solid var(--accent);outline-offset:-2px}.fixmode .tile{cursor:crosshair}
 .setsec{margin:12px 0 4px;font-size:14px}#sd-files .mosaic{grid-template-columns:repeat(auto-fill,minmax(104px,1fr));background:none}.setsec .muted{font-weight:400}.badge.miss{color:var(--bad);border-color:var(--bad)}
 .mosaic{display:grid;gap:2px;background:var(--line)}
@@ -53,6 +55,8 @@ button.b:disabled{opacity:.5;cursor:default}button.link{border:0;background:none
 .tile img{width:100%;height:100%;object-fit:cover;display:block}
 .tile .lab{position:absolute;left:5px;bottom:5px;font-size:11px;font-weight:600;padding:1px 6px;border-radius:6px;background:rgba(0,0,0,.6);color:#fff}
 .tile .lab.r{left:auto;right:5px}.tile .lab.t{bottom:auto;top:5px}
+.tile .lab.like{left:auto;right:5px;bottom:27px;cursor:pointer;display:none;font-size:13px;padding:0 7px}.tile:hover .lab.like,.tile:focus .lab.like{display:block}
+@media (hover:none){.tile .lab.like{display:block}}
 .tile .lab.new{background:var(--new)}.tile .lab.held{background:#9a6700}.tile .lab.miss{background:#a4262c}
 .tile.held img,.tile.missing img{filter:blur(1.5px) grayscale(.3);opacity:.75}
 .tile .doc{display:flex;align-items:center;justify-content:center;height:100%;padding:8px;text-align:center;font-size:12px;color:var(--muted);word-break:break-all}
@@ -99,8 +103,8 @@ mark{background:#fff1a8;color:#111}
     <button class="tab" data-tab="chat">Read a chat</button>
     <button class="tab" data-tab="review">Review look-alikes<span class="n" id="n-review"></span></button>
     <button class="tab" data-tab="organise">Collections &amp; files</button>
-    <button class="tab" data-tab="people" id="tab-people" hidden>People</button>
-    <button class="tab" data-tab="things" id="tab-things" hidden>Things</button>
+    <button class="tab dis" data-tab="people" id="tab-people" aria-disabled="true" title="Faces are off: turn them on in Archive → Settings → Image recognition">People</button>
+    <button class="tab dis" data-tab="things" id="tab-things" aria-disabled="true" title="Image recognition is off: turn it on in Archive → Settings → Image recognition">Things</button>
     <button class="tab" data-tab="entities">Links &amp; wallets</button>
   </nav>
   <span class="grow"></span>
@@ -119,11 +123,16 @@ mark{background:#fff1a8;color:#111}
           <button data-v="media" title="One tile per picture or video, duplicates folded">Media grid</button>
         </div>
         <input class="t search" id="q" type="search" placeholder="Search captions, messages, file names, text in pictures and speech">
-        <label class="chk" id="qml-wrap" hidden title="Search what pictures and videos show (image recognition), in any language the model knows"><input type="checkbox" id="qml"> by what they show</label>
+        <div class="seg" id="match" hidden title="What the search looks at">
+          <button data-m="words" title="Captions, messages, text in pictures, speech and file names">Words</button>
+          <button data-m="looks" title="What pictures and videos show (image recognition), in any language the model knows">Looks</button>
+          <button data-m="both" class="on" title="Words and looks together, best match first">Both</button>
+        </div>
         <select class="t" id="type"><option value="">All kinds</option><option value="photo">Pictures</option><option value="video">Videos</option><option value="album">Albums</option><option value="other">Files, audio</option></select>
         <select class="t" id="status"><option value="">Any state</option><option value="held">Held back (likely copies)</option><option value="missing">Not downloaded</option><option value="subst">Same file as another upload</option></select>
-        <select class="t" id="sort"><option value="new">Newest first</option><option value="old">Oldest first</option></select>
+        <select class="t" id="sort"><option value="best" hidden>Best match first</option><option value="new">Newest first</option><option value="old">Oldest first</option></select>
         <label class="chk"><input type="checkbox" id="dups"> Only reposted</label>
+        <span class="chk" title="Posted on or after the first day, and on or before the last (either can be left empty)">From <input class="t" type="date" id="from"> to <input class="t" type="date" id="to"></span>
       </div>
       <div id="feed-note" class="muted" style="margin-bottom:8px"></div>
       <div id="feed" class="grid"></div>
@@ -197,7 +206,7 @@ const fmtDur = (s) => { if (!s) return ''; s = Math.round(s); const h = Math.flo
 const roleText = { original: 'original', repost: 'repost', adds: 'adds new files' };
 const statusText = { held: 'waiting – likely a copy', missing: 'not downloaded', subst: 'same file as another upload' };
 
-const S = { info: null, view: 'families', group: '', category: '', q: '', type: '', status: '', sort: 'new', dups: false, collection: 0, cursor: 0, loading: false, done: false, tab: 'browse', cards: [], ml: false, like: '', likeName: '', tieFrom: '' };
+const S = { info: null, view: 'families', group: '', category: '', people: [], from: 0, to: 0, q: '', match: 'both', type: '', status: '', sort: 'new', dups: false, collection: 0, cursor: 0, loading: false, done: false, tab: 'browse', cards: [], like: '', likeName: '', tieFrom: '' };
 const roleName = { core: 'Shared', member: 'Belongs', loose: 'Probably not part of it', elsewhere: 'Belongs to another set' };
 
 // ---------- info, sidebar ----------
@@ -226,19 +235,66 @@ function renderSide() {
     for (const c of info.collections) h += `<div class="side-item ${S.collection === c.id ? 'on' : ''}" data-coll="${c.id}"><span>${esc(c.name)}</span><span class="c">${c.items}</span></div>`;
   }
   const ml = info.ml || {};
+  const facesOn = !!(ml.enabled && ml.tasks && ml.tasks.faces && ml.tasks.faces.on);
+  if (facesOn) h += `<h3>People</h3><div style="padding:0 8px 4px"><input class="t" id="side-pq" type="search" placeholder="Find a person" style="width:100%" value="${esc(P.sideQ)}"></div><div id="side-people"></div>`;
   const mlLine = !ml.enabled ? '' : `<br>Image recognition: ${ml.reachable ? (ml.embedded || 0).toLocaleString() + ' looked at' + (ml.pending ? ', ' + ml.pending.toLocaleString() + ' to go' : '') + (ml.failed ? ', ' + ml.failed + ' unreadable' : '') : '<span class="bad">' + esc(ml.lastError || 'not reachable') + '</span>'}`;
-  $('#qml-wrap').hidden = !ml.enabled;
-  $('#tab-things').hidden = !ml.enabled;
-  $('#tab-people').hidden = !(ml.tasks && ml.tasks.faces && ml.tasks.faces.on);
+  $('#match').hidden = !ml.enabled;
+  $('#q').placeholder = ml.enabled ? 'Search words, and what pictures and videos show' : 'Search captions, messages, file names, text in pictures and speech';
+  tabOn('#tab-things', ml.enabled, 'What the pictures show, from a list of subjects', 'Image recognition is off: turn it on in Archive → Settings → Image recognition');
+  tabOn('#tab-people', facesOn, 'Faces found in the pictures and videos, grouped by person', 'Faces are off: turn them on in Archive → Settings → Image recognition');
   h += `<h3>Index</h3><div class="muted" style="padding:0 8px">${(info.sets || 0).toLocaleString()} sets · ${info.families.toLocaleString()} originals · ${info.repostPosts.toLocaleString()} reposts folded in · ${info.mergedAlbums.toLocaleString()} merged albums · ${info.held} held back · ${info.missing.toLocaleString()} not downloaded<br>Pictures indexed: ${info.media.done.toLocaleString()} / ${info.media.total.toLocaleString()} · videos: ${info.videos.done.toLocaleString()} / ${info.videos.total.toLocaleString()}${mlLine}<br><button class="link" id="rebuild">Rebuild now</button></div>`;
   $('#side').innerHTML = h;
   $$('#side .side-item').forEach((el) => el.addEventListener('click', () => {
     S.group = el.dataset.group || ''; S.category = el.dataset.cat || ''; S.collection = Number(el.dataset.coll || 0);
-    if (el.dataset.all) { S.group = S.category = ''; S.collection = 0; }
+    if (el.dataset.all) { S.group = S.category = ''; S.collection = 0; S.people = []; }
     if (S.tab === 'chat' && S.group) { $('#chat-group').value = S.group; openChat(S.group); return; }
     switchTab('browse'); renderSide(); resetFeed();
   }));
+  if (facesOn) {
+    renderSidePeople();
+    if (!P.side) loadSidePeople();
+    let pqTimer; $('#side-pq').addEventListener('input', () => { clearTimeout(pqTimer); pqTimer = setTimeout(() => { P.sideQ = $('#side-pq').value.trim(); loadSidePeople(); }, 300); });
+  }
   const rb = $('#rebuild'); if (rb) rb.addEventListener('click', async () => { rb.disabled = true; const r = await api('POST', '/api/ix/browse/rebuild'); if (!r.ok) toast(errText(r)); await loadInfo(); resetFeed(); });
+}
+// A tab that needs a setting: greyed out, saying where to turn it on.
+function tabOn(sel, on, title, off) {
+  const t = $(sel); t.classList.toggle('dis', !on); t.setAttribute('aria-disabled', String(!on)); t.title = on ? title : off;
+}
+
+// ---------- people in the sidebar ----------
+// Click a person to see only posts with them; a second one: posts with both.
+async function loadSidePeople() {
+  const r = await api('GET', '/api/ix/browse/people?top=30&q=' + encodeURIComponent(P.sideQ));
+  if (!r.ok) return;
+  P.side = r.data.people || []; P.sideTotal = r.data.total || 0;
+  renderSidePeople();
+}
+function renderSidePeople() {
+  const el = $('#side-people'); if (!el) return;
+  const list = P.side || [];
+  const chosen = new Set(S.people.map((x) => x.id));
+  // The people chosen stay listed, whatever the search.
+  const extra = S.people.filter((x) => !list.some((p) => p.id === x.id)).map((x) => ({ id: x.id, name: x.name, cover: x.cover, files: x.files }));
+  el.innerHTML = extra.concat(list).map((p) => `<div class="side-item person ${chosen.has(p.id) ? 'on' : ''}" data-pid="${p.id}" title="${chosen.has(p.id) ? 'Click again to stop filtering' : S.people.length ? 'Posts with both' : 'Only posts with them'}"><span>${p.cover ? `<img class="pface" loading="lazy" alt="" src="/api/ix/face?id=${p.cover}">` : ''}${esc(p.name || 'Unnamed')}</span><span class="c">${p.files === undefined ? '' : p.files.toLocaleString()}</span></div>`).join('')
+    + (P.side && !list.length ? '<div class="muted" style="padding:0 8px">No one by that name.</div>' : '')
+    + (P.sideTotal > list.length ? `<div class="muted" style="padding:2px 8px">${list.length} of ${P.sideTotal.toLocaleString()} shown: search to find others.</div>` : '')
+    + (list.length ? '<div class="muted" style="padding:2px 8px">Choose two people to see posts with both.</div>' : '');
+  $$('#side-people [data-pid]').forEach((d) => d.onclick = () => {
+    const p = extra.concat(list).find((x) => x.id === Number(d.dataset.pid));
+    togglePerson(p);
+  });
+}
+function togglePerson(p) {
+  if (S.people.some((x) => x.id === p.id)) S.people = S.people.filter((x) => x.id !== p.id);
+  else { S.people.push({ id: p.id, name: p.name || 'Unnamed', cover: p.cover, files: p.files }); if (S.people.length > 2) S.people.shift(); }
+  if (S.tab !== 'browse') switchTab('browse');
+  renderSidePeople(); resetFeed();
+}
+// "with Ann and Bob · everyone", after the feed's count.
+function peopleNote() {
+  if (!S.people.length) return '';
+  return ' · with ' + S.people.map((x) => '<b>' + esc(x.name) + '</b>').join(' and ') + (S.people.length > 1 ? ' together' : '') + ' · <button class="link" id="people-clear">everyone</button>';
 }
 function fillSelects() {
   const info = S.info;
@@ -257,6 +313,7 @@ function tileHTML(it, i, cardKey) {
   if (it.status === 'held') labs.push(`<span class="lab t held">waiting · likely copy</span>`);
   if (it.status === 'missing') labs.push(`<span class="lab t miss">not downloaded</span>`);
   if (it.sim && S.showSim) labs.push(`<span class="lab sim" title="Likeness (image recognition)">${Math.round(it.sim * 100)}%</span>`);
+  if (it.key && (it.type === 'photo' || it.type === 'video') && S.info && S.info.ml && S.info.ml.enabled) labs.push(`<span class="lab like" role="button" data-like="${esc(it.key)}" data-like-type="${esc(it.type)}" title="More like this">≈</span>`);
   const inner = (it.type === 'photo' || it.type === 'video' || it.status !== 'ok')
     ? `<img loading="lazy" alt="" src="${esc(it.thumb)}" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'doc',textContent:${esc(JSON.stringify(String(it.name || it.type)))}}))">`
     : `<div class="doc">📄 ${esc(it.name || it.type)}<br>${esc(fmtSize(it.size))}</div>`;
@@ -267,10 +324,20 @@ function mosaicHTML(items, cardKey) {
   const cls = n === 1 ? 'n1' : n === 2 ? 'n2' : n === 3 ? 'n3' : n === 4 ? 'n4' : 'nmany';
   return `<div class="mosaic ${cls}">${items.map((it, i) => tileHTML(it, i, cardKey)).join('')}</div>`;
 }
+// Where a search matched: small badges on its card.
+const whyText = { caption: 'caption', text: 'text in picture', speech: 'speech', name: 'file name', looks: 'looks like it' };
+function whyBadges(c) {
+  const out = (c.why || []).map((w) => `<span class="badge why" title="Matched in its ${esc(whyText[w] || w)}">${esc(whyText[w] || w)}</span>`);
+  if (c.weak) out.push('<span class="badge weak" title="Nothing closer stands out: only a faint likeness">weak match</span>');
+  return out;
+}
 function cardHTML(c, key) {
   if (c.kind === 'media') {
     const it = c.items[0];
-    return `<div class="card" data-key="${key}">${mosaicHTML([it], key)}<div class="meta"><div class="where"><b>${esc(c.groupName)}</b><span>${fmtDay(c.date)}</span></div>${c.posts > 1 ? `<div class="badges"><span class="badge rep" data-fam="${c.family}">in ${c.posts} posts</span></div>` : ''}</div></div>`;
+    const mb = [];
+    if (c.posts > 1) mb.push(`<span class="badge rep" data-fam="${c.family}">in ${c.posts} posts</span>`);
+    mb.push(...whyBadges(c));
+    return `<div class="card" data-key="${key}">${mosaicHTML([it], key)}<div class="meta"><div class="where"><b>${esc(c.groupName)}</b><span>${fmtDay(c.date)}</span></div>${mb.length ? `<div class="badges">${mb.join('')}</div>` : ''}</div></div>`;
   }
   const badges = [];
   if (c.kind === 'set') {
@@ -278,6 +345,7 @@ function cardHTML(c, key) {
     badges.push(`<span class="badge set" data-set="${c.id}">set · ${c.families} posts${c.chats > 1 ? ' in ' + c.chats + ' chats' : ''}</span>`);
     badges.push(`<span class="badge" title="Files in two or more of its posts / in one">${r.core || 0} shared · ${r.member || 0} more</span>`);
     if (r.loose) badges.push(`<span class="badge held" data-set="${c.id}" title="In one post but unlike the rest (image recognition)">${r.loose} unsure</span>`);
+    badges.push(...whyBadges(c));
     return `<div class="card" data-key="${key}">${mosaicHTML(c.items, key)}${c.more ? `<div class="more">+${c.more} more</div>` : ''}
     <div class="meta"><div class="where"><b title="${esc(c.groupName)}">${esc(c.groupName)}</b><span>${fmtDate(c.date)}</span></div>
     ${c.caption ? `<div class="cap">${esc(c.caption)}</div>` : ''}<div class="badges">${badges.join('')}</div></div></div>`;
@@ -290,6 +358,7 @@ function cardHTML(c, key) {
     else if (c.posts > 1) badges.push(`<span class="badge rep" data-fam="${c.family}">original · ${c.posts - 1} repost(s)</span>`);
   }
   if (c.deleted) badges.push(`<span class="badge del">deleted on Telegram</span>`);
+  badges.push(...whyBadges(c));
   return `<div class="card" data-key="${key}">${mosaicHTML(c.items, key)}${c.more ? `<div class="more">+${c.more} more</div>` : ''}
     <div class="meta"><div class="where"><b title="${esc(c.groupName)}">${esc(c.groupName)}</b><span>${fmtDate(c.date)}</span></div>
     ${c.caption ? `<div class="cap">${esc(c.caption)}</div>` : ''}
@@ -300,19 +369,21 @@ function cardHTML(c, key) {
         <button data-act="collect">Add to a collection…</button>
         <button data-act="tie">${S.tieFrom ? 'Put in the same set as the post chosen' : 'Put in the same set as another post…'}</button></span></span></div></div></div>`;
 }
+// The feed, or (for "more like this" and a subject) /similar with the same
+// views, filters and pages.
 function feedURL() {
-  if (S.like || S.thing || (S.ml && S.q)) {
-    const p = new URLSearchParams({ limit: '240' });
-    if (S.like) p.set('like', S.like); else if (S.thing) p.set('thing', S.thing); else p.set('q', S.q);
-    for (const k of ['group', 'category']) if (S[k]) p.set(k, S[k]);
-    if (S.type === 'photo' || S.type === 'video') p.set('type', S.type);
+  const p = new URLSearchParams({ view: S.view, sort: S.sort === 'best' ? 'new' : S.sort, cursor: String(S.cursor), limit: S.view === 'media' ? '120' : '48' });
+  for (const k of ['group', 'category', 'type', 'status']) if (S[k]) p.set(k, S[k]);
+  if (S.dups) p.set('dups', '1');
+  if (S.from) p.set('from', String(S.from));
+  if (S.to) p.set('to', String(S.to));
+  if (S.collection) p.set('collection', String(S.collection));
+  if (S.people.length) p.set('person', S.people.map((x) => x.id).join(','));
+  if (S.like || S.thing) {
+    if (S.like) p.set('like', S.like); else p.set('thing', S.thing);
     return '/api/ix/browse/similar?' + p;
   }
-  const p = new URLSearchParams({ view: S.view, sort: S.sort, cursor: String(S.cursor), limit: S.view === 'media' ? '120' : '48' });
-  for (const k of ['group', 'category', 'q', 'type', 'status']) if (S[k]) p.set(k, S[k]);
-  if (S.dups) p.set('dups', '1');
-  if (S.collection) p.set('collection', String(S.collection));
-  if (S.person) p.set('person', String(S.person));
+  if (S.q) { p.set('q', S.q); p.set('match', S.match); if (S.sort === 'best') p.set('rank', 'relevance'); }
   return '/api/ix/browse/feed?' + p;
 }
 async function loadMore() {
@@ -327,28 +398,60 @@ async function loadMore() {
   feed.insertAdjacentHTML('beforeend', r.data.cards.map((c, i) => cardHTML(c, start + i)).join(''));
   S.cursor = r.data.next; S.done = !r.data.next;
   const what = { families: 'originals', sets: 'sets', posts: 'posts', media: 'pictures and videos' }[S.view];
-  if (S.like || S.thing || (S.ml && S.q)) {
-    $('#feed-note').innerHTML = (S.like ? 'Most like the chosen ' + esc(S.likeName) : S.thing ? 'Pictures showing “' + esc(S.thing) + '”' : 'Closest to “' + esc(S.q) + '”') + ', best first (' + r.data.total + ') · <button class="link" id="like-clear">back to browsing</button>';
-    $('#like-clear').onclick = () => { S.like = ''; S.thing = ''; S.ml = false; $('#qml').checked = false; resetFeed(); };
-  } else if (S.person) {
-    $('#feed-note').innerHTML = esc(r.data.total.toLocaleString() + ' ' + what) + ' with <b>' + esc(S.personName || 'this person') + '</b> · <button class="link" id="person-clear">everyone</button>';
-    $('#person-clear').onclick = () => { S.person = 0; resetFeed(); };
-  } else $('#feed-note').textContent = r.data.total.toLocaleString() + ' ' + what + (S.view === 'families' ? ' (reposts and copies folded in)' : S.view === 'sets' ? ' (posts that share some of the same pictures)' : '');
+  const count = esc((S.cards.length < r.data.total ? S.cards.length.toLocaleString() + ' shown of ' : '') + r.data.total.toLocaleString() + ' ' + what);
+  let note;
+  if (S.like || S.thing) note = count + (S.like ? ' with pictures most like the chosen ' + esc(S.likeName) : ' with pictures showing “' + esc(S.thing) + '”') + ', best first' + searchNote(r.data.search || {}) + ' · <button class="link" id="like-clear">back to browsing</button>';
+  else if (S.q) note = count + ' match “' + esc(S.q) + '”' + searchNote(r.data.search || {});
+  else note = count + (S.view === 'families' ? ' (reposts and copies folded in)' : S.view === 'sets' ? ' (posts that share some of the same pictures)' : '');
+  $('#feed-note').innerHTML = note + peopleNote();
+  if ($('#like-clear')) $('#like-clear').onclick = () => { S.like = ''; S.thing = ''; resetFeed(); };
+  if ($('#people-clear')) $('#people-clear').onclick = () => { S.people = []; renderSidePeople(); resetFeed(); };
   $('#sentinel').textContent = S.done ? (S.cards.length ? 'End' : 'Nothing here') : '';
+  // A short page leaves the end in sight: the observer would not fire again.
+  if (!S.done && S.tab === 'browse' && $('#sentinel').getBoundingClientRect().top < window.innerHeight + 800) setTimeout(loadMore, 0);
+}
+// More like this file, in the current view and filters (a search is set aside).
+function moreLike(key, type) {
+  if (S.q) { $('#q').value = ''; setQuery(''); }
+  S.like = key; S.likeName = type === 'video' ? 'video' : 'picture'; S.thing = '';
+  if (dlg.open) dlg.close();
+  switchTab('browse'); window.scrollTo(0, 0); resetFeed();
+}
+// What a search found, after the count.
+function searchNote(s) {
+  const parts = [];
+  if (s.match === 'looks' && !S.like && !S.thing) parts.push('by what the pictures show');
+  else if (s.match === 'words') parts.push('by their words');
+  if (s.looks !== undefined && s.match !== 'words' && !S.thing) parts.push(s.looks ? s.looks.toLocaleString() + ' picture(s) look like it' : 'no picture stands out as looking like it');
+  if (s.weak) parts.push('the closest pictures are added as weak matches');
+  if (s.pinned) parts.push('the caption that matches best comes first');
+  if (s.looksError) parts.push('<span class="warn">looks: ' + esc(s.looksError) + '</span>');
+  return parts.length ? ' · ' + parts.join(' · ') : '';
 }
 function resetFeed() {
   S.cursor = 0; S.done = false; S.cards = [];
-  S.showSim = !!(S.like || S.thing || (S.ml && S.q));
-  $('#feed').innerHTML = ''; $('#feed').className = 'grid' + (S.view === 'media' || S.showSim ? ' media' : '');
+  S.showSim = !!(S.like || S.thing || (S.q && S.match !== 'words'));
+  $('#feed').innerHTML = ''; $('#feed').className = 'grid' + (S.view === 'media' ? ' media' : '');
   loadMore();
 }
 new IntersectionObserver((e) => { if (e[0].isIntersecting && S.tab === 'browse') loadMore(); }, { rootMargin: '800px' }).observe($('#sentinel'));
 
 $('#view').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; S.view = b.dataset.v; $$('#view button').forEach((x) => x.classList.toggle('on', x === b)); resetFeed(); });
-let qTimer; $('#q').addEventListener('input', () => { clearTimeout(qTimer); qTimer = setTimeout(() => { S.q = $('#q').value.trim(); resetFeed(); }, 350); });
+// A new search replaces "more like this" and a subject; it is shown best
+// match first unless another order was chosen.
+function setQuery(q) {
+  if (q && !S.q && S.sort === 'new') S.sort = 'best';
+  if (!q && S.sort === 'best') S.sort = 'new';
+  S.q = q; S.like = ''; S.thing = '';
+  $('#sort option[value="best"]').hidden = !q; $('#sort').value = S.sort;
+}
+let qTimer; $('#q').addEventListener('input', () => { clearTimeout(qTimer); qTimer = setTimeout(() => { setQuery($('#q').value.trim()); resetFeed(); }, 350); });
 for (const id of ['type', 'status', 'sort']) $('#' + id).addEventListener('change', () => { S[id] = $('#' + id).value; resetFeed(); });
 $('#dups').addEventListener('change', () => { S.dups = $('#dups').checked; resetFeed(); });
-$('#qml').addEventListener('change', () => { S.ml = $('#qml').checked; S.like = ''; resetFeed(); });
+// Dates: from the start of the first day to the end of the last, in this computer's time.
+const daySecs = (v, end) => v ? Math.floor(new Date(v + (end ? 'T23:59:59' : 'T00:00:00')).getTime() / 1000) : 0;
+for (const id of ['from', 'to']) $('#' + id).addEventListener('change', () => { S.from = daySecs($('#from').value, false); S.to = daySecs($('#to').value, true); resetFeed(); });
+$('#match').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; S.match = b.dataset.m; $$('#match button').forEach((x) => x.classList.toggle('on', x === b)); S.like = ''; S.thing = ''; if (S.q) resetFeed(); });
 
 // A card's menu is placed over the page (cards clip what overflows them),
 // below the button, or above it when there is no room below.
@@ -381,6 +484,8 @@ document.addEventListener('click', async (e) => {
   if (setB) { openSet(Number(setB.dataset.set)); return; }
   const fam = e.target.closest('[data-fam]');
   if (fam) { openFamily(Number(fam.dataset.fam)); return; }
+  const lk = e.target.closest('[data-like]');
+  if (lk) { moreLike(lk.dataset.like, lk.dataset.likeType); return; }
   const tile = e.target.closest('.tile[data-card]');
   if (tile && tile.closest('.fixmode')) { fixTile(tile); return; }
   if (tile) {
@@ -433,7 +538,7 @@ async function openItem(items, i) {
     <div class="row" style="margin-top:8px"><button class="b" id="lb-prev" ${i ? '' : 'disabled'}>← Previous</button><button class="b" id="lb-next" ${i < items.length - 1 ? '' : 'disabled'}>Next →</button>
     ${it.key ? `<button class="b" id="lb-collect">Add to a collection…</button>` : ''}
     ${it.key && S.info && S.info.ml && S.info.ml.enabled && (it.type === 'photo' || it.type === 'video') ? `<button class="b" id="lb-like">More like this</button>` : ''}</div>`);
-  if ($('#lb-like')) $('#lb-like').onclick = () => { S.like = it.key; S.likeName = it.type === 'video' ? 'video' : 'picture'; dlg.close(); switchTab('browse'); window.scrollTo(0, 0); resetFeed(); };
+  if ($('#lb-like')) $('#lb-like').onclick = () => moreLike(it.key, it.type);
   $('#lb-prev').onclick = () => openItem(items, i - 1);
   $('#lb-next').onclick = () => openItem(items, i + 1);
   if (it.key) $('#lb-collect').onclick = () => collectDialog(['file:' + it.key]);
@@ -527,11 +632,16 @@ async function loadExtra(key) {
   const r = await api('GET', '/api/ix/browse/extra?key=' + encodeURIComponent(key));
   const el = $('#lb-extra'); if (!r.ok || !el) return;
   const d = r.data; let h = '';
-  if (d.faces && d.faces.length) h += `<b>Faces</b><div class="row" style="margin:4px 0 8px">${d.faces.map((f) => `<button class="link" data-person="${f.person}" data-pname="${esc(f.name || '')}" ${f.person ? '' : 'disabled'} title="${f.person ? 'Show their files' : 'Not grouped with anyone yet'}" style="text-align:center"><img src="/api/ix/face?id=${f.id}" alt="" style="width:56px;height:56px;border-radius:50%;object-fit:cover;display:block;margin:0 auto"><span style="font-size:12px">${esc(f.name || (f.person ? 'unnamed' : '—'))}</span></button>`).join('')}</div>`;
+  if (d.faces && d.faces.length) h += `<b>Faces</b><div class="row" style="margin:4px 0 8px">${d.faces.map((f) => `<div style="text-align:center"><button class="link" data-person="${f.person}" data-pname="${esc(f.name || '')}" data-pcover="${f.id}" ${f.person ? '' : 'disabled'} title="${f.person ? 'Only posts with this person' : 'Not grouped with anyone yet'}"><img src="/api/ix/face?id=${f.id}" alt="" style="width:56px;height:56px;border-radius:50%;object-fit:cover;display:block;margin:0 auto"><span style="font-size:12px">${esc(f.name || (f.person ? 'unnamed' : '—'))}</span></button>${f.person ? `<br><button class="link" data-person-open="${f.person}" style="font-size:11.5px" title="Name them, merge, correct their faces">about them</button>` : ''}</div>`).join('')}</div>`;
   if (d.text) h += `<b>Text in the picture</b><div style="white-space:pre-wrap;word-break:break-word;margin:4px 0 8px;font-size:13px">${esc(d.text)}</div>`;
   if (d.speech && d.speech.text) h += `<b>Speech${d.speech.language ? ' (' + esc(d.speech.language) + ')' : ''}</b><div style="max-height:220px;overflow:auto;margin:4px 0 8px;font-size:13px">${(d.speech.segments || []).map((sg) => `<div><span class="muted">${esc(fmtDur(sg[0]) || '0:00')}</span> ${esc(sg[2])}</div>`).join('') || esc(d.speech.text)}</div>`;
   el.innerHTML = h;
-  $$('#lb-extra [data-person]').forEach((b) => b.onclick = () => { const id = Number(b.dataset.person); if (!id) return; dlg.close(); showPerson(id); });
+  $$('#lb-extra [data-person]').forEach((b) => b.onclick = () => {
+    const id = Number(b.dataset.person); if (!id) return;
+    dlg.close(); S.people = [{ id, name: b.dataset.pname || 'Unnamed', cover: Number(b.dataset.pcover) }]; S.like = ''; S.thing = '';
+    switchTab('browse'); window.scrollTo(0, 0); renderSidePeople(); resetFeed();
+  });
+  $$('#lb-extra [data-person-open]').forEach((b) => b.onclick = () => { dlg.close(); showPerson(Number(b.dataset.personOpen)); });
 }
 
 // ---------- people ----------
@@ -574,7 +684,7 @@ async function loadPeople() {
     row.querySelector('[data-notsame]').onclick = () => send(a, { action: 'not-same', into: b }, 'Noted: they will not be suggested again.');
   });
 }
-const P = { list: [] };
+const P = { list: [], side: null, sideTotal: 0, sideQ: '' };
 async function showPerson(id) {
   const r = await api('GET', '/api/ix/browse/person?id=' + id);
   if (!r.ok) { toast(errText(r)); return; }
@@ -588,13 +698,13 @@ async function showPerson(id) {
     <div class="row" style="margin-top:6px">Same person as: <select class="t" id="pp-into"><option value="">choose…</option>${others.map((o) => `<option value="${o.id}">${esc(o.name || 'Unnamed')} (${o.files})</option>`).join('')}</select><button class="b" id="pp-merge">Merge into them</button></div>
     <p class="muted">${p.files.toLocaleString()} file(s). Click a face to <select class="t" id="pp-facemode"><option value="out">take it out (it is someone else)</option><option value="cover">show it as their picture</option></select></p>
     <div class="row">${r.data.faces.map((f) => `<button class="link" data-face="${f.id}"><img loading="lazy" src="/api/ix/face?id=${f.id}" alt="" style="width:52px;height:52px;border-radius:50%;object-fit:cover${f.id === p.cover ? ';outline:3px solid var(--accent);outline-offset:1px' : ''}"></button>`).join('')}</div>
-    <h3 style="font-size:14px;margin:12px 0 4px">Their files</h3>${mosaicHTML(items, k)}`;
+    <h3 style="font-size:14px;margin:12px 0 4px">Their files${items.length < p.files ? ` <span class="muted">(${items.length.toLocaleString()} shown of ${p.files.toLocaleString()}; “Browse their posts” shows them all)</span>` : ''}</h3>${mosaicHTML(items, k)}`;
   showDialog(p.name || 'Unnamed person', `<div id="sd-files">${h}</div>`);
   const change = async (body, msg) => { const x = await api('POST', '/api/ix/browse/person/' + id, body); toast(x.ok ? msg : errText(x)); if (x.ok) loadPeople(); return x.ok; };
   $('#pp-save').onclick = () => change({ action: 'rename', name: $('#pp-name').value }, 'Saved.');
   $('#pp-hide').onclick = async () => { if (await change({ action: p.hidden ? 'show' : 'hide' }, p.hidden ? 'Shown.' : 'Hidden.')) dlg.close(); };
   $('#pp-merge').onclick = async () => { const into = Number($('#pp-into').value); if (!into) return; if (await change({ action: 'merge', into }, 'Merged.')) showPerson(into); };
-  $('#pp-feed').onclick = () => { S.person = id; S.personName = p.name || 'this person'; dlg.close(); switchTab('browse'); S.view = 'posts'; $$('#view button').forEach((x) => x.classList.toggle('on', x.dataset.v === 'posts')); resetFeed(); };
+  $('#pp-feed').onclick = () => { S.people = [{ id, name: p.name || 'Unnamed', cover: p.cover || (r.data.faces[0] || {}).id }]; S.like = ''; S.thing = ''; dlg.close(); switchTab('browse'); renderSidePeople(); resetFeed(); };
   $$('[data-face]').forEach((b) => b.onclick = async () => {
     const face = Number(b.dataset.face);
     if ($('#pp-facemode').value === 'cover') { if (await change({ action: 'cover', face }, 'Picture chosen.')) showPerson(id); return; }
@@ -633,7 +743,7 @@ function switchTab(tab) {
   if (tab === 'entities') loadEntities();
   if (tab === 'chat' && !$('#chat-group').value && S.group) { $('#chat-group').value = S.group; openChat(S.group); }
 }
-$('#tabs').addEventListener('click', (e) => { const t = e.target.closest('.tab'); if (t) switchTab(t.dataset.tab); });
+$('#tabs').addEventListener('click', (e) => { const t = e.target.closest('.tab'); if (!t) return; if (t.classList.contains('dis')) { toast(t.title); return; } switchTab(t.dataset.tab); });
 
 // ---------- chat reader ----------
 const C = { group: '', msgs: [], names: {}, topics: {}, topic: '', highlight: 0 };

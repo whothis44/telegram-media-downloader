@@ -423,6 +423,7 @@ func ixEnsureSchema(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	ixEnsureSearch(ctx, db)
+	ixEnsureMediaSearch(ctx, db) // text in pictures and speech (ix_search.go)
 	return nil
 }
 

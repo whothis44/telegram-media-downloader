@@ -109,6 +109,7 @@ func (a *App) ixOCRTask(ctx context.Context, c *ixMLClient) *ixMLTask {
 				ON CONFLICT(key) DO UPDATE SET model=excluded.model, text=excluded.text, at=excluded.at`, it.Key, model, text, ixNowMs()); err != nil {
 				return err
 			}
+			a.ixIndexMediaText(ctx, "ix_ocr", it.Key, text)
 			_, _ = a.db.Writer.ExecContext(ctx, `DELETE FROM ix_ml_err WHERE task='text' AND key=?`, it.Key)
 			a.ixMLMarkDone("text", it.Key)
 			return nil
@@ -352,6 +353,7 @@ func (a *App) ixSTTTask(ctx context.Context, c *ixSTTClient) *ixMLTask {
 				it.Key, c.model, t.Language, t.Text, string(segs), ixNowMs()); err != nil {
 				return err
 			}
+			a.ixIndexMediaText(ctx, "ix_stt", it.Key, t.Text)
 			_, _ = a.db.Writer.ExecContext(ctx, `DELETE FROM ix_ml_err WHERE task='speech' AND key=?`, it.Key)
 			a.ixMLMarkDone("speech", it.Key)
 			return nil
@@ -440,17 +442,7 @@ func (a *App) ixTextOf(ctx context.Context, key string) (ocr string, speech *ixT
 // ixSearchMediaText finds the posts whose pictures show, or whose
 // recordings say, the words searched for.
 func (a *App) ixSearchMediaText(ctx context.Context, m *ixModel, q string, out map[int32]bool) {
-	like := "%" + strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(q) + "%"
-	rows, err := a.db.Reader.QueryContext(ctx, `SELECT key FROM ix_ocr WHERE text LIKE ? ESCAPE '\' UNION SELECT key FROM ix_stt WHERE text LIKE ? ESCAPE '\' LIMIT 20000`, like, like)
-	if err != nil {
-		return
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var k string
-		if rows.Scan(&k) != nil {
-			continue
-		}
+	for _, k := range append(a.ixMediaTextKeys(ctx, "ix_ocr", q), a.ixMediaTextKeys(ctx, "ix_stt", q)...) {
 		ii, ok := m.ByKey[k]
 		if !ok {
 			continue
