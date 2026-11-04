@@ -130,10 +130,12 @@ type downloadPacer struct {
 	now       func() time.Time
 	saved     map[int]int
 	running   atomic.Bool
+	hours     []PaceHour // the last 48 hours (pacer_hours.go)
 }
 
 func newDownloadPacer(path string) *downloadPacer {
 	p := &downloadPacer{dcs: map[int]*dcPace{}, path: path, now: time.Now, saved: map[int]int{}}
+	p.loadHours()
 	if path != "" {
 		if data, err := os.ReadFile(path); err == nil {
 			var kept map[string]int
@@ -228,6 +230,7 @@ func (p *downloadPacer) flood(dc int, premium bool) {
 	defer p.mu.Unlock()
 	now := p.now()
 	d := p.dcLocked(dc)
+	p.hourWaitLocked(now, premium)
 	if premium {
 		d.premium++
 		d.premiumAt = append(d.premiumAt, now)
@@ -268,6 +271,7 @@ func (p *downloadPacer) tick() {
 	}
 	p.last = now
 	changed := false
+	p.recordHourLocked(now, secs)
 	for _, d := range p.dcs {
 		d.speed = float64(d.bytes) / secs
 		d.history = lastOf(append(d.history, d.speed), paceHistoryLen)
@@ -483,10 +487,11 @@ type PaceStats struct {
 	Floods1h  int     `json:"floods1h"`
 	Floods24h int     `json:"floods24h"`
 	// Premium waits: Telegram's speed limit for accounts without Premium.
-	Premium1h  int      `json:"premium1h"`
-	Premium24h int      `json:"premium24h"`
-	FloodsHour [24]int  `json:"floodsByHour"` // [0] is the current hour
-	DCs        []DCPace `json:"dcs"`
+	Premium1h  int        `json:"premium1h"`
+	Premium24h int        `json:"premium24h"`
+	FloodsHour [24]int    `json:"floodsByHour"` // [0] is the current hour
+	Hours      []PaceHour `json:"hours"`        // the last 48 hours, newest first
+	DCs        []DCPace   `json:"dcs"`
 }
 
 func (p *downloadPacer) stats() PaceStats {

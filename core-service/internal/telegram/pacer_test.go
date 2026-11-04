@@ -481,3 +481,39 @@ func TestAPartTelegramNeverAnswersIsAskedForAgain(t *testing.T) {
 		t.Fatalf("inflight %d answers %d", d.inflight, d.answers)
 	}
 }
+
+func TestPacerKeepsAnHourByHourRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.pace.json")
+	p := newDownloadPacer(path)
+	clock := time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)
+	p.now = func() time.Time { return clock }
+	for i := 0; i < 360; i++ { // an hour, then into the next
+		p.mu.Lock()
+		d := p.dcLocked(4)
+		d.bytes, d.parts, d.waited, d.lastUse = 1<<20, 1, i%2 == 0, clock
+		p.mu.Unlock()
+		p.answered(4, 2*time.Second)
+		if i == 10 {
+			p.flood(4, true)
+			p.flood(4, false)
+		}
+		clock = clock.Add(paceInterval)
+		p.tick()
+	}
+	hs := p.hoursNewestFirst()
+	if len(hs) != 2 {
+		t.Fatalf("hours %d", len(hs))
+	}
+	h := hs[1]
+	if h.Bytes < 350<<20 || h.Premium != 1 || h.Waits != 1 || h.PartSecs != 2 || h.FullShare < 0.45 || h.FullShare > 0.55 || h.Window < 1 {
+		t.Fatalf("hour %+v", h)
+	}
+	// Kept across a restart.
+	p.mu.Lock()
+	p.saveHoursLocked()
+	p.mu.Unlock()
+	q := newDownloadPacer(path)
+	if got := q.hoursNewestFirst(); len(got) != 2 || got[1].Premium != 1 || got[1].PartSecs != 2 {
+		t.Fatalf("reloaded %+v", got)
+	}
+}

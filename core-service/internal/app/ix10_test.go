@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -41,5 +42,31 @@ func TestIxDeadlinePutsPrivateChatsFirst(t *testing.T) {
 	_ = a.ixDeadlineStep(ctx)
 	if paused(pubSmall) {
 		t.Fatal("the public chat's file was not let go")
+	}
+}
+
+func TestIxReportHasAnHourByHourRecordWithoutNames(t *testing.T) {
+	a, ctx := ix8App(t, nil)
+	now := time.Now()
+	for i, e := range []string{"", "download Telegram media: FLOOD_PREMIUM_WAIT_30 SecretChatName", "write \\\\nas\\share\\Private Group\\clip.mp4.part: An unexpected network error occurred."} {
+		status := "completed"
+		if e != "" {
+			status = "failed"
+		}
+		if _, err := a.db.Writer.Exec(`INSERT INTO tgdl_work(account_id,group_id,group_name,message_id,version,identity,media_type,file_name,file_size,body,status,origin,created_at,updated_at,error)
+			VALUES('acc','-1001','Private Group',?,1,?,'video','clip.mp4',?,X'',?,'history',?,?,?)`, i+1, fmt.Sprint(i), 5<<20, status, now.UnixMilli(), now.UnixMilli(), e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lines := strings.Join(a.ixDiagHours(ctx, now), "\n")
+	for _, want := range []string{"last 24 h: 5 MB in 1 files", "speed limit 1", "disk or NAS 1", "what limits downloads"} {
+		if !strings.Contains(lines, want) {
+			t.Fatalf("missing %q in:\n%s", want, lines)
+		}
+	}
+	for _, leak := range []string{"Secret", "Private", "clip", "nas", "share"} {
+		if strings.Contains(lines, leak) {
+			t.Fatalf("report leaks %q:\n%s", leak, lines)
+		}
 	}
 }

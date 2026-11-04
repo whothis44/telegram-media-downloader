@@ -146,7 +146,10 @@ func TestIxAccountGoneStopsTelegramAndKeepsTheArchive(t *testing.T) {
 	defer ixBackgroundQueue.Store(true)
 	deps := a.ixDeps()
 	started := 0
-	deps.start = func(context.Context, string, bool, int) (string, error) { started++; return "", errors.New("must not start") }
+	deps.start = func(context.Context, string, bool, int) (string, error) {
+		started++
+		return "", errors.New("must not start")
+	}
 	for i := 0; i < 3; i++ {
 		if err := a.ixQueueStep(ctx, deps); err != nil {
 			t.Fatal(err)

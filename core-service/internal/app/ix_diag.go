@@ -151,6 +151,10 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 		days = append(days, fmt.Sprintf("%s %d files %d MB", day.Day[5:], day.Files, day.Bytes>>20))
 	}
 	line("per day: %s", strings.Join(days, " | "))
+	line("by hour:")
+	for _, l := range a.ixDiagHours(ctx, now) {
+		line("%s", l)
+	}
 	for _, e := range d.Errors {
 		line("  %d× %s", e.Count, r.clean(e.Error))
 	}
