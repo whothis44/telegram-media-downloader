@@ -139,3 +139,34 @@ func TestSharedInvokerRetriesLostConnection(t *testing.T) {
 		t.Fatalf("retried after cancel: calls=%d", next.calls)
 	}
 }
+
+// A gate closed only by FLOOD_PREMIUM_WAITs is the speed limit alone; a
+// plain FLOOD_WAIT while it is closed makes it a real gate until it
+// reopens, and the next wait starts afresh.
+func TestFloodGuardTellsTheSpeedLimitFromRealWaits(t *testing.T) {
+	g := newFloodGuard()
+	if g.SpeedLimitedOnly() {
+		t.Fatal("open gates")
+	}
+	g.closeGate(time.Second, true, true)
+	g.closeGate(time.Second, true, true)
+	if !g.SpeedLimitedOnly() {
+		t.Fatal("premium waits only")
+	}
+	g.closeGate(0, true, false)
+	g.closeGate(time.Second, true, true)
+	if g.SpeedLimitedOnly() {
+		t.Fatal("a plain FLOOD_WAIT in the same wait")
+	}
+	g.mu.Lock()
+	g.filesUntil = time.Now().Add(-time.Second) // reopened
+	g.mu.Unlock()
+	g.closeGate(time.Second, true, true)
+	if !g.SpeedLimitedOnly() {
+		t.Fatal("a new wait, premium only")
+	}
+	g.closeGate(time.Second, false, false) // the account's own gate, a plain wait
+	if g.SpeedLimitedOnly() {
+		t.Fatal("the account gate is closed by a plain FLOOD_WAIT")
+	}
+}

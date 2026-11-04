@@ -78,6 +78,16 @@ func (c *GotdClient) FloodWaitUntil() time.Time {
 	return until
 }
 
+// SpeedLimitedOnly: the account waits now only because of Telegram's
+// speed limit for accounts without Premium (FLOOD_PREMIUM_WAIT), not a
+// plain FLOOD_WAIT. Fewer files at once do not help against that limit.
+func (c *GotdClient) SpeedLimitedOnly() bool {
+	if c == nil || c.guard == nil {
+		return false
+	}
+	return c.guard.SpeedLimitedOnly()
+}
+
 func NewGotdClient(cfg GotdConfig) (*GotdClient, error) {
 	if cfg.AppID <= 0 {
 		return nil, errors.New("telegram app id must be positive")
