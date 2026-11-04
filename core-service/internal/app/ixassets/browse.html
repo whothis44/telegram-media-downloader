@@ -160,7 +160,7 @@ mark{background:#fff1a8;color:#111}
       </div>
       <div class="panel"><h2>Copy or move files</h2>
         <p class="muted" style="margin:0">Every plan is listed in full before anything happens. Applying it checks each file's fingerprint at its new place before the old copy is let go, records every step, and can be undone. Nothing is ever deleted: "trash" means a dated <code>_trash</code> folder in the downloads folder.</p>
-        <div class="row"><b>Extra copies:</b> <button class="b" id="plan-dups">Plan: move byte-identical extra copies to _trash</button></div>
+        <div class="row"><b>Extra copies:</b> <button class="b" id="plan-dups">Plan: move extra copies to _trash (byte-identical files, near-identical videos)</button></div>
         <div class="row"><b>A collection:</b> <select class="t" id="plan-coll"></select> to folder <input class="t" id="plan-coll-dir" placeholder="collections/my-set"> <label class="chk"><input type="checkbox" id="plan-coll-move"> move instead of copy</label> <button class="b" id="plan-coll-go">Plan</button></div>
         <div class="row"><b>Originals of:</b> <select class="t" id="plan-orig"></select> to folder <input class="t" id="plan-orig-dir" placeholder="originals/sports"> <label class="chk"><input type="checkbox" id="plan-orig-move"> move instead of copy</label> <button class="b" id="plan-orig-go">Plan</button></div>
         <div id="plans"></div>
@@ -312,6 +312,7 @@ function tileHTML(it, i, cardKey) {
   if (it.new) labs.push(`<span class="lab t new" title="Brought by a later post">new</span>`);
   if (it.status === 'held') labs.push(`<span class="lab t held">waiting · likely copy</span>`);
   if (it.status === 'missing') labs.push(`<span class="lab t miss">not downloaded</span>`);
+  if (it.previewOnly) labs.push(`<span class="lab t" title="Telegram's small preview is kept; the file is not downloaded">preview only</span>`);
   if (it.sim && S.showSim) labs.push(`<span class="lab sim" title="Likeness (image recognition)">${Math.round(it.sim * 100)}%</span>`);
   if (it.key && (it.type === 'photo' || it.type === 'video') && S.info && S.info.ml && S.info.ml.enabled) labs.push(`<span class="lab like" role="button" data-like="${esc(it.key)}" data-like-type="${esc(it.type)}" title="More like this">≈</span>`);
   const inner = (it.type === 'photo' || it.type === 'video' || it.status !== 'ok')
@@ -528,7 +529,7 @@ async function openItem(items, i) {
   const q = it.id ? 'id=' + it.id : 'group=' + encodeURIComponent(it.group) + '&msg=' + it.msg;
   const viewHTML = (x) => {
     if (x.status !== 'ok' && x.status !== 'subst' && x.like) return `<div style="color:#fff;text-align:center;padding:10px"><img src="${esc(x.like.thumb)}" style="max-height:60vh"><br>Not downloaded yet: this is the saved copy it most likely is.</div>`;
-    if (!x.src) return `<img src="${esc(x.thumb)}" alt="" style="min-width:200px;filter:blur(2px)">`;
+    if (!x.src) return x.previewOnly ? `<div style="color:#fff;text-align:center;padding:10px"><img src="${esc(x.thumb)}" alt="" style="min-width:320px"><br>Preview only: Telegram's small preview is kept, the file is not downloaded.</div>` : `<img src="${esc(x.thumb)}" alt="" style="min-width:200px;filter:blur(2px)">`;
     if (x.type === 'video') return `<video src="${esc(x.src)}" controls autoplay playsinline preload="metadata"></video>`;
     if (x.type === 'photo') return `<img src="${esc(x.src)}" alt="">`;
     if (x.type === 'audio' || x.type === 'voice') return `<audio src="${esc(x.src)}" controls></audio>`;

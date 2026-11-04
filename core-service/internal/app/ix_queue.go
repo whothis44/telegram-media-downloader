@@ -118,7 +118,7 @@ func (a *App) ixStart() {
 	go func() { defer a.ambientWG.Done(); a.ixRunRetry(a.ctx) }()
 	a.ambientWG.Add(1)
 	go func() { defer a.ambientWG.Done(); a.ixRunAlerts(a.ctx) }()
-	for _, run := range []func(context.Context){a.ixRunFreeze, a.ixRunMedia, a.ixRunFixity, a.ixRunBrowse, a.ixRunHeld, a.ixRunML, a.ixRunSTT, a.ixRunDeadline, a.ixRunMLAutoStart, a.ixRunBackups, a.ixRunGone} {
+	for _, run := range []func(context.Context){a.ixRunFreeze, a.ixRunMedia, a.ixRunFixity, a.ixRunBrowse, a.ixRunHeld, a.ixRunML, a.ixRunSTT, a.ixRunDeadline, a.ixRunMLAutoStart, a.ixRunBackups, a.ixRunGone, a.ixRunCopies} {
 		a.ambientWG.Add(1)
 		go func() { defer a.ambientWG.Done(); run(a.ctx) }()
 	}

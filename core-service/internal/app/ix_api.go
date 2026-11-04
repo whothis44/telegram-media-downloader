@@ -29,6 +29,7 @@ func registerIxRoutes(mux *http.ServeMux, a *App) {
 	registerIxDockerRoutes(mux, a)
 	registerIxBrowseRoutes(mux, a)
 	registerIxBackupRoutes(mux, a)
+	registerIxCopiesRoutes(mux, a)
 }
 
 type ixGroupStatus struct {
@@ -185,6 +186,7 @@ func (a *App) handleIxStatus(w http.ResponseWriter, r *http.Request) {
 		"downloads": a.ixDownloads(ctx),
 		"freeze":    a.ixFreeze(ctx),
 		"held":      a.ixHeldStatus(ctx),
+		"copies":    a.ixCopiesNow(),
 		"fixity":    a.ixFixityStatus(ctx),
 		"ml":        a.ixMLStatusNow(ctx),
 		"mlStart":   a.ixMLStartStatusNow(),

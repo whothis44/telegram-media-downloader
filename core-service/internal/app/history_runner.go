@@ -111,6 +111,7 @@ func (a *App) runHistory(ctx context.Context, id string) error {
 		if j.MessagesOnly {
 			pending = 0 // archive: this walk queues nothing, so the queue never holds it back
 		}
+		pending -= a.ixHeldWaiting(ctx) // archive: held copies wait apart, they do not fill the queue
 		// Progress is a shrinking queue or bytes still arriving: several
 		// backfills feeding one queue with large files can keep it full for
 		// longer than the stall window while downloads are healthy.

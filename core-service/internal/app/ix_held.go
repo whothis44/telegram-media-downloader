@@ -11,6 +11,7 @@ import (
 	"math/bits"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -39,6 +40,19 @@ import (
 //     back of the queue (paused) and released once nothing else is waiting,
 //     so unique files come first while time is short (ix_held). On by
 //     default; releasing can be turned off.
+//  3. Copies waiting together (ix.10): videos alike by the same check that
+//     are all still in the queue. Only the best (most pixels, then the
+//     longest, then most bytes, then the earliest post) goes first; the
+//     others wait for it (ix_copy_hold.of_work). Once it is saved they are
+//     checked against the saved file, as in 2; if it fails for good, the
+//     best of them goes instead. With image recognition, previews alike
+//     count too (ix_copies_ml.go), and frames sampled across a big video
+//     can confirm the copy (ix_copies_sample.go): confirmed copies wait
+//     until everything else is done unless the setting says otherwise.
+//
+// Held copies do not count towards a backfill's queue limit (ixHeldWaiting):
+// before ix.10 they filled it, so the backfill stopped bringing new files,
+// the queue emptied of everything else and the copies were let go.
 //
 // Every message is archived in full either way (ix_messages keeps
 // Telegram's complete record, with the file's identity), so any of these
@@ -274,11 +288,14 @@ func (a *App) ixMessageFacts(ctx context.Context, groupID string, messageID int6
 // and at least as good: same length to half a second, same shape, no
 // fewer pixels, at least 90% of the bytes, and a matching preview.
 func (a *App) ixLikelyCopy(ctx context.Context, f telegram.MediaFacts, size int64) (path, key string, ok bool) {
-	if f.DurationMs <= 0 || f.Width <= 0 || f.Height <= 0 {
-		return "", "", false
-	}
 	ph, okHash := ixPreviewHash(f.Thumb)
-	if !okHash {
+	return a.ixLikelyCopyFacts(ctx, ixCopyFacts{Dur: f.DurationMs, W: f.Width, H: f.Height, Size: size, PH: ph, HasPH: okHash})
+}
+
+func (a *App) ixLikelyCopyFacts(ctx context.Context, q ixCopyFacts) (path, key string, ok bool) {
+	f := telegram.MediaFacts{DurationMs: q.Dur, Width: q.W, Height: q.H}
+	size, ph := q.Size, q.PH
+	if f.DurationMs <= 0 || f.Width <= 0 || f.Height <= 0 || !q.HasPH {
 		return "", "", false
 	}
 	rows, err := a.db.Reader.QueryContext(ctx, `SELECT file_path, COALESCE(file_hash,''), media_width, media_height, COALESCE(file_size,0), telegram_thumb FROM downloads
@@ -312,12 +329,15 @@ func (a *App) ixLikelyCopy(ctx context.Context, f telegram.MediaFacts, size int6
 }
 
 func (a *App) ixRunHeld(ctx context.Context) {
+	// The first pass soon after start covers the whole queue as it is.
+	wait := 30 * time.Second
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(2 * time.Minute):
+		case <-time.After(wait):
 		}
+		wait = 2 * time.Minute
 		if !ixVdupBackground.Load() {
 			continue
 		}
@@ -327,100 +347,487 @@ func (a *App) ixRunHeld(ctx context.Context) {
 	}
 }
 
-// ixHeldStep holds new probable copies back, and lets them go once nothing
-// else is waiting (or when holding is turned off).
+// ixHeldStep holds new probable copies back, checks the held ones again,
+// and lets them go once nothing else is waiting (or when holding is
+// turned off).
 func (a *App) ixHeldStep(ctx context.Context) error {
 	s := a.ixLoadSettings(ctx)
+	// Held copies first (one whose better copy was saved meanwhile is
+	// checked against that file), then the new files.
+	if err := a.ixHeldRecheck(ctx); err != nil {
+		return err
+	}
 	if s.HoldLikely {
-		type work struct {
-			id, msg, size int64
-			group         string
-		}
-		rows, err := a.db.Reader.QueryContext(ctx, `SELECT w.id, w.group_id, w.message_id, w.file_size FROM tgdl_work w
-			WHERE w.status='pending' AND w.paused=0 AND w.media_type='video' AND w.file_size>=? AND w.ttl_seconds=0
-			AND NOT EXISTS (SELECT 1 FROM ix_held h WHERE h.work_id=w.id) ORDER BY w.id LIMIT 500`, ixHoldMinSize)
-		if err != nil {
+		if err := a.ixHeldTriage(ctx); err != nil {
 			return err
-		}
-		var ws []work
-		for rows.Next() {
-			var w work
-			if rows.Scan(&w.id, &w.group, &w.msg, &w.size) == nil {
-				ws = append(ws, w)
-			}
-		}
-		rows.Close()
-		for _, w := range ws {
-			facts, ok := a.ixMessageFacts(ctx, w.group, w.msg)
-			reason, likePath, likeKey := "", "", ""
-			if ok {
-				if p, k, found := a.ixLikelyCopy(ctx, facts, w.size); found {
-					reason, likePath, likeKey = "looks like a saved copy", p, k
-				}
-			}
-			tx, err := a.db.Writer.BeginTx(ctx, nil)
-			if err != nil {
-				return err
-			}
-			if reason != "" {
-				res, err := tx.ExecContext(ctx, `UPDATE tgdl_work SET paused=1 WHERE id=? AND status='pending' AND paused=0`, w.id)
-				if err != nil {
-					tx.Rollback()
-					return err
-				}
-				if n, _ := res.RowsAffected(); n == 0 {
-					// Taken or set aside meanwhile (claimed, or paused by the
-					// deadline order): look at it again next time.
-					tx.Rollback()
-					continue
-				}
-			}
-			released := int64(0)
-			if reason == "" {
-				released = -1 // looked at, not held
-			}
-			if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO ix_held(work_id,group_id,message_id,like_path,like_key,reason,held_at,released_at) VALUES(?,?,?,?,?,?,?,?)`,
-				w.id, w.group, w.msg, likePath, likeKey, reason, time.Now().UnixMilli(), released); err != nil {
-				tx.Rollback()
-				return err
-			}
-			if err := tx.Commit(); err != nil {
-				return err
-			}
 		}
 	}
-	release := !s.HoldLikely
-	if !release && !s.HoldForever {
-		// Only files the engine could take now count: not ones waiting to
-		// retry later. And when nothing has finished for half an hour while
-		// copies are held, they go too rather than wait behind a stuck queue.
-		var waiting int
-		if err := a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM tgdl_work WHERE status='pending' AND paused=0 AND retry_at<=?`, time.Now().UnixMilli()).Scan(&waiting); err != nil {
-			return err
-		}
-		// Files set aside so that smaller ones go first (deadline order)
-		// still count as waiting: held copies go after them.
-		waiting += a.ixDeferredWaiting(ctx)
-		release = waiting == 0
-		if !release {
-			var last int64
-			_ = a.db.Reader.QueryRowContext(ctx, `SELECT COALESCE(MAX(updated_at),0) FROM tgdl_work WHERE status='completed'`).Scan(&last)
-			release = last > 0 && time.Since(time.UnixMilli(last)) > 30*time.Minute
-		}
+	if !s.HoldLikely {
+		return a.ixReleaseSome(ctx, 25, true)
+	}
+	if s.HoldForever {
+		return nil
+	}
+	// Only files the engine could take now count: not ones waiting to
+	// retry later. And when nothing has finished for half an hour while
+	// copies are held, they go too rather than wait behind a stuck queue.
+	var waiting int
+	if err := a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM tgdl_work WHERE status='pending' AND paused=0 AND retry_at<=?`, time.Now().UnixMilli()).Scan(&waiting); err != nil {
+		return err
+	}
+	// Files set aside so that smaller ones go first (deadline order)
+	// still count as waiting: held copies go after them.
+	waiting += a.ixDeferredWaiting(ctx)
+	release := waiting == 0
+	if !release {
+		var last int64
+		_ = a.db.Reader.QueryRowContext(ctx, `SELECT COALESCE(MAX(updated_at),0) FROM tgdl_work WHERE status='completed'`).Scan(&last)
+		release = last > 0 && time.Since(time.UnixMilli(last)) > 30*time.Minute
 	}
 	if !release {
 		return nil
 	}
-	return a.ixReleaseHeld(ctx, 25)
+	// Just before they would go, big held videos not checked yet are
+	// checked by sampling (ix_copies_sample.go): a confirmed copy stays.
+	ixBeforeReleaseHook(a, ctx)
+	return a.ixReleaseSome(ctx, 25, s.ConfirmedGoEarly || a.ixOnlyConfirmedLeft(ctx))
 }
 
-// ixReleaseHeld unpauses up to n held items (all when n <= 0).
+// ixBeforeReleaseHook runs before held copies are let go.
+var ixBeforeReleaseHook = func(a *App, ctx context.Context) {}
+
+// ixQueuedVideo is a video in the download queue, as the checks see it.
+type ixQueuedVideo struct {
+	f        ixCopyFacts
+	status   string
+	paused   bool
+	deferred bool   // set aside by the deadline order
+	held     bool   // held now
+	released int64  // ix_held.released_at: -1 looked at, >0 let go
+	how      string // why it is held
+	of       int64  // held as a lesser copy of this queue item
+	known    bool   // has an ix_held row
+}
+
+func (q *ixQueuedVideo) holdable() bool {
+	return q.status == "pending" && !q.held && q.released <= 0 && (!q.paused || q.deferred)
+}
+
+// ixQueuedVideos lists the videos waiting in the queue (or downloading)
+// that are large enough to be worth holding, with their facts.
+func (a *App) ixQueuedVideos(ctx context.Context) ([]*ixQueuedVideo, error) {
+	rows, err := a.db.Reader.QueryContext(ctx, `SELECT w.id, w.group_id, w.message_id, w.file_size, w.body, w.status, w.paused,
+			EXISTS (SELECT 1 FROM ix_deferred x WHERE x.work_id=w.id AND x.released_at=0),
+			h.work_id IS NOT NULL, COALESCE(h.reason,''), COALESCE(h.released_at,0), COALESCE(c.how,''), COALESCE(c.of_work,0)
+		FROM tgdl_work w LEFT JOIN ix_held h ON h.work_id=w.id LEFT JOIN ix_copy_hold c ON c.work_id=w.id
+		WHERE w.status IN ('pending','processing') AND w.media_type='video' AND w.file_size>=? AND w.ttl_seconds=0 ORDER BY w.file_size DESC, w.id LIMIT 20000`, ixHoldMinSize)
+	if err != nil {
+		return nil, err
+	}
+	var out []*ixQueuedVideo
+	for rows.Next() {
+		q := &ixQueuedVideo{}
+		var group, reason string
+		var msg, size int64
+		var body []byte
+		if rows.Scan(&q.f.ID, &group, &msg, &size, &body, &q.status, &q.paused, &q.deferred, &q.known, &reason, &q.released, &q.how, &q.of) != nil {
+			continue
+		}
+		q.held = q.known && reason != "" && q.released == 0
+		if q.held && q.how == "" {
+			q.how = "saved" // held before ix.10
+		}
+		id := q.f.ID
+		if m, ok := ixDecodeMessage(body); ok {
+			if f, ok := ixCopyFactsOf(m); ok {
+				q.f = f
+			}
+		}
+		q.f.ID, q.f.Group, q.f.Msg, q.f.Size, q.f.Type = id, group, int(msg), size, "video"
+		out = append(out, q)
+	}
+	rows.Close()
+	for _, q := range out {
+		if q.f.Ident == "" { // no queued record: the archived one
+			if facts, ok := a.ixMessageFacts(ctx, q.f.Group, int64(q.f.Msg)); ok {
+				q.f.Dur, q.f.W, q.f.H = facts.DurationMs, facts.Width, facts.Height
+				q.f.PH, q.f.HasPH = ixPreviewHash(facts.Thumb)
+			}
+		}
+	}
+	a.ixAttachVectors(ctx, out)
+	return out, rows.Err()
+}
+
+// ixAttachVectorsHook adds the recognition vectors of the queued files'
+// Telegram previews, when they were looked at (ix_copies_ml.go).
+var ixAttachVectorsHook = func(a *App, ctx context.Context, qs []*ixQueuedVideo) {}
+
+func (a *App) ixAttachVectors(ctx context.Context, qs []*ixQueuedVideo) {
+	ixAttachVectorsHook(a, ctx, qs)
+}
+
+// ixSameQueuedHook: two queued videos are very probably the same: the
+// cheap check, or (with image recognition, ix_copies_ml.go) previews
+// alike, as long to 2% and the same shape.
+var ixSameQueuedHook = func(a *App, x, y ixCopyFacts) bool { return ixCheapSame(x, y) }
+
+// ixHeldTriage holds new probable copies: videos like a saved one, and,
+// of videos alike that wait in the queue together, all but the best.
+func (a *App) ixHeldTriage(ctx context.Context) error {
+	qs, err := a.ixQueuedVideos(ctx)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UnixMilli()
+	// 1. Copies of saved videos. Every waiting file is checked each round,
+	// largest first, so files queued before this check existed (or before
+	// their copy was saved) are covered too.
+	saved, err := a.ixSavedVideoFacts(ctx)
+	if err != nil {
+		return err
+	}
+	var group []ixCopyFacts
+	var members []*ixQueuedVideo
+	for _, q := range qs {
+		if q.holdable() {
+			if i := ixSavedCopyOf(saved, q.f); i >= 0 {
+				ok, err := a.ixHoldWork(ctx, q.f, "saved", saved[i].Path, saved[i].Key, 0, 0, "looks like a saved copy")
+				if err != nil {
+					return err
+				}
+				if ok {
+					q.held, q.how, q.known = true, "saved", true
+					continue
+				}
+			}
+		}
+		if q.held && q.how != "queued" {
+			continue // held as a copy of a saved file
+		}
+		if q.f.Dur > 0 && (q.f.HasPH || q.f.Vec != nil) && q.f.W > 0 && q.f.H > 0 {
+			group = append(group, q.f)
+			members = append(members, q)
+		}
+	}
+	// 2. Videos alike waiting together: the best goes first.
+	same := func(x, y ixCopyFacts) bool { return ixSameQueuedHook(a, x, y) }
+	for _, g := range ixGroupCopies(group, same, 500) {
+		best := members[g[0]]
+		if best.held {
+			// Its better copy is not waiting any more (saved, failed or
+			// gone): the check of held copies decides what happens.
+			continue
+		}
+		for _, i := range g[1:] {
+			q := members[i]
+			switch {
+			case q.held && q.of != best.f.ID:
+				if _, err := a.db.Writer.ExecContext(ctx, `UPDATE ix_copy_hold SET of_work=? WHERE work_id=?`, best.f.ID, q.f.ID); err != nil {
+					return err
+				}
+			case q.holdable():
+				sim := 0.0 // likeness of the previews, when recognition looked at both
+				if !ixCheapSame(q.f, best.f) {
+					sim = ixCosine(q.f.Vec, best.f.Vec)
+				}
+				ok, err := a.ixHoldWork(ctx, q.f, "queued", "", "", best.f.ID, sim, "looks like a copy of a queued file")
+				if err != nil {
+					return err
+				}
+				if ok {
+					q.held, q.known = true, true
+				}
+			}
+		}
+	}
+	// 3. The others are marked looked at.
+	for _, q := range qs {
+		if q.known || q.status != "pending" {
+			continue
+		}
+		if _, err := a.db.Writer.ExecContext(ctx, `INSERT OR IGNORE INTO ix_held(work_id,group_id,message_id,reason,held_at,released_at) VALUES(?,?,?,'',?,-1)`, q.f.ID, q.f.Group, q.f.Msg, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ixHoldWork holds a queue item back as a probable copy (false when it was
+// taken, paused by a person, or let go before).
+func (a *App) ixHoldWork(ctx context.Context, f ixCopyFacts, how, likePath, likeKey string, ofWork int64, sim float64, reason string) (bool, error) {
+	tx, err := a.db.Writer.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	// Paused by the deadline order is fine (it stays paused); paused by a
+	// person, or taken, is not.
+	res, err := tx.ExecContext(ctx, `UPDATE tgdl_work SET paused=1 WHERE id=? AND status='pending' AND (paused=0 OR id IN (SELECT work_id FROM ix_deferred WHERE released_at=0))
+		AND id NOT IN (SELECT work_id FROM ix_held WHERE released_at>0)`, f.ID)
+	if err != nil {
+		return false, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return false, nil
+	}
+	now := time.Now().UnixMilli()
+	if _, err = tx.ExecContext(ctx, `INSERT OR REPLACE INTO ix_held(work_id,group_id,message_id,like_path,like_key,reason,held_at,released_at) VALUES(?,?,?,?,?,?,?,0)`,
+		f.ID, f.Group, f.Msg, likePath, likeKey, reason, now); err != nil {
+		return false, err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT OR REPLACE INTO ix_copy_hold(work_id,how,of_work,sim,confirm,confirm_note,checked_at) VALUES(?,?,?,?,'','',0)`, f.ID, how, ofWork, sim); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
+}
+
+// ixUnhold lets a held item go and forgets it was looked at, so the checks
+// see it again as new.
+func (a *App) ixUnhold(ctx context.Context, workID int64) error {
+	tx, err := a.db.Writer.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `UPDATE tgdl_work SET paused=0 WHERE id=? AND status='pending' AND paused=1
+		AND id NOT IN (SELECT work_id FROM ix_deferred WHERE released_at=0)`, workID); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM ix_held WHERE work_id=?`, workID); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM ix_copy_hold WHERE work_id=?`, workID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ixHeldRecheck looks at the held items again: a lesser copy whose better
+// copy has now been saved is checked against that file; when the better
+// copy failed for good (or was cancelled), the best of the copies waiting
+// for it goes instead; a copy of a saved file no longer saved goes.
+func (a *App) ixHeldRecheck(ctx context.Context) error {
+	now := time.Now().UnixMilli()
+	// Resumed by a person (or "resume all" on the dashboard): theirs now.
+	if _, err := a.db.Writer.ExecContext(ctx, `UPDATE ix_held SET released_at=? WHERE released_at=0 AND reason<>''
+		AND EXISTS (SELECT 1 FROM tgdl_work w WHERE w.id=ix_held.work_id AND w.status='pending' AND w.paused=0)`, now); err != nil {
+		return err
+	}
+	type held struct {
+		id, of, msg int64
+		group, how  string
+		likePath    string
+		leader      string // the better copy's queue state, or gone
+		gaveUp      bool
+	}
+	rows, err := a.db.Reader.QueryContext(ctx, `SELECT h.work_id, h.group_id, h.message_id, COALESCE(c.how,'saved'), COALESCE(c.of_work,0), h.like_path,
+			COALESCE(l.status,'gone'), COALESCE(l.status='failed' AND (length(l.body)=0 OR COALESCE(r.rounds,0)>=?),0)
+		FROM ix_held h JOIN tgdl_work w ON w.id=h.work_id AND w.status='pending'
+		LEFT JOIN ix_copy_hold c ON c.work_id=h.work_id
+		LEFT JOIN tgdl_work l ON l.id=c.of_work
+		LEFT JOIN ix_retry r ON r.work_key=l.group_id||'_'||l.message_id
+		WHERE h.released_at=0 AND h.reason<>''`, ixRetryRounds)
+	if err != nil {
+		return err
+	}
+	var hs []held
+	for rows.Next() {
+		var h held
+		if rows.Scan(&h.id, &h.group, &h.msg, &h.how, &h.of, &h.likePath, &h.leader, &h.gaveUp) == nil {
+			hs = append(hs, h)
+		}
+	}
+	rows.Close()
+	autoRetry := a.ixLoadSettings(ctx).AutoRetry
+	orphans := map[int64][]int64{} // a better copy that will not come -> the copies waiting for it
+	for _, h := range hs {
+		switch {
+		case h.how != "queued":
+			if h.likePath == "" {
+				continue
+			}
+			var n int
+			_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM downloads WHERE file_path=? AND (status IS NULL OR status='completed')`, h.likePath).Scan(&n)
+			if n == 0 {
+				a.ixLog("held copy %s #%d goes: the saved file it copies is no longer in the archive", h.group, h.msg)
+				if err := a.ixLetGo(ctx, h.id); err != nil {
+					return err
+				}
+			}
+		case h.leader == "completed":
+			if err := a.ixRecheckAgainstSaved(ctx, h.id, h.of); err != nil {
+				return err
+			}
+		case h.leader == "gone" || h.leader == "skipped" || h.leader == "failed" && (h.gaveUp || !autoRetry):
+			orphans[h.of] = append(orphans[h.of], h.id)
+		}
+	}
+	for _, of := range ixSortedInts(orphans) {
+		if err := a.ixPromote(ctx, orphans[of]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ixSortedInts[V any](m map[int64]V) []int64 {
+	out := make([]int64, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+// ixRecheckAgainstSaved: the better copy of a held item was saved; the
+// held item now waits as a copy of that file, if it still looks like one.
+func (a *App) ixRecheckAgainstSaved(ctx context.Context, workID, leaderID int64) error {
+	var group string
+	var msg int64
+	var body []byte
+	if err := a.db.Reader.QueryRowContext(ctx, `SELECT group_id, message_id, body FROM tgdl_work WHERE id=?`, workID).Scan(&group, &msg, &body); err != nil {
+		return nil
+	}
+	var lg string
+	var lm int64
+	_ = a.db.Reader.QueryRowContext(ctx, `SELECT group_id, message_id FROM tgdl_work WHERE id=?`, leaderID).Scan(&lg, &lm)
+	var path, hash string
+	var w, h, size, dur int64
+	var thumb []byte
+	err := a.db.Reader.QueryRowContext(ctx, `SELECT file_path, COALESCE(file_hash,''), COALESCE(media_width,0), COALESCE(media_height,0), COALESCE(file_size,0), COALESCE(media_duration_ms,0), telegram_thumb
+		FROM downloads WHERE group_id=? AND message_id=? AND status='completed' AND file_path IS NOT NULL AND file_path<>'' ORDER BY id DESC LIMIT 1`, lg, lm).Scan(&path, &hash, &w, &h, &size, &dur, &thumb)
+	keep := false
+	if err == nil {
+		saved := ixCopyFacts{W: int(w), H: int(h), Size: size, Dur: dur, Type: "video"}
+		saved.PH, saved.HasPH = ixPreviewHash(thumb)
+		if m, ok := ixDecodeMessage(body); ok {
+			if f, ok := ixCopyFactsOf(m); ok {
+				switch {
+				case ixCoversSaved(saved, f) && ixCheapSame(saved, f):
+					keep = true
+				case saved.pixels() >= f.pixels() && ixSameShape(saved, f) && ixDurWithin(saved.Dur, f.Dur, 0.02) && a.ixHeldBySimilarity(ctx, workID):
+					keep = true // the previews were alike by recognition
+				}
+			}
+		}
+	}
+	if !keep {
+		a.ixLog("held copy %s #%d goes: the file it waited for was saved and does not look the same", group, msg)
+		return a.ixLetGo(ctx, workID)
+	}
+	key := ixFileKey(hash, ixNormPath(path))
+	if _, err := a.db.Writer.ExecContext(ctx, `UPDATE ix_held SET like_path=?, like_key=?, reason='looks like a saved copy' WHERE work_id=?`, path, key, workID); err != nil {
+		return err
+	}
+	_, err = a.db.Writer.ExecContext(ctx, `UPDATE ix_copy_hold SET how='saved', of_work=0 WHERE work_id=?`, workID)
+	return err
+}
+
+// ixDurWithin: two lengths (ms) differ by at most share of the longer
+// (and never less than half a second).
+func ixDurWithin(a, b int64, share float64) bool {
+	if a <= 0 || b <= 0 {
+		return false
+	}
+	return math.Abs(float64(a-b)) <= math.Max(500, share*float64(max(a, b)))
+}
+
+// ixHeldBySimilarity: held because recognition found the previews alike.
+func (a *App) ixHeldBySimilarity(ctx context.Context, workID int64) bool {
+	var sim float64
+	_ = a.db.Reader.QueryRowContext(ctx, `SELECT sim FROM ix_copy_hold WHERE work_id=?`, workID).Scan(&sim)
+	return sim > 0
+}
+
+// ixPromote: the better copy these waited for will not come; the best of
+// them goes now and the others wait for it instead.
+func (a *App) ixPromote(ctx context.Context, ids []int64) error {
+	var fs []ixCopyFacts
+	for _, id := range ids {
+		var body []byte
+		var size int64
+		if a.db.Reader.QueryRowContext(ctx, `SELECT body, file_size FROM tgdl_work WHERE id=?`, id).Scan(&body, &size) != nil {
+			continue
+		}
+		f := ixCopyFacts{Size: size}
+		if m, ok := ixDecodeMessage(body); ok {
+			if g, ok := ixCopyFactsOf(m); ok {
+				f = g
+			}
+		}
+		f.ID = id
+		fs = append(fs, f)
+	}
+	if len(fs) == 0 {
+		return nil
+	}
+	sort.Slice(fs, func(i, j int) bool { return ixBetterCopy(fs[i], fs[j]) })
+	a.ixLog("the better copy of %d held file(s) will not download: the best of them goes now", len(fs))
+	if err := a.ixUnhold(ctx, fs[0].ID); err != nil {
+		return err
+	}
+	for _, f := range fs[1:] {
+		if _, err := a.db.Writer.ExecContext(ctx, `UPDATE ix_copy_hold SET of_work=? WHERE work_id=?`, fs[0].ID, f.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ixLetGo releases one held item for good.
+func (a *App) ixLetGo(ctx context.Context, workID int64) error {
+	if _, err := a.db.Writer.ExecContext(ctx, `UPDATE tgdl_work SET paused=0 WHERE id=? AND status='pending' AND paused=1
+		AND id NOT IN (SELECT work_id FROM ix_deferred WHERE released_at=0)`, workID); err != nil {
+		return err
+	}
+	_, err := a.db.Writer.ExecContext(ctx, `UPDATE ix_held SET released_at=? WHERE work_id=?`, time.Now().UnixMilli(), workID)
+	return err
+}
+
+// ixOnlyConfirmedLeft: nothing is left to do but confirmed copies: no
+// other file waiting (held, set aside or retrying) and every rescan done.
+func (a *App) ixOnlyConfirmedLeft(ctx context.Context) bool {
+	var other int
+	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM tgdl_work w WHERE w.status IN ('pending','processing')
+		AND w.id NOT IN (SELECT h.work_id FROM ix_held h JOIN ix_copy_hold c ON c.work_id=h.work_id WHERE h.released_at=0 AND h.reason<>'' AND c.confirm='confirmed')`).Scan(&other)
+	if other > 0 {
+		return false
+	}
+	q, err := a.ixLoadQueue(ctx)
+	if err != nil {
+		return false
+	}
+	for _, it := range q.Items {
+		if it.State == "waiting" || it.State == "running" {
+			return false
+		}
+	}
+	return true
+}
+
+// ixReleaseHeld unpauses up to n held items (all when n <= 0), confirmed
+// copies included: a person asked.
 func (a *App) ixReleaseHeld(ctx context.Context, n int) error {
-	limit := ""
+	return a.ixReleaseSome(ctx, n, true)
+}
+
+// ixReleaseSome lets up to n held items go (all when n <= 0): copies not
+// confirmed first, oldest first. When only some go, lesser copies whose
+// better copy is still waiting or downloading stay (they are checked
+// against it once it is saved), and confirmed copies go only with
+// confirmed.
+func (a *App) ixReleaseSome(ctx context.Context, n int, confirmed bool) error {
+	limit, cond := "", ""
 	if n > 0 {
 		limit = " LIMIT " + strconv.Itoa(n)
+		cond = ` AND NOT (COALESCE(c.how,'')='queued' AND EXISTS (SELECT 1 FROM tgdl_work l WHERE l.id=c.of_work AND l.status IN ('pending','processing')))`
 	}
-	rows, err := a.db.Reader.QueryContext(ctx, `SELECT work_id FROM ix_held WHERE released_at=0 AND reason<>'' ORDER BY held_at`+limit)
+	if !confirmed {
+		cond += ` AND COALESCE(c.confirm,'')<>'confirmed'`
+	}
+	rows, err := a.db.Reader.QueryContext(ctx, `SELECT h.work_id FROM ix_held h LEFT JOIN ix_copy_hold c ON c.work_id=h.work_id
+		WHERE h.released_at=0 AND h.reason<>''`+cond+` ORDER BY COALESCE(c.confirm,'')='confirmed', h.held_at`+limit)
 	if err != nil {
 		return err
 	}
@@ -432,16 +839,23 @@ func (a *App) ixReleaseHeld(ctx context.Context, n int) error {
 		}
 	}
 	rows.Close()
-	now := time.Now().UnixMilli()
 	for _, id := range ids {
-		if _, err := a.db.Writer.ExecContext(ctx, `UPDATE tgdl_work SET paused=0 WHERE id=? AND status='pending' AND paused=1`, id); err != nil {
-			return err
-		}
-		if _, err := a.db.Writer.ExecContext(ctx, `UPDATE ix_held SET released_at=? WHERE work_id=?`, now, id); err != nil {
+		if err := a.ixLetGo(ctx, id); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// ixHeldWaiting is how many held copies wait in the queue for backfills.
+// They do not count towards a backfill's queue limit: otherwise the copies
+// fill the queue, no unique file can come in behind them, and the queue
+// empties of everything else, which lets the copies go.
+func (a *App) ixHeldWaiting(ctx context.Context) int {
+	var n int
+	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM ix_held h JOIN tgdl_work w ON w.id=h.work_id
+		WHERE h.released_at=0 AND h.reason<>'' AND w.status='pending' AND w.paused=1 AND w.origin<>'live'`).Scan(&n)
+	return n
 }
 
 // ixFetchSubstituted makes the substituted files download for real: their
