@@ -179,6 +179,10 @@ func (a *App) ixLastProgress(ctx context.Context) time.Time {
 	return at
 }
 
+// ixBigApartTimes: big files waiting for their lane stay out of a
+// backfill's count up to this many times its limit (ixWaitingApart).
+const ixBigApartTimes = 2
+
 // ixWaitingApart is how many backfill items wait at the back of the queue,
 // paused: held copies, files set aside by the deadline order, and originals
 // waiting to replace a lower quality. They do not count towards a
@@ -191,8 +195,7 @@ func (a *App) ixLastProgress(ctx context.Context) time.Time {
 // queues of earlier versions are) would stop the backfill for days while
 // the workers have nothing else to take. Beyond that they count, so that
 // the backfills cannot queue big files without end.
-const ixBigApartTimes = 2
-
+//
 // The two counts are kept for ixApartCacheTTL: a backfill at its limit asks
 // every 250 ms.
 func (a *App) ixWaitingApart(ctx context.Context, cap int) int {
