@@ -115,6 +115,10 @@ type ixModel struct {
 	PersonName   map[int64]string
 	PersonHidden map[int64]bool // hidden people (a presenter, a cartoon) do not tie sets together
 	FamSet       []int32        // family -> set (-1: none)
+
+	// Albums, lone files and overlapping chats (ix_albums.go and siblings).
+	EmbSim   func(a, b string) (float32, bool) // image embeddings alone (nil: off)
+	LooseSim float32                           // likeness below which a one-off file is unlike a set
 }
 
 type ixModelBox struct {
@@ -217,12 +221,12 @@ func (a *App) ixRunBrowse(ctx context.Context) {
 		box.mu.Lock()
 		m := box.model
 		box.mu.Unlock()
-		if m != nil && a.ixModelStamp(ctx) == m.Stamp {
-			continue
+		if m == nil || a.ixModelStamp(ctx) != m.Stamp {
+			if _, err := a.ixRebuildModel(ctx); err != nil && ctx.Err() == nil {
+				a.ixLog("browser index: %v", err)
+			}
 		}
-		if _, err := a.ixRebuildModel(ctx); err != nil && ctx.Err() == nil {
-			a.ixLog("browser index: %v", err)
-		}
+		a.ixLoneRun(ctx, a.ixModelLast(), time.Minute) // lone files that look like an album (ix_lone.go)
 	}
 }
 
@@ -528,7 +532,8 @@ func (a *App) ixBuildModel(ctx context.Context) (*ixModel, error) {
 	ixAssignFamilies(m)
 	m.Suggest = ixContentSuggestions(m)
 	a.ixLoadPeople(ctx, m)
-	ixAssignSets(m, a.ixLoadSetFixes(ctx), ixSetLikeness(m, a.ixEmbSim()))
+	m.EmbSim = a.ixEmbSim()
+	ixAssignSets(m, a.ixLoadSetFixes(ctx), ixSetLikeness(m, m.EmbSim))
 	m.Built = time.Now()
 	m.Took = time.Since(start)
 	return m, nil

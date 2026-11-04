@@ -141,7 +141,8 @@ mark{background:#fff1a8;color:#111}
       <div class="chat" id="chat"></div>
     </section>
     <section id="v-review" hidden>
-      <p class="note">These pairs look alike but did not pass the automatic checks. Decide once and the browser remembers it. Keys: <b>1</b> same, keep left · <b>2</b> same, keep right · <b>S</b> same · <b>N</b> different · <b>→</b> skip. Nothing is deleted either way.</p>
+      <div class="seg" id="review-modes" style="margin-bottom:10px"><button data-rm="pairs" class="on">Look-alike pairs</button><button data-rm="albums">Same albums<span class="n" id="n-rv-albums"></span></button><button data-rm="lone">Lone files<span class="n" id="n-rv-lone"></span></button></div>
+      <p class="note" id="review-note">These pairs look alike but did not pass the automatic checks. Decide once and the browser remembers it. Keys: <b>1</b> same, keep left · <b>2</b> same, keep right · <b>S</b> same · <b>N</b> different · <b>→</b> skip. Nothing is deleted either way.</p>
       <div id="review"></div>
     </section>
     <section id="v-organise" hidden>
@@ -603,7 +604,7 @@ function switchTab(tab) {
   for (const v of ['browse', 'chat', 'review', 'organise', 'people', 'things', 'entities']) $('#v-' + v).hidden = v !== tab;
   if (tab === 'people') loadPeople();
   if (tab === 'things') loadThings();
-  if (tab === 'review') loadReview();
+  if (tab === 'review') { loadReview(); loadReviewCounts(); }
   if (tab === 'organise') loadOrganise();
   if (tab === 'entities') loadEntities();
   if (tab === 'chat' && !$('#chat-group').value && S.group) { $('#chat-group').value = S.group; openChat(S.group); }
@@ -682,6 +683,7 @@ $('#chat-date').addEventListener('change', () => { const v = $('#chat-date').val
 // ---------- review ----------
 const R = { pairs: [], i: 0 };
 async function loadReview() {
+  if (R.mode && R.mode !== 'pairs') { loadReviewExtra(); return; }
   const r = await api('GET', '/api/ix/browse/review');
   if (!r.ok) { $('#review').textContent = errText(r); return; }
   R.pairs = r.data.pairs; R.i = 0; renderReview();
@@ -699,6 +701,7 @@ function renderReview() {
   $$('#review [data-d]').forEach((b) => b.onclick = () => decide(b.dataset.d));
 }
 async function decide(d) {
+  if (R.mode && R.mode !== 'pairs') { reviewExtraKey(d); return; }
   const p = R.pairs[R.i]; if (!p) return;
   if (d !== 'skip') {
     const body = { a: p.a.key, b: p.b.key, decision: d === 'n' ? 'different' : 'same' };
@@ -794,6 +797,61 @@ document.addEventListener('click', async (e) => {
   toast(out ? 'Noted: it stands alone. The browser updates in a moment.' : 'Back to automatic.');
   b.dataset.placedDo = out ? 'auto' : 'out'; b.textContent = out ? 'Undo' : 'Not part of this album';
 });
+
+// The Review tab's other queues: lone files that look like an album, and
+// albums that look the same.
+const RX = { list: [], i: 0, pairsNote: '' };
+const reviewNotes = {
+  lone: 'Each of these files was posted on its own, but image recognition finds it very like the files of one album (and much less like any other). Keys: <b>S</b> yes, it belongs with this album · <b>N</b> no · <b>→</b> skip. Yes puts the post in the album\'s set; nothing is moved or deleted.',
+  albums: 'These albums were posted separately, often in different chats, but their files look the same (re-encoded, cropped or watermarked copies). One answer settles every matching pair. Keys: <b>S</b> the same album · <b>N</b> different · <b>→</b> skip. Nothing is deleted either way.',
+};
+$('#review-modes').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-rm]'); if (!b) return;
+  if (!RX.pairsNote) RX.pairsNote = $('#review-note').innerHTML;
+  R.mode = b.dataset.rm;
+  $$('#review-modes button').forEach((x) => x.classList.toggle('on', x === b));
+  $('#review-note').innerHTML = R.mode === 'pairs' ? RX.pairsNote : reviewNotes[R.mode];
+  loadReview();
+});
+async function loadReviewCounts() {
+  const [lone, albums] = await Promise.all([api('GET', '/api/ix/browse/review/lone'), api('GET', '/api/ix/browse/review/albums')]);
+  const n = (r, k) => (r.ok && r.data && r.data[k] ? r.data[k].length : 0);
+  $('#n-rv-lone').textContent = n(lone, 'lone') || ''; $('#n-rv-albums').textContent = n(albums, 'albums') || '';
+}
+async function loadReviewExtra() {
+  const r = await api('GET', '/api/ix/browse/review/' + R.mode);
+  if (!r.ok) { $('#review').textContent = errText(r); return; }
+  RX.list = r.data[R.mode] || []; RX.i = 0; renderReviewExtra();
+}
+function renderReviewExtra() {
+  const x = RX.list[RX.i];
+  if (!x) { $('#review').innerHTML = `<p class="muted">Nothing left to review${RX.list.length ? ' in this batch' : ''}.</p>`; loadReviewCounts(); return; }
+  const head = `<p class="muted">${RX.i + 1} of ${RX.list.length} in this batch</p>`;
+  if (R.mode === 'lone') {
+    const k = registerSet(x.album.items);
+    $('#review').innerHTML = head + `<h3 style="font-size:15px;margin:0 0 6px">Does this file belong with this album?</h3><p class="muted" style="margin:0 0 8px">${esc(x.why)}</p>
+      <div class="pair">${sideHTML(x.file, x.where, x.date)}<div class="side">${mosaicHTML(x.album.items, k)}<div class="m"><b>${esc(x.album.groupName)}</b> · ${fmtDay(x.album.date)} · ${x.albumFiles} file(s)${x.album.posts > 1 ? ' · ' + x.album.posts + ' posts' : ''}</div></div></div>
+      <div class="row" style="margin-top:10px"><button class="b primary" data-dx="s">S · Yes, it belongs with it</button><button class="b danger" data-dx="n">N · No</button><button class="b" data-dx="skip">→ Skip</button></div>`;
+  } else {
+    const ka = registerSet(x.a.items), kb = registerSet(x.b.items);
+    const side = (c, k, n) => `<div class="side">${mosaicHTML(c.items, k)}<div class="m"><b>${esc(c.groupName)}</b> · ${fmtDay(c.date)} · ${n} file(s)${c.posts > 1 ? ' · ' + c.posts + ' posts' : ''}</div></div>`;
+    $('#review').innerHTML = head + `<h3 style="font-size:15px;margin:0 0 6px">Are these two albums the same?</h3><p class="muted" style="margin:0 0 8px">${esc(x.why)}${x.matched ? ' · yes marks ' + x.matched + ' matching pair(s) as the same file' : ''}</p>
+      <div class="pair">${side(x.a, ka, x.aFiles)}${side(x.b, kb, x.bFiles)}</div>
+      <div class="row" style="margin-top:10px"><button class="b primary" data-dx="s">S · The same album</button><button class="b danger" data-dx="n">N · Different</button><button class="b" data-dx="skip">→ Skip</button></div>`;
+  }
+  $$('#review [data-dx]').forEach((b) => b.onclick = () => reviewExtraKey(b.dataset.dx));
+}
+async function reviewExtraKey(d) {
+  const x = RX.list[RX.i]; if (!x) return;
+  if (d === '1' || d === '2') d = 's';
+  if (d !== 'skip') {
+    const yes = d === 's';
+    const body = R.mode === 'lone' ? { post: x.post, decision: yes ? 'yes' : 'no' } : { a: x.a.group + ':' + x.a.msg, b: x.b.group + ':' + x.b.msg, decision: yes ? 'same' : 'different' };
+    const r = await api('POST', '/api/ix/browse/review/' + R.mode, body);
+    if (!r.ok) { toast(errText(r)); return; }
+  }
+  RX.i++; renderReviewExtra();
+}
 
 loadInfo().then(resetFeed);
 </script>

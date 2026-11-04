@@ -2,9 +2,14 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"math/rand"
+	"net/http/httptest"
 	"sort"
+	"strings"
 	"testing"
+	"time"
 )
 
 // ---------- lone files placed in albums ----------
@@ -200,5 +205,109 @@ func TestIxOrphanPlacerUsesTheNearestNeighbours(t *testing.T) {
 		if got[k] != want[k] {
 			t.Fatalf("%d: got %d want %d (all %v)", k, got[k], want[k], got)
 		}
+	}
+}
+
+// ixAlbPost adds a captured post with downloaded photos: one message per
+// file, grouped when there are several.
+func ixAlbPost(t *testing.T, a *App, group string, date int64, grouped string, msgs ...int) []string {
+	t.Helper()
+	var keys []string
+	for _, id := range msgs {
+		hash := fmt.Sprintf("%064x", int64(id)+int64(len(group))*1000000+int64(group[len(group)-1])*10000)
+		if _, err := a.db.Writer.Exec(`INSERT INTO ix_messages(group_id,message_id,date,text,grouped_id,media_type,seen_at) VALUES(?,?,?,'',?,'photo',1)`, group, id, date, grouped); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := a.db.Writer.Exec(`INSERT INTO downloads(group_id,group_name,message_id,file_name,file_size,file_type,file_path,status,file_hash,created_at) VALUES(?,?,?,?,?,?,?,'completed',?,'2023-11-15 00:00:00')`,
+			group, "", id, fmt.Sprintf("f%d.jpg", id), 1000, "photo", fmt.Sprintf("c%s/f%d.jpg", group, id), hash); err != nil {
+			t.Fatal(err)
+		}
+		keys = append(keys, "h:"+hash)
+	}
+	return keys
+}
+
+func ixAlbChats(t *testing.T, a *App, ids ...string) {
+	t.Helper()
+	ctx := context.Background()
+	cfg, err := a.config.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var groups []any
+	for _, id := range ids {
+		groups = append(groups, map[string]any{"id": id, "name": "chat " + id, "enabled": true})
+	}
+	cfg["groups"] = groups
+	if err = a.config.Save(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestIxLoneFileIsSuggestedForItsAlbumAndCanBeAccepted(t *testing.T) {
+	a, ctx := ix8App(t, map[string]any{"mlUrl": "http://127.0.0.1:9"})
+	const g1, g2 = "-1000000000301", "-1000000000302"
+	ixAlbChats(t, a, g1, g2)
+	day := int64(1700000000)
+	album := ixAlbPost(t, a, g1, day, "A", 10, 11, 12)
+	lone := ixAlbPost(t, a, g1, day+3600, "", 40)
+	other := ixAlbPost(t, a, g2, day, "B", 10, 11, 12)
+	far := ixAlbPost(t, a, g2, day+86400*30, "", 50)
+	r := rand.New(rand.NewSource(1))
+	shoot, elsewhere := ixRandUnit(r, 64), ixRandUnit(r, 64)
+	for _, k := range append(append([]string{}, album...), lone...) {
+		if err := a.ixMLSave(ctx, ixMLDefaultModel, k, ixMix(64, 1.0, shoot, 0.3, ixRandUnit(r, 64))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, k := range other {
+		if err := a.ixMLSave(ctx, ixMLDefaultModel, k, ixMix(64, 1.0, elsewhere, 0.3, ixRandUnit(r, 64))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := a.ixMLSave(ctx, ixMLDefaultModel, far[0], ixRandUnit(r, 64)); err != nil {
+		t.Fatal(err)
+	}
+	m, err := a.ixRebuildModel(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.ixLoneRun(ctx, m, 10*time.Second)
+	var post, otherPost, why string
+	if err := a.db.Reader.QueryRow(`SELECT post, other, why FROM ix_set_sug`).Scan(&post, &otherPost, &why); err != nil {
+		t.Fatal(err)
+	}
+	if post != g1+":40" || otherPost != g1+":10" || !strings.Contains(why, "same chat") {
+		t.Fatalf("suggestion: %s -> %s (%s)", post, otherPost, why)
+	}
+	var n int
+	_ = a.db.Reader.QueryRow(`SELECT COUNT(*) FROM ix_set_sug_seen`).Scan(&n)
+	if n != 2 {
+		t.Fatalf("compared %d lone files, want 2", n)
+	}
+	// Shown in the Review tab.
+	rec := httptest.NewRecorder()
+	a.handleIxLoneReview(rec, httptest.NewRequest("GET", "/api/ix/browse/review/lone", nil))
+	var got struct {
+		Lone []ixLoneJ `json:"lone"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || len(got.Lone) != 1 || got.Lone[0].File.Key != lone[0] || got.Lone[0].AlbumFiles != 3 {
+		t.Fatalf("review: %v %s", err, rec.Body.String())
+	}
+	if a.ixLoneDecide(ctx, "nope:1", "yes") == nil || a.ixLoneDecide(ctx, post, "maybe") == nil {
+		t.Fatal("bad input accepted")
+	}
+	if err := a.ixLoneDecide(ctx, post, "yes"); err != nil {
+		t.Fatal(err)
+	}
+	if m, err = a.ixRebuildModel(ctx); err != nil {
+		t.Fatal(err)
+	}
+	fa, fb := m.Posts[m.ByMsg[g1+":40"]].Family, m.Posts[m.ByMsg[g1+":10"]].Family
+	if m.FamSet[fa] < 0 || m.FamSet[fa] != m.FamSet[fb] {
+		t.Fatalf("not one set: %v", m.FamSet)
+	}
+	if left := a.ixLonePending(ctx, m, 50); len(left) != 0 {
+		t.Fatalf("still to review: %+v", left)
 	}
 }

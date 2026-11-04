@@ -283,6 +283,7 @@ func ixSplitLarge(adj [][]ixGEdge, fams []int32, depth int) [][]int32 {
 // false when either has none).
 func ixAssignSets(m *ixModel, fixes ixSetFixes, sim func(a, b string) (float32, bool)) {
 	nf := len(m.Families)
+	m.LooseSim = ixSetLooseSim
 	famClusters := make([][]int32, nf)
 	holders := map[int32][]int32{} // cluster -> families
 	for fi := range m.Families {

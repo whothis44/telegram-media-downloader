@@ -52,6 +52,8 @@ func ixEnsureAlbumSchema(ctx context.Context, db *sql.DB) error {
 func registerIxAlbumRoutes(mux *http.ServeMux, a *App) {
 	h := func(f http.HandlerFunc) http.Handler { return a.requireAdmin(f) }
 	mux.Handle("POST /api/ix/browse/orphan", h(a.handleIxOrphanDecide))
+	mux.Handle("GET /api/ix/browse/review/lone", h(a.handleIxLoneReview))
+	mux.Handle("POST /api/ix/browse/review/lone", h(a.handleIxLoneDecide))
 }
 
 // ixPairRefs orders two post refs the way ix_album_pairs stores them.
