@@ -543,7 +543,7 @@ async function openItem(items, i) {
     return `<a href="${esc(x.src)}" style="color:#fff">Open ${esc(x.name || 'file')}</a>`;
   };
   showDialog(it.name || (it.type === 'video' ? 'Video' : 'Picture'), `<div class="lb"><div class="view">${viewHTML(it)}</div><div class="info" id="lb-info"><span class="muted">Loading…</span></div></div>
-    <div class="row" style="margin-top:8px"><button class="b" id="lb-prev" ${i ? '' : 'disabled'}>← Previous</button><button class="b" id="lb-next" ${i < items.length - 1 ? '' : 'disabled'}>Next →</button>
+    <div class="row" style="margin-top:8px"><button class="b" id="lb-prev" title="Left arrow key" ${i ? '' : 'disabled'}>← Previous</button><button class="b" id="lb-next" title="Right arrow key" ${i < items.length - 1 ? '' : 'disabled'}>Next →</button>
     ${it.key ? `<button class="b" id="lb-collect">Add to a collection…</button>` : ''}
     ${it.key && S.info && S.info.ml && S.info.ml.enabled && (it.type === 'photo' || it.type === 'video') ? `<button class="b" id="lb-like">More like this</button>` : ''}</div>`);
   if ($('#lb-like')) $('#lb-like').onclick = () => moreLike(it.key, it.type);
@@ -855,6 +855,17 @@ async function decide(d) {
   }
   R.i++; renderReview();
 }
+// Left and right arrows step through the files of a post, like Previous and
+// Next, even while a video plays (its seek bar still works with the mouse).
+// Caught before the player sees them, so they do not also seek.
+document.addEventListener('keydown', (e) => {
+  if (!dlg.open || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+  if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+  if (e.target.matches('input,select,textarea')) return;
+  const b = $(e.key === 'ArrowLeft' ? '#lb-prev' : '#lb-next');
+  if (!b || b.disabled) return;
+  e.preventDefault(); e.stopPropagation(); b.click();
+}, true);
 document.addEventListener('keydown', (e) => {
   if (S.tab !== 'review' || e.target.matches('input,select,textarea') || dlg.open) return;
   const k = { '1': '1', '2': '2', s: 's', S: 's', n: 'n', N: 'n', ArrowRight: 'skip' }[e.key];
