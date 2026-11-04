@@ -250,3 +250,45 @@ func TestIxSamplingRoundTakesTheBiggestFirst(t *testing.T) {
 	}
 	_ = tg.Message{}
 }
+
+// Just before held copies would be let go (nothing else waiting), a big
+// held video not checked yet is sampled; confirmed, it stays held.
+func TestIxBigHeldCopyIsCheckedBeforeItGoes(t *testing.T) {
+	a, ctx := ixTestApp(t)
+	savedFake, frameFake := ixSampleFake, ixSampleFrame
+	ixSampleFake = true
+	defer func() { ixSampleFake, ixSampleFrame = savedFake, frameFake }()
+	hashAt := func(s int) uint64 { return uint64(s+1) * 0x9E3779B97F4A7C15 }
+	var fp []ixVFrame
+	for s := 0; s < 600; s++ {
+		fp = append(fp, ixVFrame{T: float32(s), H: hashAt(s), HF: ^hashAt(s)})
+	}
+	key := "h:" + ixSixtyFour("7")
+	if err := a.ixVdupSave(ctx, key, "c/v.mp4", 600, fp, ""); err != nil {
+		t.Fatal(err)
+	}
+	ixSampleFrame = func(_ context.Context, _ string, at float64) (ixSampledFrame, bool, error) {
+		return ixSampledFrame{T: at, H: hashAt(int(at)), HF: ^hashAt(int(at))}, true, nil
+	}
+	r := &ixFakeReader{files: map[int64][]byte{801: make([]byte, telegram.PartSize), 802: make([]byte, telegram.PartSize)}}
+	ixTestUseReader(t, r)
+	hold := func(doc int64, size int64) int64 {
+		id := ixTestQueue(t, a, ixTestVideo(int(doc), doc, size, 600, 1280, 720, nil, 1700000000))
+		_, _ = a.db.Writer.Exec(`UPDATE tgdl_work SET paused=1 WHERE id=?`, id)
+		_, _ = a.db.Writer.Exec(`INSERT INTO ix_held(work_id,group_id,message_id,like_key,reason,held_at) VALUES(?,?,?,?,'looks like a saved copy',1)`, id, ixTestGroup, doc, key)
+		_, _ = a.db.Writer.Exec(`INSERT INTO ix_copy_hold(work_id,how) VALUES(?,'saved')`, id)
+		return id
+	}
+	big, small := hold(801, 2<<30), hold(802, 50<<20)
+	if err := a.ixHeldStep(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !ixTestPaused(t, a, big) || ixTestPaused(t, a, small) {
+		t.Fatalf("big held %v, small held %v", ixTestPaused(t, a, big), ixTestPaused(t, a, small))
+	}
+	var confirm string
+	_ = a.db.Reader.QueryRow(`SELECT confirm FROM ix_copy_hold WHERE work_id=?`, big).Scan(&confirm)
+	if confirm != "confirmed" {
+		t.Fatalf("confirm %q", confirm)
+	}
+}
