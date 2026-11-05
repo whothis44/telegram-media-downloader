@@ -2,8 +2,9 @@
 
 The Queue list keeps the reader's place (js/queue.js reconcileRows):
 rows arriving above the viewport don't move the visible rows, rows arriving
-at the top while the list is at the top wait behind the "N new — show" pill,
-rows leaving above the viewport don't move it either, and "Pause list
+at the top while the pointer is over the list wait behind the "N new — show"
+pill, at the very top with the pointer elsewhere the list follows the live
+order, rows leaving above the viewport don't move it either, and "Pause list
 updates" holds arrivals while the counters keep updating. Runs the real
 queue.js and page markup with stubbed imports; invented data only.
 """
@@ -136,8 +137,8 @@ with sync_playwright() as pw:
     assert resumed['key'] == before['key'] and abs(resumed['y'] - before['y']) < 1, (before, resumed)
 
     # 4. Scrolling back up brings back the rows the window dropped off the
-    # top, without jumps; at the top, new rows don't push the list down:
-    # they wait behind the pill.
+    # top, without jumps; at the top with the pointer on the list, new rows
+    # don't push the list down: they wait behind the pill.
     for _ in range(12):  # past MAX_DOM_ROWS, so the window drops rows off the top
         vp.evaluate('v => { v.scrollTop = v.scrollHeight; }')
         page.wait_for_timeout(120)
@@ -156,6 +157,8 @@ with sync_playwright() as pw:
     else:
         raise AssertionError('never got back to the top of the list')
     settle()
+    page.hover('#queue-viewport')
+    settle()
     top = page.evaluate(f'{h}.firstVisible()')
     page.evaluate(f'{h}.arrive(3001, 5)')
     settle()
@@ -166,6 +169,19 @@ with sync_playwright() as pw:
     settle()
     assert page.evaluate(f'{h}.firstRow()') == '-1009000000001_3005', page.evaluate(f'{h}.firstRow()')
     assert page.evaluate(f'{h}.pill()') is None
+
+    # 5. At the very top with the pointer away from the list, nobody is reading
+    # a particular row: arrivals appear by themselves, with no pill and no click.
+    page.mouse.move(0, 0)
+    settle()
+    page.evaluate(f'{h}.arrive(4001, 3)')
+    page.wait_for_timeout(1800)  # FOLLOW_TOP_MS, then a frame
+    assert page.evaluate(f'{h}.firstRow()') == '-1009000000001_4003', page.evaluate(f'{h}.firstRow()')
+    assert page.evaluate(f'{h}.pill()') is None
+    # ... and rows that finish leave by themselves too.
+    page.evaluate(f"{h}.finish(['-1009000000001_4003'])")
+    page.wait_for_timeout(1800)
+    assert page.evaluate(f'{h}.firstRow()') == '-1009000000001_4002', page.evaluate(f'{h}.firstRow()')
 
     assert not errors, errors
     print('queue keeps the reader\'s place: ok')

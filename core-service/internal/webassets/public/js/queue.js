@@ -1049,8 +1049,11 @@ function _renderEmpty() {
 // reconcileRows(), which never moves what the reader is looking at:
 //   - rows that arrive above the viewport are inserted and the scroll
 //     position is corrected so the first visible row stays put;
-//   - rows that would land at the top while the list is at the top, or
-//     among the visible rows, wait behind the "N new — show" pill;
+//   - at the very top of the list with the pointer elsewhere, nobody is
+//     reading a particular row, so the list simply follows the live order
+//     (at most every FOLLOW_TOP_MS). With the pointer over the list, or
+//     scrolled down, rows that would land among the visible ones wait behind
+//     the "N new — show" pill;
 //   - rows already on screen keep updating in place (progress, status)
 //     and stay while visible even when they leave the filter;
 //   - "Pause list updates" holds every arrival and removal-by-filter
@@ -1061,6 +1064,31 @@ let _order = [];
 let _orderVersion = -1;
 let _pendingCount = 0; // live rows not shown yet (the pill)
 let _staleCount = 0; // rows shown that no longer match the filter
+// Following the live order at the top of the list: how often it may repaint,
+// and whether the reader's pointer is over the list.
+const FOLLOW_TOP_MS = 1500;
+let _pointerOverList = false;
+let _lastFollowAt = 0;
+let _followTimer = 0;
+
+// The reader is at the very top of the list and not pointing at any row: the
+// list on screen can take the live order without moving what they look at.
+function _followsTop(viewport, rowsHost) {
+    if (view.frozen || _pointerOverList || viewport.scrollTop > 1) return false;
+    return !rowsHost.firstElementChild || rowsHost.firstElementChild.dataset.key === _order[0];
+}
+
+function _wireListPointer(viewport) {
+    if (viewport.dataset.pointerWired) return;
+    viewport.dataset.pointerWired = '1';
+    viewport.addEventListener('mouseenter', () => {
+        _pointerOverList = true;
+    });
+    viewport.addEventListener('mouseleave', () => {
+        _pointerOverList = false;
+        scheduleStructuralRender(); // catch up with what waited
+    });
+}
 
 function _paintEmpty() {
     const rowsHost = document.getElementById('queue-rows');
@@ -1088,6 +1116,7 @@ function paintWindow() {
     const rowsHost = document.getElementById('queue-rows');
     const empty = document.getElementById('queue-empty');
     if (!viewport || !rowsHost) return;
+    _wireListPointer(viewport);
 
     _renderedKeys.clear();
     _countPending();
@@ -1414,6 +1443,18 @@ function reconcileRows(force) {
     // Nothing on screen yet: nothing to keep in place.
     if (_order.length === 0 && !view.frozen) {
         renderRows();
+        return;
+    }
+    if (_followsTop(viewport, rowsHost)) {
+        const wait = _lastFollowAt + FOLLOW_TOP_MS - Date.now();
+        if (wait <= 0) {
+            _lastFollowAt = Date.now();
+            renderRows();
+            return;
+        }
+        // Too soon after the last repaint: come back, whatever arrives or not.
+        clearTimeout(_followTimer);
+        _followTimer = setTimeout(scheduleStructuralRender, wait);
         return;
     }
     const live = getFilteredSorted();
