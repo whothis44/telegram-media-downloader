@@ -269,6 +269,13 @@ func (c *GotdClient) DownloadMedia(ctx context.Context, a Attachment, w io.Write
 	if c == nil || c.client == nil || a.Location == nil || a.DC <= 0 {
 		return errors.New("invalid Telegram download request")
 	}
+	if c.files != nil {
+		release, err := c.files.acquire(ctx, a.DC, a.Identity.Size)
+		if err != nil {
+			return err
+		}
+		defer release()
+	}
 	// Per-chunk verification is opt-in (TGDL_VERIFY_CHUNKS=1): it makes the
 	// library request 128 KiB hash-sized parts instead of 1 MiB ones, and
 	// Telegram rate-limits download requests by count, so it cut throughput
@@ -380,7 +387,7 @@ func (i sharedInvoker) Invoke(ctx context.Context, input bin.Encoder, output bin
 	// inline retry is Telegram refusing this file, not the account: the
 	// library would retry it forever, closing the account's gate each time
 	// and starving every other download. Fail the attempt instead.
-	if d, flood := tgerr.AsFloodWait(err); flood && d <= floodSleepThreshold {
+	if d, flood := tgerr.AsFloodWait(err); flood && d <= floodSleepThreshold && !tgerr.Is(err, tgerr.ErrPremiumFloodWait) {
 		return fmt.Errorf("Telegram kept refusing this file after %d waits (FLOOD_WAIT_%d)", floodInlineRetries+1, int(d.Seconds()))
 	}
 	return err
@@ -398,6 +405,8 @@ func (i sharedInvoker) invokePart(ctx context.Context, input bin.Encoder, output
 		err := i.guard.invokeFiles(ctx, i.pool, input, output, partHooks{
 			flood:    func(_ time.Duration, premium bool) { i.pacer.flood(i.dc, premium) },
 			answered: func(took time.Duration) { i.pacer.answered(i.dc, took) },
+			waited:   func(took time.Duration) { i.pacer.waited(i.dc, took) },
+			waiting:  func(on bool) { i.pacer.waitingOnTelegram(i.dc, on) },
 		})
 		if err == nil {
 			if box, ok := output.(*tg.UploadFileBox); ok {

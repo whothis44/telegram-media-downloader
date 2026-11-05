@@ -407,6 +407,9 @@ func (a *App) ixPreviewAllPause(err error) time.Duration {
 // a new FLOOD_WAIT stops the pass (errIxWaitSignal); a new speed-limit wait
 // slows it down.
 func (a *App) ixPreviewAllSignalled() error {
+	if ixRemoteChecksBusy(a) {
+		return errIxWaitSignal
+	}
 	floods, premium := ixPreviewAllSignal(a)
 	b := a.ixPreviewAllBox()
 	b.mu.Lock()
@@ -501,6 +504,10 @@ func (a *App) ixPreviewAllRound(ctx context.Context) time.Duration {
 	if _, on := a.ixPreviewAllOn(ctx); !on {
 		a.ixPreviewAllSetWhy("")
 		return 5 * time.Minute
+	}
+	if ixRemoteChecksBusy(a) {
+		a.ixPreviewAllSetWhy("paused: downloads have priority while Telegram is busy or speed-limited")
+		return time.Minute
 	}
 	b := a.ixPreviewAllBox()
 	b.mu.Lock()

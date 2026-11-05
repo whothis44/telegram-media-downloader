@@ -231,6 +231,7 @@ func TestPacerRemembersWhatItLearned(t *testing.T) {
 	p := newDownloadPacer(path)
 	p.mu.Lock()
 	d := p.dcLocked(4)
+	d.window = 4 // persistence is independent of the startup default
 	d.waited, d.bytes, d.floods = true, 1<<20, 1
 	p.mu.Unlock()
 	p.tick() // a flood: 4 → 2

@@ -33,6 +33,9 @@ func (a *Account) FreezeState(ctx context.Context) (FreezeState, error) {
 	if !ok {
 		return FreezeState{}, errors.New("Telegram sent no app configuration")
 	}
+	if a.files != nil {
+		a.files.configure(cfg.Config)
+	}
 	return freezeFromConfig(cfg.Config), nil
 }
 

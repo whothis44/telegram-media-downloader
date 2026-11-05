@@ -526,10 +526,12 @@ func (a *App) ixSampleCheck(ctx context.Context, r ixCopyReader, msg *tg.Message
 		case res.Why == ixSampleWhyFlood:
 			res.Note = "Telegram asked to wait: " + why.Error()
 		case res.Why == ixSampleWhyTimeout:
-			res.Note = "could not check without downloading: " + context.Cause(ctx).Error()
-			if why != nil && context.Cause(ctx) == nil {
-				res.Note = "could not check without downloading: " + why.Error()
+			// A file request can time out without canceling the check.
+			cause := context.Cause(ctx)
+			if cause == nil {
+				cause = why
 			}
+			res.Note = "could not check without downloading: " + cause.Error()
 		case why != nil:
 			res.Note = "could not check without downloading: " + why.Error()
 		case lastErr != nil:
@@ -648,6 +650,9 @@ func (a *App) ixSampleJobs(ctx context.Context, heldOnly bool, n int) ([]ixSampl
 // ixSampleRound checks a few big queued videos (heldOnly: only held ones,
 // as just before they would be let go).
 func (a *App) ixSampleRound(ctx context.Context, heldOnly bool) error {
+	if ixRemoteChecksBusy(a) {
+		return nil
+	}
 	if a.ixIsGone() {
 		return nil // read-only: nothing may talk to Telegram, and that is no error
 	}
@@ -666,6 +671,9 @@ func (a *App) ixSampleRound(ctx context.Context, heldOnly bool) error {
 		}
 	}()
 	for _, j := range jobs {
+		if ixRemoteChecksBusy(a) {
+			return nil
+		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}

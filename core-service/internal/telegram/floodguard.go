@@ -120,6 +120,10 @@ func (g *floodGuard) wait(ctx context.Context) error {
 }
 
 func (g *floodGuard) waitGate(ctx context.Context, files bool) error {
+	return g.waitGateObserved(ctx, files, nil, nil)
+}
+
+func (g *floodGuard) waitGateObserved(ctx context.Context, files bool, waited func(time.Duration), waiting func(bool)) error {
 	for {
 		g.mu.Lock()
 		delay := time.Until(g.until)
@@ -130,12 +134,31 @@ func (g *floodGuard) waitGate(ctx context.Context, files bool) error {
 		if delay <= 0 {
 			return g.limiter.Wait(ctx)
 		}
+		resume := pauseDownloadWait(ctx)
+		if waiting != nil {
+			waiting(true)
+		}
+		finish := func() {
+			resume()
+			if waiting != nil {
+				waiting(false)
+			}
+		}
+		started := time.Now()
 		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
+			finish()
+			if waited != nil {
+				waited(time.Since(started))
+			}
 			return ctx.Err()
 		case <-timer.C:
+		}
+		finish()
+		if waited != nil {
+			waited(time.Since(started))
 		}
 	}
 }
@@ -152,6 +175,8 @@ func (g *floodGuard) invoke(ctx context.Context, next tg.Invoker, input bin.Enco
 type partHooks struct {
 	flood    func(d time.Duration, premium bool)
 	answered func(took time.Duration)
+	waited   func(time.Duration)
+	waiting  func(bool)
 }
 
 // filePartTimeout gives up on one file part that has not been answered in
@@ -170,7 +195,7 @@ func (g *floodGuard) invokeFiles(ctx context.Context, next tg.Invoker, input bin
 
 func (g *floodGuard) invokeGate(ctx context.Context, next tg.Invoker, input bin.Encoder, output bin.Decoder, files bool, hooks partHooks) error {
 	for attempt := 0; ; attempt++ {
-		if err := g.waitGate(ctx, files); err != nil {
+		if err := g.waitGateObserved(ctx, files, hooks.waited, hooks.waiting); err != nil {
 			return err
 		}
 		var err error
@@ -199,6 +224,13 @@ func (g *floodGuard) invokeGate(ctx context.Context, next tg.Invoker, input bin.
 			hooks.flood(d, tgerr.Is(err, tgerr.ErrPremiumFloodWait))
 		}
 		g.closeGate(d, files, tgerr.Is(err, tgerr.ErrPremiumFloodWait))
+		// A regular account may receive speed-limit waits for hours. Keep
+		// the same part/transfer alive, without spending failure attempts or
+		// throwing away bytes already written. The next loop waits on the
+		// shared gate; cancellation remains immediate even for long waits.
+		if tgerr.Is(err, tgerr.ErrPremiumFloodWait) {
+			continue
+		}
 		if d > floodSleepThreshold || attempt >= floodInlineRetries {
 			return err
 		}

@@ -15,11 +15,9 @@ import (
 // The download pacer: how many file parts an account asks Telegram for at
 // once, found by measuring rather than set by hand.
 //
-// Telegram limits file downloads per account by the number of requests in
-// flight and over time; past the limit it answers FLOOD_WAIT and nothing
-// moves for that long. Official clients stay well inside it (TDLib keeps
-// about 2 MiB of parts in flight per datacenter on a free account, 16 MiB
-// with Premium). Asking for more than the limit is slower, not faster.
+// This build uses conservative regular-account defaults: two requests to
+// start, at most eight per datacenter. These are local tuning choices, not
+// Telegram quotas. Separate file slots follow Telegram's app configuration.
 //
 // So each datacenter gets a window: the parts that may be in flight at once,
 // shared by every download of the account. Every ten seconds the pacer looks
@@ -30,10 +28,9 @@ import (
 //     in the minute after a cut answer requests sent before it and are not
 //     cut for again;
 //   - when downloads keep waiting for room and nothing flooded, it tries a
-//     different window for three intervals and compares their average speed
-//     with the intervals before. A bigger window (one part more, or a quarter
-//     more while tries keep paying in full and Telegram has never asked to
-//     wait) is kept only if it brings at least half of what it could; a
+//     different window for six intervals and compares their average speed
+//     with a fresh baseline. A bigger window (one part more) is kept only
+//     if it brings at least half of what it could; a
 //     smaller one is kept if it loses less than half of what it could. After
 //     a bigger window brought nothing, the next try is a smaller one, so a
 //     lucky measurement is taken back later rather than built on;
@@ -42,7 +39,8 @@ import (
 //     speed: Telegram may slow an account down instead of asking it to
 //     wait, and more parts then only wait longer, until they time out;
 //   - a FLOOD_PREMIUM_WAIT (Telegram's speed limit for accounts without
-//     Premium) is waited out without changing the window;
+//     Premium), an ongoing Telegram wait, or an interval containing a wait
+//     suspends learning, including the slow-response rule;
 //   - when nobody waits for room, the window stays as it is.
 //
 // The window learned for each datacenter is kept next to the session, so a
@@ -54,17 +52,17 @@ import (
 
 const (
 	paceInterval   = 10 * time.Second
-	paceStart      = 4   // parts in flight on a datacenter not seen before (TDLib's free tier is 2 MiB)
+	paceStart      = 2   // conservative starting point for regular accounts
 	paceMin        = 1   // never fewer
-	paceMax        = 32  // never more: twice Telegram Desktop's 16 MiB; about 100 drew -429 on every socket (MadelineProto)
+	paceMax        = 8   // local regular-account ceiling, not a claimed Telegram quota
 	paceGainShare  = 0.5 // a try is kept when it brings at least half the speed it could (step/window)
 	paceCut        = 0.6
 	paceFloodHold  = time.Minute
 	pacePlateau    = 2 * time.Minute
 	paceCeiling    = 10 * time.Minute // after a flood, stay below the window it happened at this long
 	paceCeilingMin = 3                // the window under a flood's ceiling may still be 2
-	paceTrial      = 3                // intervals a try is measured over
-	paceBase       = 2                // intervals measured at a window before trying another
+	paceTrial      = 6                // one minute of measurements per trial
+	paceBase       = 3                // thirty seconds of fresh baseline measurements
 	paceHistoryLen = 30               // intervals kept for the 5-minute speed
 	paceFullRecent = 2 * time.Minute  // windows full this recently say how many files are enough
 	paceSlow       = 8 * time.Second  // parts answered slower than this on average: fewer in flight
@@ -105,7 +103,6 @@ type dcPace struct {
 	trialSpeeds  []float64
 	trialFull    bool
 	nextDown     bool // the last bigger window brought nothing: try a smaller one next
-	growFast     bool // the last try paid in full: try a bigger step next
 	holdUntil    time.Time
 	lastCut      time.Time
 	ceiling      int // the window a flood happened at
@@ -113,11 +110,14 @@ type dcPace struct {
 	fullAt       time.Time // the last interval downloads waited for room
 	state        string
 
-	speed     float64   // bytes a second, last interval
-	history   []float64 // last intervals' speeds
-	floodAt   []time.Time
-	premiumAt []time.Time
-	lastUse   time.Time
+	speed       float64   // bytes a second, last interval
+	history     []float64 // last intervals' speeds
+	floodAt     []time.Time
+	premiumAt   []time.Time
+	lastUse     time.Time
+	gateWait    time.Duration // cumulative deliberate waits, summed across requests
+	gateWaiting int           // requests currently sleeping for Telegram
+	waitedGate  bool          // an interval containing a wait is not a throughput experiment
 }
 
 type downloadPacer struct {
@@ -141,8 +141,8 @@ func newDownloadPacer(path string) *downloadPacer {
 			var kept map[string]int
 			if json.Unmarshal(data, &kept) == nil {
 				for k, v := range kept {
-					if dc, err := strconv.Atoi(k); err == nil && v >= paceMin && v <= paceMax {
-						p.saved[dc] = v
+					if dc, err := strconv.Atoi(k); err == nil && v >= paceMin {
+						p.saved[dc] = min(v, paceMax)
 					}
 				}
 			}
@@ -172,6 +172,9 @@ func (d *dcPace) broadcast() {
 // acquire waits for room to ask for one more part from dc.
 func (p *downloadPacer) acquire(ctx context.Context, dc int) error {
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		p.mu.Lock()
 		d := p.dcLocked(dc)
 		d.lastUse = p.now()
@@ -184,14 +187,17 @@ func (p *downloadPacer) acquire(ctx context.Context, dc int) error {
 		d.waiting++
 		ch := d.wake
 		p.mu.Unlock()
+		resume := pauseDownloadWait(ctx)
 		select {
 		case <-ctx.Done():
+			resume()
 			p.mu.Lock()
 			d.waiting--
 			p.mu.Unlock()
 			return ctx.Err()
 		case <-ch:
 		}
+		resume()
 		p.mu.Lock()
 		d.waiting--
 		p.mu.Unlock()
@@ -218,6 +224,25 @@ func (p *downloadPacer) answered(dc int, took time.Duration) {
 	d := p.dcLocked(dc)
 	d.took += took
 	d.answers++
+}
+
+func (p *downloadPacer) waited(dc int, took time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.dcLocked(dc).gateWait += took
+	p.dcLocked(dc).waitedGate = true
+}
+
+func (p *downloadPacer) waitingOnTelegram(dc int, on bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	d := p.dcLocked(dc)
+	if on {
+		d.gateWaiting++
+	} else {
+		d.gateWaiting--
+		d.waitedGate = true
+	}
 }
 
 // flood records a wait Telegram answered a part of dc with. A
@@ -281,16 +306,30 @@ func (p *downloadPacer) tick() {
 		if d.answers > 0 {
 			d.lastTook = d.took / time.Duration(d.answers)
 		}
-		before := d.window
+		before, trialBefore := d.window, d.trial
 		switch {
 		case d.floods > 0 && now.Sub(d.lastCut) >= paceFloodHold:
 			d.ceiling, d.ceilingUntil = max(paceCeilingMin, d.window), now.Add(paceCeiling)
 			d.window = max(paceMin, int(math.Floor(float64(d.window)*paceCut)))
-			d.trial, d.growFast, d.nextDown, d.steady = 0, false, false, nil
+			d.trial, d.nextDown, d.steady = 0, false, nil
 			d.holdUntil, d.lastCut = now.Add(paceFloodHold), now
 			d.state = "slowed: Telegram asked to wait"
 		case d.floods > 0:
 			// Answers to parts asked for before the last cut.
+		case d.premium > 0 || d.gateWaiting > 0 || d.waitedGate:
+			// Speed-limit waits invalidate the experiment, including slow
+			// replies/timeouts observed in the same interval. Preserve the
+			// last stable window and wait before taking fresh measurements.
+			if d.trial != 0 {
+				d.window, d.trial = d.trialFrom, 0
+			}
+			d.steady = nil
+			if until := now.Add(paceFloodHold); until.After(d.holdUntil) {
+				d.holdUntil = until
+			}
+			d.state = "waiting for Telegram; keeping stable concurrency"
+		case now.Before(d.holdUntil):
+			d.steady = nil // do not compare a new trial with pre-wait speeds
 		case d.answers > 0 && d.took/time.Duration(d.answers) > paceSlow && d.window > paceSlowMin && now.Sub(d.lastCut) >= paceFloodHold:
 			// Telegram answers slowly (it may slow an account down rather
 			// than ask it to wait). Parts in flight are speed × time per
@@ -302,21 +341,9 @@ func (p *downloadPacer) tick() {
 				d.window, d.trial = d.trialFrom, 0
 			}
 			d.window = max(paceSlowMin, int(float64(d.window)*paceSlow.Seconds()/lat.Seconds()))
-			d.growFast, d.nextDown, d.steady = false, false, nil
+			d.nextDown, d.steady = false, nil
 			d.holdUntil, d.lastCut = now.Add(paceFloodHold), now
 			d.state = "slowed: Telegram answers slowly"
-		case d.premium > 0:
-			// Telegram's speed limit for free accounts: keep the window,
-			// take back a try (its speed says nothing now) and try nothing
-			// while it lasts.
-			if d.trial != 0 {
-				d.window, d.trial = d.trialFrom, 0
-			}
-			d.steady = nil
-			if until := now.Add(paceFloodHold); until.After(d.holdUntil) {
-				d.holdUntil = until
-			}
-			d.state = "slowed: Telegram's speed limit for accounts without Premium"
 		case d.trial != 0:
 			d.trialSpeeds = append(d.trialSpeeds, d.speed)
 			d.trialFull = d.trialFull || d.waited
@@ -324,9 +351,8 @@ func (p *downloadPacer) tick() {
 				break
 			}
 			d.judgeTrial(now)
-		case now.Before(d.holdUntil):
-			// Holding after a flood or a try that brought nothing.
 		case !d.waited:
+			d.steady = nil
 			if d.bytes == 0 {
 				d.state = "idle"
 			} else {
@@ -348,9 +374,6 @@ func (p *downloadPacer) tick() {
 				d.state = "at the most it may ask for"
 			default:
 				step = 1
-				if d.growFast && d.ceiling == 0 {
-					step = max(1, d.window/4)
-				}
 				if now.Before(d.ceilingUntil) {
 					step = min(step, d.ceiling-1-d.window)
 				}
@@ -359,6 +382,7 @@ func (p *downloadPacer) tick() {
 			if step != 0 {
 				d.trial, d.trialFrom, d.trialBase = step, d.window, meanOf(d.steady)
 				d.trialLeft, d.trialSpeeds, d.trialFull = paceTrial, nil, false
+				d.steady = nil
 				d.window += step
 				if step > 0 {
 					d.state = "trying more"
@@ -371,8 +395,12 @@ func (p *downloadPacer) tick() {
 			changed = true
 			d.broadcast()
 		}
+		if trialBefore != 0 && d.trial == 0 {
+			changed = true // persist an accepted trial even if its window stayed the same
+		}
 		d.bytes, d.parts, d.floods, d.premium, d.waited = 0, 0, 0, 0, false
 		d.took, d.answers = 0, 0
+		d.waitedGate = false
 		d.floodAt = trimTimes(d.floodAt, now.Add(-time.Hour))
 		d.premiumAt = trimTimes(d.premiumAt, now.Add(-time.Hour))
 	}
@@ -401,24 +429,22 @@ func (d *dcPace) judgeTrial(now time.Time) {
 		d.window, d.state = from, "not limiting"
 	case step > 0 && change >= paceGainShare*could:
 		d.steady = lastOf(d.trialSpeeds, paceTrial)
-		d.growFast = change >= 0.8*could
 		d.nextDown = false
 		d.state = "faster with more"
 	case step > 0:
 		d.window = from
 		d.holdUntil = now.Add(pacePlateau)
-		d.growFast, d.nextDown = false, true
-		d.state = "at its best"
+		d.nextDown = true
+		d.state = "no measured gain; holding"
 	case -change < paceGainShare*could:
 		// As fast with fewer: keep fewer, and see whether fewer still do.
 		d.steady = lastOf(d.trialSpeeds, paceTrial)
-		d.growFast = false
 		d.state = "as fast with fewer"
 	default:
 		d.window = from
 		d.holdUntil = now.Add(pacePlateau)
 		d.nextDown = false
-		d.state = "at its best"
+		d.state = "fewer parts reduced speed; holding"
 	}
 }
 
@@ -436,8 +462,12 @@ func (p *downloadPacer) saveLocked() {
 	}
 	kept := map[string]int{}
 	for dc, d := range p.dcs {
-		kept[strconv.Itoa(dc)] = d.window
-		p.saved[dc] = d.window
+		stable := d.window
+		if d.trial != 0 {
+			stable = d.trialFrom
+		}
+		kept[strconv.Itoa(dc)] = stable
+		p.saved[dc] = stable
 	}
 	data, _ := json.Marshal(kept)
 	tmp := p.path + ".tmp"
@@ -466,16 +496,22 @@ func (p *downloadPacer) run(ctx context.Context) {
 
 // DCPace is one datacenter's figures.
 type DCPace struct {
-	DC        int     `json:"dc"`
-	Window    int     `json:"window"`   // parts that may be in flight
-	InFlight  int     `json:"inFlight"` // parts in flight now
-	Waiting   int     `json:"waiting"`  // requests waiting for room
-	Speed     float64 `json:"speed"`    // bytes a second, last 10 s
-	Speed5m   float64 `json:"speed5m"`  // bytes a second, last 5 minutes
-	Floods1h  int     `json:"floods1h"`
-	Premium1h int     `json:"premium1h"` // FLOOD_PREMIUM_WAITs in the last hour
-	PartSecs  float64 `json:"partSecs"`  // seconds Telegram took per part, last interval
-	State     string  `json:"state"`
+	DC             int     `json:"dc"`
+	Window         int     `json:"window"`   // parts that may be in flight
+	InFlight       int     `json:"inFlight"` // parts in flight now
+	Waiting        int     `json:"waiting"`  // requests waiting for room
+	Speed          float64 `json:"speed"`    // bytes a second, last 10 s
+	Speed5m        float64 `json:"speed5m"`  // bytes a second, last 5 minutes
+	Floods1h       int     `json:"floods1h"`
+	Premium1h      int     `json:"premium1h"`    // FLOOD_PREMIUM_WAITs in the last hour
+	PartSecs       float64 `json:"partSecs"`     // seconds Telegram took per part, last interval
+	GateWaitSecs   float64 `json:"gateWaitSecs"` // cumulative Telegram wait seconds, summed across requests
+	GateWaiting    int     `json:"gateWaiting"`  // request slots sleeping for Telegram, not transferring
+	SmallFiles     int     `json:"smallFiles"`
+	LargeFiles     int     `json:"largeFiles"`
+	SmallFileLimit int     `json:"smallFileLimit"`
+	LargeFileLimit int     `json:"largeFileLimit"`
+	State          string  `json:"state"`
 }
 
 // PaceStats is the account's download pacing.
@@ -513,6 +549,8 @@ func (p *downloadPacer) stats() PaceStats {
 			avg /= float64(len(d.history))
 		}
 		x := DCPace{PartSecs: d.lastTook.Seconds(), DC: d.dc, Window: d.window, InFlight: d.inflight, Waiting: d.waiting, Speed: d.speed, Speed5m: avg, Floods1h: len(trimTimes(d.floodAt, now.Add(-time.Hour))), Premium1h: len(trimTimes(d.premiumAt, now.Add(-time.Hour))), State: d.state}
+		x.GateWaitSecs = d.gateWait.Seconds()
+		x.GateWaiting = d.gateWaiting
 		s.DCs = append(s.DCs, x)
 		s.Speed += x.Speed
 		s.Speed5m += x.Speed5m

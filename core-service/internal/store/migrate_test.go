@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -95,7 +96,11 @@ func TestOpenCreatesMissingDataDirectory(t *testing.T) {
 
 func TestEveryPooledConnectionHasRequiredSettings(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(ctx, filepath.Join(t.TempDir(), "data ? # with spaces"))
+	name := "data ? # with spaces"
+	if runtime.GOOS == "windows" {
+		name = "data % # with spaces" // '?' is not a valid Windows filename
+	}
+	db, err := Open(ctx, filepath.Join(t.TempDir(), name))
 	if err != nil {
 		t.Fatal(err)
 	}

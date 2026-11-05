@@ -242,6 +242,9 @@ func (a *App) ixHeldStep(ctx context.Context) error {
 	}
 	// Just before they would go, big held videos not checked yet are
 	// checked by sampling (ix_copies_sample.go): a confirmed copy stays.
+	if ixRemoteChecksBusy(a) {
+		return nil // defer release too; skipping a check is not a negative result
+	}
 	ixBeforeReleaseHook(a, ctx)
 	return a.ixReleaseSome(ctx, 25, s.ConfirmedGoEarly || a.ixOnlyConfirmedLeft(ctx))
 }

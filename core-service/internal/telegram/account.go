@@ -187,6 +187,7 @@ func (a *Account) run(ctx context.Context, ready func(), jobsOnly bool) error {
 		}
 		a.selfID = status.User.ID
 		a.self.Store(status.User.ID)
+		a.loadDownloadLimits(ctx)
 		return a.observation.run(ctx, ready, jobsOnly, func(ctx context.Context, observingReady func()) error {
 			if a.repairs.Load() {
 				// Start downloading at once; earlier gaps are repaired in the

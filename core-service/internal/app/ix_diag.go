@@ -158,6 +158,8 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 	line("speed %.2f MB/s now, %.2f MB/s over 5 min · parts in flight allowed %d · Telegram waits: %d in the last hour, %d in the last day · speed-limit waits (no Premium): %d in the last hour, %d in the last day", mb(d.Pace.Speed), mb(d.Pace.Speed5m), d.Pace.Window, d.Pace.Floods1h, d.Pace.Floods24h, d.Pace.Premium1h, d.Pace.Premium24h)
 	for _, dc := range d.Pace.DCs {
 		line("  DC%d: window %d, in flight %d, waiting %d, %.2f MB/s (5 min %.2f), %.1f s a part, waits last hour %d (speed limit %d) · %s", dc.DC, dc.Window, dc.InFlight, dc.Waiting, mb(dc.Speed), mb(dc.Speed5m), dc.PartSecs, dc.Floods1h, dc.Premium1h, dc.State)
+		line("    Telegram wait time since start: %.1f request-seconds (summed across requests, separate from network response time)", dc.GateWaitSecs)
+		line("    waiting for Telegram now %d requests; file slots: small %d/%d, large %d/%d (20 MB boundary)", dc.GateWaiting, dc.SmallFiles, dc.SmallFileLimit, dc.LargeFiles, dc.LargeFileLimit)
 	}
 	bf := d.Big
 	line("big files (%d MB or more): %d downloading (at most %d at once, 0 = no limit) · %d waiting · %d set aside · %d held · backfills queueing files %d · queue %d of %d · backfill paused by the queue limit %v",

@@ -69,6 +69,12 @@ func Open(ctx context.Context, dataDir string) (*DB, error) {
 // subsequent readers/writers without the intended busy timeout or constraints.
 func sqliteDSN(path string) string {
 	u := url.URL{Scheme: "file", Path: filepath.ToSlash(path)}
+	// A drive-qualified Windows path needs the leading URI slash:
+	// file:///C:/... . Otherwise url.URL emits file://C:/... and SQLite
+	// treats the drive letter as an invalid hostname.
+	if volume := filepath.VolumeName(path); len(volume) == 2 && volume[1] == ':' {
+		u.Path = "/" + u.Path
+	}
 	q := url.Values{}
 	q.Add("_pragma", "busy_timeout(5000)")
 	q.Add("_pragma", "foreign_keys(1)")

@@ -492,6 +492,9 @@ func (a *App) ixPreviewRound(ctx context.Context) error {
 		}
 		data, w, h := a.ixPreviewKept(j.kept)
 		if data == nil {
+			if ixRemoteChecksBusy(a) {
+				continue
+			}
 			if asked > 0 && ixPreviewGap > 0 {
 				select {
 				case <-ctx.Done():
@@ -509,10 +512,10 @@ func (a *App) ixPreviewRound(ctx context.Context) error {
 			}
 			data, w, h, err = ixFetchPreview(r, j.body)
 			if err != nil {
-				a.ixPreviewFailed(ctx, j.f, err.Error())
 				if ixSlowDown(err) {
 					return nil // Telegram wants the account to wait: next round
 				}
+				a.ixPreviewFailed(ctx, j.f, err.Error())
 				continue
 			}
 		}

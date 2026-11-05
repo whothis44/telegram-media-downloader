@@ -62,6 +62,7 @@ func (w trackedWriter) Write(p []byte) (int, error) {
 	return total, nil
 }
 func (t trackedTransport) DownloadMedia(ctx context.Context, a telegram.Attachment, w io.Writer) error {
+	ctx = telegram.WithDownloadWait(ctx, t.PauseBudget)
 	return t.MediaDownloader.DownloadMedia(ctx, a, trackedWriter{Writer: w, stats: t.stats, total: t.total, ctx: ctx, bandwidth: t.bandwidth, budget: t.budget})
 }
 

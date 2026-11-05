@@ -105,16 +105,17 @@ type ixDlState struct {
 	Aside       ixDlAside `json:"aside"`
 	ToDownload  int       `json:"toDownload"` // in the queue, plus found missing and not queued yet
 	// What the verdict went by.
-	EngineRunning bool       `json:"engineRunning"`
-	QueuePaused   bool       `json:"queuePaused"`
-	ReadOnly      bool       `json:"readOnly"`
-	QuietMin      int        `json:"quietMin"`     // minutes since bytes arrived or a file finished
-	SpeedWaits    int        `json:"speedWaits"`   // Telegram's speed-limit waits, last 10 minutes
-	OtherWaits    int        `json:"otherWaits"`   // its other waits, last 10 minutes
-	SafetyNet     string     `json:"safetyNet"`    // stalled only: "soon" (set-aside files are let go then), "on" (they were), or ""
-	SafetyNetMin  int        `json:"safetyNetMin"` // soon: minutes until; on: minutes it lasts
-	Rescan        ixDlRescan `json:"rescan"`
-	heldForever   bool       // likely copies wait for a person
+	EngineRunning   bool       `json:"engineRunning"`
+	QueuePaused     bool       `json:"queuePaused"`
+	ReadOnly        bool       `json:"readOnly"`
+	QuietMin        int        `json:"quietMin"`        // minutes since bytes arrived or a file finished
+	SpeedWaits      int        `json:"speedWaits"`      // Telegram's speed-limit waits, last 10 minutes
+	TelegramWaiting int        `json:"telegramWaiting"` // requests currently waiting for Telegram
+	OtherWaits      int        `json:"otherWaits"`      // its other waits, last 10 minutes
+	SafetyNet       string     `json:"safetyNet"`       // stalled only: "soon" (set-aside files are let go then), "on" (they were), or ""
+	SafetyNetMin    int        `json:"safetyNetMin"`    // soon: minutes until; on: minutes it lasts
+	Rescan          ixDlRescan `json:"rescan"`
+	heldForever     bool       // likely copies wait for a person
 }
 
 var ixDlBoxes sync.Map // *App -> *ixCached[ixDlState]
@@ -138,6 +139,9 @@ func (a *App) ixDlMeasure(ctx context.Context, now time.Time) (ixDlState, bool) 
 	st.QuietMin = int(now.Sub(a.ixDlLastMove(ctx, now)) / time.Minute)
 	p := ixDlPace(a)
 	st.SpeedWaits, st.OtherWaits = p.Premium10m, p.Floods10m
+	for _, dc := range p.DCs {
+		st.TelegramWaiting += dc.GateWaiting
+	}
 	a.ixDlRescanNow(ctx, now, &st.Rescan)
 	st.ToDownload = st.Ready + st.Downloading + st.RetryLater + st.SetAside + st.Rescan.NotQueued
 	// Only worth a look when it can change the verdict or the advice.
@@ -277,6 +281,8 @@ func ixDlDecide(st *ixDlState) {
 		st.Verdict = ixDlReadOnly
 	case st.QueuePaused || !st.EngineRunning:
 		st.Verdict = ixDlPaused
+	case st.TelegramWaiting > 0 && goes > 0:
+		st.Verdict = ixDlSpeedLimited
 	case goes > 0 && !moving:
 		st.Verdict = ixDlStalled
 	case st.SpeedWaits+st.OtherWaits > 0 && goes > 0:

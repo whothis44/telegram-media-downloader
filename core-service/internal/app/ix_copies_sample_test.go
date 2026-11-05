@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -309,6 +310,63 @@ func (r *ixThrottledReader) FilePart(a telegram.Attachment, offset int64) ([]byt
 		return nil, errors.New("rpc error code 420: FLOOD_PREMIUM_WAIT_30")
 	}
 	return r.ixFakeReader.FilePart(a, offset)
+}
+
+type ixSampleErrorReader struct {
+	*ixFakeReader
+	err error
+}
+
+func (r *ixSampleErrorReader) FilePart(telegram.Attachment, int64) ([]byte, error) {
+	return nil, r.err
+}
+
+// The session's per-part deadline can expire while the sampling context
+// remains live. Report a retryable failure instead of panicking and taking
+// every active download down with the server.
+func TestIxSamplePartTimeoutWithLiveContext(t *testing.T) {
+	a, ctx := ixTestApp(t)
+	key := "h:" + ixSixtyFour("8")
+	if err := a.ixVdupSave(ctx, key, "c/v.mp4", 600, []ixVFrame{{T: 30, H: 123, HF: 456}}, ""); err != nil {
+		t.Fatal(err)
+	}
+	savedFrame := ixSampleFrame
+	t.Cleanup(func() { ixSampleFrame = savedFrame })
+	ixSampleFrame = func(ctx context.Context, address string, at float64) (ixSampledFrame, bool, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, address, nil)
+		if err != nil {
+			return ixSampledFrame{}, false, err
+		}
+		req.Header.Set("Range", "bytes=0-15")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return ixSampledFrame{}, false, err
+		}
+		defer resp.Body.Close()
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return ixSampledFrame{}, false, errors.New("ffmpeg: Input/output error")
+	}
+	for _, partErr := range []error{
+		context.DeadlineExceeded,
+		context.Canceled,
+		fmt.Errorf("read file part: %w", context.DeadlineExceeded),
+	} {
+		t.Run(partErr.Error(), func(t *testing.T) {
+			msg := ixTestVideo(950, 950, 300<<20, 600, 1280, 720, nil, 1700000000)
+			f, _ := ixCopyFactsOf(msg)
+			r := &ixSampleErrorReader{ixFakeReader: &ixFakeReader{}, err: partErr}
+			res := a.ixSampleCheck(ctx, r, msg, f, key)
+			if ctx.Err() != nil {
+				t.Fatalf("outer context canceled: %v", ctx.Err())
+			}
+			if res.Result != "failed" || res.Why != ixSampleWhyTimeout || ixSampleFinal(res.Why) {
+				t.Fatalf("expected retryable timeout: %+v", res)
+			}
+			if want := "could not check without downloading: " + partErr.Error(); res.Note != want {
+				t.Fatalf("note = %q, want %q", res.Note, want)
+			}
+		})
+	}
 }
 
 // Under Telegram's speed limit each part takes long: the check's own time

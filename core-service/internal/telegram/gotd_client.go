@@ -43,6 +43,7 @@ type GotdClient struct {
 	threads *threadTuner
 	// pacer sets how many file parts are in flight per datacenter.
 	pacer *downloadPacer
+	files *downloadFiles
 }
 
 // DownloadPace reports the account's download pacing.
@@ -51,6 +52,9 @@ func (c *GotdClient) DownloadPace() PaceStats {
 		return PaceStats{}
 	}
 	s := c.pacer.stats()
+	if c.files != nil {
+		c.files.fillStats(&s)
+	}
 	s.Hours = c.pacer.hoursNewestFirst()
 	return s
 }
@@ -123,7 +127,7 @@ func NewGotdClient(cfg GotdConfig) (*GotdClient, error) {
 		}
 		options.Logger = logslog.New(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slogLevel})))
 	}
-	return &GotdClient{guard: guard, threads: newThreadTuner(maxDownloadThreads), pacer: newDownloadPacer(cfg.SessionPath + ".pace.json"), client: gotd.NewClient(cfg.AppID, cfg.AppHash, options)}, nil
+	return &GotdClient{guard: guard, threads: newThreadTuner(maxDownloadThreads), pacer: newDownloadPacer(cfg.SessionPath + ".pace.json"), files: newDownloadFiles(), client: gotd.NewClient(cfg.AppID, cfg.AppHash, options)}, nil
 }
 
 func ensureConvertedSession(cfg GotdConfig, storage session.Storage) error {
