@@ -2,6 +2,31 @@
 
 All notable changes to this project are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.18-ix.11] — 2026-11-04
+
+### Added
+- **Archive -> Priorities: rank your groups, and the ranking reaches the downloads.** It orders reading messages, queueing files and which file downloads next, and it outlives a rescan. Two policies: finish in order, or spread coverage. See `docs/GROUP-PRIORITY.md`, including its limits.
+- **A file in several groups is one piece of work.** It goes at the best rank of any group needing it and transfers once, and every group is credited. Rows of a file already saved take no bytes and no Telegram request.
+- **Honest coverage per group, in files and bytes:** saved, through other groups, probable, still needed. Each file counts once globally, and sampled or look-alike matches are never counted as saved.
+
+### Fixed
+- **A timeout in the big-video duplicate check crashed the whole server, stopping every download** (since ix.10.1). Fixed, and a fault in any background task now restarts that task instead of ending the program.
+- **Regular-account speed limits:** waits resume the same transfer instead of failing it after a few, do not use up its time budget, and pacing no longer learns from them. Separate small and large file slots per datacenter.
+- **Duplicate checks starved on a speed-limited account:** they were paused whenever Telegram was busy, which there is nearly always. Each kind now gets a bounded turn, and a read may wait through a speed-limit wait.
+- **Queue page:** at the top of the list it follows downloads again; scrolled down, or with the pointer over it, it still keeps your place.
+- A queue full of shared or lower-ranked rows no longer stops a backfill from queueing files.
+- Video frames: a time past the end of a video no longer gives a wrong frame or costs the other frames.
+- `ix-update.ps1` never moves to an older version. **It applies when this version is installed by hand; a launcher still running the previous script updates once it sees this release.**
+- Windows drive-letter database paths.
+
+### Changed
+- Files a ranked group needs are never set aside by the deadline order; size bands break ties within a rank. Explicit requests now go ahead of live downloads rather than sharing their lane.
+- The queue table gains a column and rebuilt indexes on first start, which can take a moment on a large queue.
+- No speed improvement is claimed: nothing here has been measured on a live account, and Telegram's limits still apply.
+
+### Service worker
+- `VERSION = 'v34181'`
+
 ## [3.4.18] — 2026-11-01
 
 ### Changed

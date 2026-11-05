@@ -166,13 +166,22 @@ func ixFFmpegFrames(ctx context.Context, full string, reqs []ixFrameReq, hw stri
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		// The keyframes are still frames of the video.
-		for i, g := range got {
-			if far[i] {
-				keep = append(keep, g)
+		// Some ffmpeg builds end with an error when a time is past the end of
+		// the video: one such time must not cost the others, and its keyframe
+		// is not a frame of that time. So each goes on its own, and one that
+		// cannot be read gives nothing.
+		exact = nil
+		if len(again) > 1 {
+			for _, req := range again {
+				one, oneErr := ixFFmpegFramesRun(ctx, full, []ixFrameReq{req}, "", true)
+				if oneErr != nil && ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
+				if oneErr == nil {
+					exact = append(exact, one...)
+				}
 			}
 		}
-		return ixByTime(keep), nil
 	}
 	// A time read exactly that still comes out far before itself is past
 	// the end of the video (some ffmpeg builds give the last frame then).

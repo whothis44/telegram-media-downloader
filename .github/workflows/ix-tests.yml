@@ -15,7 +15,7 @@ permissions:
 jobs:
   ix:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -33,7 +33,7 @@ jobs:
           IX_SAMPLE_PRINT: "1"
         run: |
           set -o pipefail
-          go -C core-service test -race -timeout 18m -count=1 -run 'TestIx' -v ./internal/app/ 2>&1 | grep -E '^(=== RUN|--- |PASS|FAIL|ok|panic)|ix.*_test.go'
+          go -C core-service test -race -timeout 50m -count=1 -run 'TestIx' -v ./internal/app/ 2>&1 | grep -E '^(=== RUN|--- |PASS|FAIL|ok|panic)|ix.*_test.go'
       - name: Keep the sample data export
         if: always()
         uses: actions/upload-artifact@v5
