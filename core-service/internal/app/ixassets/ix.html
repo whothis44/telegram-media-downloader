@@ -573,6 +573,11 @@ function viewPriorities() {
   h += `<div class="status">${p.focus ? `<b>Going first now:</b> ${esc(p.focus)}.<br>` : ''}Each file counted once across all groups: <b>${fmtNum((d.saved || {}).files)}</b> saved (${fmtSize((d.saved || {}).bytes || 0)}), <b>${fmtNum((d.needed || {}).files)}</b> still needed (${fmtSize((d.needed || {}).bytes || 0)}), ${fmtNum((d.probable || {}).files)} probable copies (${fmtSize((d.probable || {}).bytes || 0)}).${p.rate > 0 ? ` Recent speed: ${fmtSize(p.rate3h * 3600)}/h over 3 hours, ${fmtSize(p.rateDay * 3600)}/h over the day.` : ''}</div>`;
   if (sel.size) h += `<div class="sticky"><div class="btns"><b>${fmtNum(sel.size)} ticked</b><button class="b primary" data-act="pr-batch" data-key="first">Put first</button><button class="b" data-act="pr-batch" data-key="last">Put last</button><span class="muted">or at rank</span><input class="t" type="number" min="1" style="width:76px" aria-label="Rank to move the ticked groups to" data-in="prioTo" data-focus="prioto" value="${esc(state.prioTo || '')}"><button class="b" data-act="pr-batch" data-key="to">Move</button><button class="b" data-act="pr-batch" data-key="remove">Take off the ranking</button><button class="mini" data-act="pr-untick">Untick all</button></div></div>`;
   h += `<div class="card"><h2>Ranked groups (${ranked.length})</h2>${state.prioBusy ? '<div class="muted" role="status">Saving…</div>' : ''}`;
+  const notQueued = ranked.filter((g) => g.notQueued);
+  if (notQueued.length) {
+    const files = notQueued.reduce((n, g) => n + ((g.needed || {}).files || 0), 0);
+    h += `<div class="status warn">${fmtNum(notQueued.length)} ranked group(s) have files missing that nothing will queue until they are rescanned (${fmtNum(files)} file(s) still needed). <button class="b" data-act="pr-rescan-missing">Add ${notQueued.length === 1 ? 'it' : 'them'} to the rescan</button> <span class="muted">Their rank stays; a paused rescan stays paused.</span></div>`;
+  }
   if (ranked.length) {
     const head = `<tr><th>Rank</th><th>Group</th><th title="In the library because this group's message brought it">Saved</th><th title="In the library through another group: the same Telegram file, or the same bytes confirmed by every part's hash">Through others</th><th title="Evidence only: a held copy, a look-alike of a saved file, or a re-upload checked on sampled parts. Never counted as saved.">Probable</th><th>Still needed</th><th>Queue</th></tr>`;
     const rows = ranked.map((g, i) => {
@@ -886,6 +891,13 @@ $app.addEventListener('click', async (ev) => {
     case 'pr-remove': prioSave(prioOrder().filter((x) => x !== id)); break;
     case 'pr-add': { const o = prioOrder(); if (!o.includes(id)) o.push(id); prioSave(o); break; }
     case 'pr-batch': prioBatch(key); break;
+    case 'pr-rescan-missing': {
+      const list = ((state.prio || {}).groups || []).filter((g) => g.place > 0 && g.notQueued).map((g) => ({ id: g.groupId, name: g.name }));
+      if (!list.length) break;
+      const r = await api('POST', '/api/ix/queue/add', { groups: list, ensureFilters: true, start: false, priority: false });
+      state.prioError = r.ok ? '' : 'Could not add: ' + errText(r);
+      loadPrio(); load(); break;
+    }
     case 'u-start': case 'u-cancel': case 'u-now': {
       if (act === 'u-now') {
         const u = state.status.update || {};

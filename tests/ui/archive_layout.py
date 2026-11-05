@@ -31,8 +31,11 @@ status = {'version': '1.0.0', 'groups': [group], 'queue': {'items': [{'groupId':
           'staging': {'suggest': 'E:\\data', 'drives': [{'root': 'C:\\', 'free': 50 << 30, 'total': 500 << 30}, {'root': 'E:\\', 'free': 900 << 30, 'total': 2000 << 30}]},
           'update': update}
 prio = {'policy': 'order', 'known': True, 'distinct': {}, 'groups': [{'groupId': 'g1', 'name': 'Invented Chat', 'rank': 0, 'place': 0, 'scanned': True,
-        'total': {}, 'saved': {}, 'shared': {}, 'probable': {}, 'needed': {}, 'neededAhead': {}, 'waiting': 'not ranked'}]}
+        'total': {}, 'saved': {}, 'shared': {}, 'probable': {}, 'needed': {}, 'neededAhead': {}, 'waiting': 'not ranked'},
+        {'groupId': 'g2', 'name': 'Invented Ranked', 'rank': 1, 'place': 1, 'scanned': True, 'notQueued': True,
+        'total': {}, 'saved': {}, 'shared': {}, 'probable': {}, 'needed': {'files': 7}, 'neededAhead': {}, 'waiting': 'files missing but not queued: add it to the rescan'}]}
 saves = []
+added = []
 
 
 def handle(route, request):
@@ -41,6 +44,9 @@ def handle(route, request):
         return route.fulfill(status=200, content_type='text/html', body=html)
     if url.startswith('/api/ix/settings') and request.method == 'POST':
         saves.append(json.loads(request.post_data))
+        return route.fulfill(status=200, content_type='application/json', body='{"success":true}')
+    if url.startswith('/api/ix/queue/add') and request.method == 'POST':
+        added.append(json.loads(request.post_data))
         return route.fulfill(status=200, content_type='application/json', body='{"success":true}')
     if url.startswith('/api/ix/priorities'):
         return route.fulfill(status=200, content_type='application/json', body=json.dumps(prio))
@@ -169,6 +175,14 @@ with sync_playwright() as p:
     page.wait_for_timeout(300)
     assert 'on' in page.get_attribute('.tabs [data-key="priorities"]', 'class')
     assert page.input_value('[data-in="prioSearch"]') == 'Invented Chat'
+
+    # Ranked groups whose files nothing will queue: one click adds them to the
+    # rescan, keeping their rank and not starting a paused rescan.
+    assert '7 file(s) still needed' in page.inner_text('#app')
+    page.click('[data-act="pr-rescan-missing"]')
+    page.wait_for_timeout(300)
+    assert added and added[-1]['groups'] == [{'id': 'g2', 'name': 'Invented Ranked'}], added
+    assert added[-1]['start'] is False and added[-1]['priority'] is False, added[-1]
 
     # A phone: no sideways scroll in any tab.
     page.set_viewport_size({'width': 375, 'height': 800})
