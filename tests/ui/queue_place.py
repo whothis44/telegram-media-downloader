@@ -178,6 +178,15 @@ with sync_playwright() as pw:
     page.wait_for_timeout(1800)  # FOLLOW_TOP_MS, then a frame
     assert page.evaluate(f'{h}.firstRow()') == '-1009000000001_4003', page.evaluate(f'{h}.firstRow()')
     assert page.evaluate(f'{h}.pill()') is None
+    # ... but not under someone tabbing through the rows.
+    page.evaluate('''() => { const r = document.querySelector('#queue-rows button, #queue-rows input'); r.focus(); window.__focused = r; }''')
+    page.evaluate(f'{h}.arrive(5001, 1)')
+    page.wait_for_timeout(1800)
+    assert page.evaluate('document.activeElement === window.__focused'), 'the list was repainted under the keyboard focus'
+    assert page.evaluate(f'{h}.pill()') == '1 new — show', page.evaluate(f'{h}.pill()')
+    page.evaluate('document.activeElement.blur()')
+    page.evaluate(f"{h}.finish(['-1009000000001_5001'])")
+    page.wait_for_timeout(1800)
     # ... and rows that finish leave by themselves too.
     page.evaluate(f"{h}.finish(['-1009000000001_4003'])")
     page.wait_for_timeout(1800)

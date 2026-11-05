@@ -1075,6 +1075,7 @@ let _followTimer = 0;
 // list on screen can take the live order without moving what they look at.
 function _followsTop(viewport, rowsHost) {
     if (view.frozen || _pointerOverList || viewport.scrollTop > 1) return false;
+    if (viewport.contains(document.activeElement)) return false; // tabbing through its rows
     return !rowsHost.firstElementChild || rowsHost.firstElementChild.dataset.key === _order[0];
 }
 
