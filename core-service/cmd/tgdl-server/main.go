@@ -48,6 +48,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 0
 		}
 	}
+	if superviseWanted(args) {
+		// The server as a child, its crash words kept (supervise.go); when the
+		// child cannot start, it runs here as before.
+		if code, ok := supervise(stderr); ok {
+			return code
+		}
+	}
 	cfg, err := config.FromFullEnv(os.Getenv)
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, err)
