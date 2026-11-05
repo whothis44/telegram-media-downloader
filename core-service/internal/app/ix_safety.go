@@ -19,6 +19,11 @@ import (
 
 const ixSettingsKey = "ix_settings"
 
+// ixSafetyAppliesSettings: the safety loop re-applies the engine's settings once a
+// minute. They are global, so in tests that hold them to a value it would overwrite
+// them part-way through a long run.
+var ixSafetyAppliesSettings = true
+
 type ixSettings struct {
 	ExportEnabled bool   `json:"exportEnabled"` // write the static index every night
 	ExportTime    string `json:"exportTime"`    // HH:MM, local time of the server
@@ -254,7 +259,9 @@ func (a *App) ixRunSafety(ctx context.Context) {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 	for ctx.Err() == nil {
-		ixApplyEngineSettings(a.ixLoadSettings(ctx))
+		if ixSafetyAppliesSettings {
+			ixApplyEngineSettings(a.ixLoadSettings(ctx))
+		}
 		now := time.Now().UnixMilli()
 		st := ixClassify(a.ixGoneFilter(ctx, a.ixRecentErrors(ctx, now-6*60*60*1000), now), now)
 		old := a.ixAccount()
