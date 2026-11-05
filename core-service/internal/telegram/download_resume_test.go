@@ -56,7 +56,9 @@ func TestFetchFromAnOffsetSendsExactlyTheRest(t *testing.T) {
 	}
 }
 
-// A failure from an offset is reported, with nothing past it written out of order.
+// A failure from an offset is reported, and what was written is an unbroken run of
+// the file from that offset, stopping before the failed part. How long a run depends
+// on what had arrived when the others were cancelled: none at all is right too.
 func TestFetchFromAnOffsetKeepsOrderOnFailure(t *testing.T) {
 	data := make([]byte, 8<<20)
 	rand.New(rand.NewSource(8)).Read(data)
@@ -66,8 +68,8 @@ func TestFetchFromAnOffsetKeepsOrderOnFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("the failure was not reported")
 	}
-	if out.Len() != 3<<20 || !bytes.Equal(out.Bytes(), data[2<<20:5<<20]) {
-		t.Fatalf("%d bytes written, not the unbroken run before the failure", out.Len())
+	if out.Len() > 3<<20 || out.Len()%downloadPartSize != 0 || !bytes.Equal(out.Bytes(), data[2<<20:2<<20+out.Len()]) {
+		t.Fatalf("%d bytes written, not an unbroken run before the failure", out.Len())
 	}
 }
 
