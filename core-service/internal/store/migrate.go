@@ -235,6 +235,17 @@ func RunMigrations(ctx context.Context, db *sql.DB) (int, error) {
 			return 0, fmt.Errorf("add queue pause state: %w", err)
 		}
 	}
+	// stage_dir: a part kept in the local staging folder (its path is then
+	// relative to that folder); empty for the library's own (ix.12.3).
+	var stageDirColumn int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('tgdl_part_progress') WHERE name='stage_dir'`).Scan(&stageDirColumn); err != nil {
+		return 0, fmt.Errorf("inspect partial download schema: %w", err)
+	}
+	if stageDirColumn == 0 {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE tgdl_part_progress ADD COLUMN stage_dir TEXT NOT NULL DEFAULT ''`); err != nil {
+			return 0, fmt.Errorf("add partial download staging folder: %w", err)
+		}
+	}
 	// Descriptive Telegram media facts for likely-duplicate detection. Added
 	// columns only; existing rows simply keep NULLs.
 	for _, column := range []struct{ name, kind string }{

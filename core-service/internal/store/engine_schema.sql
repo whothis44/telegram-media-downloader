@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS tgdl_part_progress (
  offset INTEGER NOT NULL,
  sha256 TEXT NOT NULL,
  updated_at INTEGER NOT NULL,
+ stage_dir TEXT NOT NULL DEFAULT '',
  PRIMARY KEY (group_id,message_id,identity)
 );
 CREATE TABLE IF NOT EXISTS tgdl_group_rank (
