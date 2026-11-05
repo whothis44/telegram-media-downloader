@@ -192,6 +192,43 @@ INSERT INTO tgdl_work(account_id,group_id,group_name,message_id,version,identity
 	}
 }
 
+// A queue from before group ranks: its rows stay as they were, unranked, and
+// the indexes the claim walks are rebuilt once.
+func TestRankMigrationAddsOrderAndRebuildsIndexes(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Writer.Close()
+	defer db.Reader.Close()
+	if _, err = db.Writer.Exec(`DROP INDEX idx_tgdl_work_priority; DROP INDEX idx_tgdl_work_claim; DROP INDEX idx_tgdl_work_active_identity; DROP TABLE tgdl_group_rank; ALTER TABLE tgdl_work DROP COLUMN sched_order;
+CREATE INDEX idx_tgdl_work_priority ON tgdl_work(status,paused,CASE WHEN ttl_seconds>0 THEN 0 WHEN origin='history' THEN 2 ELSE 1 END,id);
+CREATE INDEX idx_tgdl_work_claim ON tgdl_work(paused,(ttl_seconds=0 AND file_size>=1073741824),CASE WHEN ttl_seconds>0 THEN 0 WHEN origin='history' THEN 2 ELSE 1 END,id) WHERE status='pending';
+INSERT INTO tgdl_work(account_id,group_id,group_name,message_id,version,identity,media_type,file_name,file_size,body,created_at,updated_at) VALUES('one','42','Media',1,1,'document:1','document','file',4,X'01',1,1)`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ { // and again: nothing to do the second time
+		if _, err = RunMigrations(ctx, db.Writer); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var order int
+	if err = db.Reader.QueryRow(`SELECT sched_order FROM tgdl_work WHERE message_id=1`).Scan(&order); err != nil || order != 131072 {
+		t.Fatalf("order=%d %v", order, err)
+	}
+	for _, name := range []string{"idx_tgdl_work_priority", "idx_tgdl_work_claim"} {
+		var index string
+		if err = db.Reader.QueryRow(`SELECT sql FROM sqlite_master WHERE name=?`, name).Scan(&index); err != nil || !strings.Contains(index, "sched_order") {
+			t.Fatalf("%s=%s %v", name, index, err)
+		}
+	}
+	var ranks int
+	if err = db.Reader.QueryRow(`SELECT COUNT(*) FROM tgdl_group_rank`).Scan(&ranks); err != nil || ranks != 0 {
+		t.Fatalf("ranks=%d %v", ranks, err)
+	}
+}
+
 func TestTTLMigrationAddsQueueLaneAndRebuildsPriorityIndex(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(ctx, t.TempDir())

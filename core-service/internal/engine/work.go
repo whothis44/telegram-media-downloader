@@ -37,7 +37,12 @@ type Work struct {
 	CreatedAt                                          int64
 	ForceRefresh                                       bool
 	Origin                                             string
-	body                                               []byte
+	Identity                                           string
+	// ClaimKey is the row's place in the claim order when it was claimed:
+	// lower goes first (claimKey). Its waits for file and part slots are
+	// ordered by it, and it yields to a better row while it only waits.
+	ClaimKey int64
+	body     []byte
 }
 
 func (w *Work) Message() (*tg.Message, error) {
@@ -104,8 +109,8 @@ func enqueueWork(ctx context.Context, db queueWriter, accountID string, target T
 	now := time.Now().UnixMilli()
 	verifyExisting := len(repair) > 0 && repair[0] && origin != "live"
 	var id int64
-	err = db.QueryRowContext(ctx, `INSERT INTO tgdl_work(account_id,group_id,group_name,message_id,version,source_pts,identity,media_type,file_name,file_size,body,created_at,updated_at,origin,ttl_seconds)
- VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	err = db.QueryRowContext(ctx, `INSERT INTO tgdl_work(account_id,group_id,group_name,message_id,version,source_pts,identity,media_type,file_name,file_size,body,created_at,updated_at,origin,ttl_seconds,sched_order)
+ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,COALESCE((SELECT sched_base FROM tgdl_group_rank WHERE group_id=?),`+unrankedOrderSQL+`))
  ON CONFLICT(group_id,message_id) DO UPDATE SET
  account_id=excluded.account_id,group_name=excluded.group_name,version=excluded.version,
  source_pts=CASE WHEN excluded.version=tgdl_work.version AND excluded.identity=tgdl_work.identity AND (? OR excluded.account_id=tgdl_work.account_id)
@@ -121,7 +126,7 @@ func enqueueWork(ctx context.Context, db queueWriter, accountID string, target T
  AND ((tgdl_work.origin='live' AND tgdl_work.status='pending')
  OR (excluded.origin='url' AND tgdl_work.origin<>'url' AND tgdl_work.status IN ('pending','processing'))))
  OR (? AND excluded.version=tgdl_work.version AND excluded.identity=tgdl_work.identity AND tgdl_work.status IN ('completed','skipped','failed'))
- RETURNING id`, accountID, target.ID, target.Name, media.MessageID, version, sourcePTS, media.Identity.Key(), media.Type, media.Name, media.Identity.Size, buffer.Buf, now, now, origin, telegram.MessageTTL(message), comparable, comparable, verifyExisting).Scan(&id)
+ RETURNING id`, accountID, target.ID, target.Name, media.MessageID, version, sourcePTS, media.Identity.Key(), media.Type, media.Name, media.Identity.Size, buffer.Buf, now, now, origin, telegram.MessageTTL(message), target.ID, comparable, comparable, verifyExisting).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		// A repeated identity can still carry a newer ordering watermark. Keep
 		// it without requeueing, otherwise an intermediate delayed edit could
@@ -133,10 +138,23 @@ func enqueueWork(ctx context.Context, db queueWriter, accountID string, target T
 	return id, err == nil, err
 }
 
-// claimPriority orders the queue as 2.x's lanes did: self-destructing media
-// first (it may vanish before its turn), then live and explicit requests,
-// then history backfill. It matches idx_tgdl_work_priority exactly.
-const claimPriority = `CASE WHEN ttl_seconds>0 THEN 0 WHEN origin='history' THEN 2 ELSE 1 END`
+// claimPriority is the lane of a queue row: self-destructing media first (it
+// may vanish before its turn), then explicit requests (a link someone pasted),
+// then live downloads and the history of ranked groups, then the history of
+// the other groups. Within a lane rows go by sched_order, then id. It matches
+// idx_tgdl_work_priority and idx_tgdl_work_claim exactly (store/migrate.go).
+//
+// sched_order is what the app's scheduler keeps up to date (app/ix_sched.go):
+// UnrankedOrder for a file no ranked group needs; lower for one a ranked group
+// needs, whichever group's message brought it to the queue. With no group
+// ranked the order is the one 2.x's lanes gave.
+const claimPriority = `CASE WHEN ttl_seconds>0 THEN 0 WHEN origin NOT IN ('live','history') THEN 1 WHEN origin='history' AND sched_order>=` + unrankedOrderSQL + ` THEN 3 ELSE 2 END`
+
+// UnrankedOrder is the sched_order of a file no ranked group needs. It is
+// spelled out in store/engine_schema.sql and store/migrate.go.
+const UnrankedOrder = 131072
+
+const unrankedOrderSQL = `131072`
 
 // The big-file lane. A file of BigFileSize or more can take hours under
 // Telegram's limits, and every file of the account shares the pacer's
@@ -176,9 +194,27 @@ func BigFileLane() int { return int(bigFileLane.Load()) }
 // very same expression; TestClaimIndexMatchesTheLane checks the two agree.
 var bigRowSQL = `(ttl_seconds=0 AND file_size>=` + strconv.FormatInt(BigFileSize, 10) + `)`
 
-// claimKeyBase orders a row by (claimPriority, id) as one number,
-// priority*claimKeyBase+id: ids stay far below it.
-const claimKeyBase int64 = 1 << 52
+// A row's place in the claim order as one number, comparable across the two
+// parts of the big-file lane: lane<<58 | sched_order<<40 | id. Ids stay far
+// below 2^40, sched_order below 2^18.
+const (
+	claimKeyBase   int64 = 1 << 40
+	claimOrderBase int64 = 1 << 40
+	claimLaneBase  int64 = 1 << 58
+)
+
+// claimKey is that number in SQL.
+var claimKey = claimPriority + `*` + strconv.FormatInt(claimLaneBase, 10) + `+sched_order*` + strconv.FormatInt(claimOrderBase, 10) + `+id`
+
+// claimOrderSQL is the ORDER BY of a walk of the indexes.
+const claimOrderSQL = claimPriority + `,sched_order,id`
+
+// claimFree: a file is transferred by one worker at a time. While a row of
+// the same Telegram file is being downloaded the others are left in the
+// queue: taking one would only hold a worker on the identity lock in
+// download.Library until the first is done, and then link to it. They are
+// claimed afterwards, take no bytes, and credit their groups.
+const claimFree = ` AND (identity='' OR NOT EXISTS (SELECT 1 FROM tgdl_work active WHERE active.status='processing' AND active.identity=tgdl_work.identity))`
 
 // claimSelect is the SELECT giving the id Claim takes (NULL: none), with
 // its arguments in order.
@@ -199,7 +235,7 @@ func claimSelect(accounts []string, now time.Time, manualOnly bool) (string, []a
 		for _, id := range accounts {
 			args = append(args, id)
 		}
-		where := `status='pending' AND paused=0 AND +account_id IN (` + marks + `) AND retry_at<=?`
+		where := `status='pending' AND paused=0 AND +account_id IN (` + marks + `) AND retry_at<=?` + claimFree
 		if manualOnly {
 			where += ` AND origin<>'live'`
 		}
@@ -209,10 +245,10 @@ func claimSelect(accounts []string, now time.Time, manualOnly bool) (string, []a
 	n := BigFileLane()
 	if n <= 0 {
 		where, args := base(nil)
-		return `SELECT id FROM tgdl_work WHERE ` + where + ` AND ` + open + ` ORDER BY ` + claimPriority + `,id LIMIT 1`, args
+		return `SELECT id FROM tgdl_work WHERE ` + where + ` AND ` + open + ` ORDER BY ` + claimOrderSQL + ` LIMIT 1`, args
 	}
-	key := claimPriority + `*` + strconv.FormatInt(claimKeyBase, 10) + `+id`
-	order := ` ORDER BY ` + claimPriority + `,id LIMIT 1`
+	key := claimKey
+	order := ` ORDER BY ` + claimOrderSQL + ` LIMIT 1`
 	var args []any
 	small, args := base(args)
 	smallSQL := `SELECT ` + key + ` FROM tgdl_work WHERE ` + small + ` AND ` + bigRowSQL + `=0` + order
@@ -237,9 +273,9 @@ func (s *WorkStore) Claim(ctx context.Context, accounts []string, now time.Time,
 	args := append([]any{now.UnixMilli()}, pickArgs...)
 	row := s.writer.QueryRowContext(ctx, `UPDATE tgdl_work SET status='processing',claim_generation=generation,attempts=attempts+1,updated_at=?
 	 WHERE id=(`+pick+`)
- RETURNING id,account_id,group_id,group_name,message_id,generation,media_type,file_name,file_size,body,attempts,created_at,refresh_required,origin`, args...)
+ RETURNING id,account_id,group_id,group_name,message_id,generation,media_type,file_name,file_size,body,attempts,created_at,refresh_required,origin,identity,`+claimKey, args...)
 	w := new(Work)
-	if err := row.Scan(&w.ID, &w.AccountID, &w.GroupID, &w.GroupName, &w.MessageID, &w.Generation, &w.MediaType, &w.FileName, &w.FileSize, &w.body, &w.Attempts, &w.CreatedAt, &w.ForceRefresh, &w.Origin); err != nil {
+	if err := row.Scan(&w.ID, &w.AccountID, &w.GroupID, &w.GroupName, &w.MessageID, &w.Generation, &w.MediaType, &w.FileName, &w.FileSize, &w.body, &w.Attempts, &w.CreatedAt, &w.ForceRefresh, &w.Origin, &w.Identity, &w.ClaimKey); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			s.emptyClaims.Add(1)
 			return nil, nil
@@ -247,6 +283,42 @@ func (s *WorkStore) Claim(ctx context.Context, accounts []string, now time.Time,
 		return nil, err
 	}
 	return w, nil
+}
+
+// Outranked reports whether a worker could claim a row that goes before key
+// now. A worker whose file only waits for a file slot gives its place up then:
+// nothing has been transferred yet, and it would hold a worker from better
+// work for as long as the slots stay full.
+func (s *WorkStore) Outranked(ctx context.Context, accounts []string, now time.Time, key int64, manualOnly bool) (bool, error) {
+	if len(accounts) == 0 {
+		return false, nil
+	}
+	pick, args := claimSelect(accounts, now, manualOnly)
+	var best sql.NullInt64
+	err := s.reader.QueryRowContext(ctx, `SELECT `+claimKey+` FROM tgdl_work WHERE id=(`+pick+`)`, args...).Scan(&best)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return best.Valid && best.Int64 < key, nil
+}
+
+// IdentitySaved reports whether the library holds this Telegram file. Such a
+// row needs no fresh file reference: it takes no bytes, it only links to the
+// saved file. A row whose file proves missing gets a second attempt, which
+// refreshes as usual.
+func (s *WorkStore) IdentitySaved(ctx context.Context, identity string) bool {
+	parts := strings.Split(identity, "\x00")
+	if len(parts) != 3 {
+		return false
+	}
+	var saved bool
+	if err := s.reader.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM downloads WHERE telegram_media_kind=? AND telegram_media_id=?)`, parts[0], parts[1]).Scan(&saved); err != nil {
+		return false
+	}
+	return saved
 }
 
 // Finish cannot acknowledge an edit that arrived during an older claim. A

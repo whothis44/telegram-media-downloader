@@ -23,11 +23,15 @@ type downloadFiles struct {
 	mu           sync.Mutex
 	small, large int
 	active       map[downloadFileKey]int
+	waiting      map[downloadFileKey]rankWaiters
 	wake         chan struct{}
 }
 
+// How often a transfer waiting for a file slot asks whether to give way.
+var downloadYieldEvery = 15 * time.Second
+
 func newDownloadFiles() *downloadFiles {
-	return &downloadFiles{small: 4, large: 2, active: map[downloadFileKey]int{}, wake: make(chan struct{})}
+	return &downloadFiles{small: 4, large: 2, active: map[downloadFileKey]int{}, waiting: map[downloadFileKey]rankWaiters{}, wake: make(chan struct{})}
 }
 
 func (f *downloadFiles) changed() {
@@ -59,6 +63,22 @@ func (f *downloadFiles) configure(value tg.JSONValueClass) {
 
 func (f *downloadFiles) acquire(ctx context.Context, dc int, size int64) (func(), error) {
 	key := downloadFileKey{dc: dc, large: size >= downloadLargeFile}
+	rank := downloadRankOf(ctx)
+	registered := false
+	defer func() {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if registered {
+			f.waiting[key].remove(rank.key)
+			f.changed() // the slot it was first in line for may be free
+		}
+	}()
+	var ask <-chan time.Time
+	if rank.yield != nil {
+		tick := time.NewTicker(downloadYieldEvery)
+		defer tick.Stop()
+		ask = tick.C
+	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -68,8 +88,13 @@ func (f *downloadFiles) acquire(ctx context.Context, dc int, size int64) (func()
 		if key.large {
 			limit = f.large
 		}
-		if f.active[key] < limit {
+		waiters := f.waiting[key]
+		if f.active[key] < limit && !waiters.better(rank.key) {
 			f.active[key]++
+			if registered {
+				registered = false
+				waiters.remove(rank.key)
+			}
 			f.mu.Unlock()
 			var once sync.Once
 			return func() {
@@ -81,6 +106,14 @@ func (f *downloadFiles) acquire(ctx context.Context, dc int, size int64) (func()
 				})
 			}, nil
 		}
+		if !registered {
+			if waiters == nil {
+				waiters = rankWaiters{}
+				f.waiting[key] = waiters
+			}
+			waiters.add(rank.key)
+			registered = true
+		}
 		ch := f.wake
 		f.mu.Unlock()
 		resume := pauseDownloadWait(ctx)
@@ -90,6 +123,11 @@ func (f *downloadFiles) acquire(ctx context.Context, dc int, size int64) (func()
 			return nil, ctx.Err()
 		case <-ch:
 			resume()
+		case <-ask:
+			resume()
+			if rank.yield() {
+				return nil, ErrDownloadYield
+			}
 		}
 	}
 }

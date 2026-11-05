@@ -101,7 +101,7 @@ func (a *App) ixBigFilesMeasure(ctx context.Context) ixBigFiles {
 	// As the backfill counts (history_runner.go): every queued item not of
 	// live monitoring, less those that wait apart.
 	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM tgdl_work WHERE origin<>'live' AND status IN ('pending','processing')`).Scan(&b.QueueCount)
-	b.QueueCount = max(0, b.QueueCount-a.ixWaitingApart(ctx, b.QueueCap))
+	b.QueueCount = max(0, b.QueueCount-a.ixWaitingApart(ctx, b.QueueCap)-a.ixSharedWaiting())
 	b.CapPaused = b.Backfills > 0 && b.QueueCount >= b.QueueCap
 	return b
 }

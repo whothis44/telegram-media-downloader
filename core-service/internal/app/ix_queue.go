@@ -58,8 +58,13 @@ type ixQueueItem struct {
 	MessagesAt int64  `json:"messagesAt,omitempty"` // when the messages pass finished
 	Messages   int    `json:"messages,omitempty"`   // messages read by that pass
 	Missing    int    `json:"missing,omitempty"`    // files still missing after it
-	// Priority groups get both passes before any other group starts.
+	// Priority groups get both passes before any other group starts. Set for
+	// groups on the ranked list (ix_sched.go), which decides the order.
 	Priority bool `json:"priority,omitempty"`
+	// Preempted: this pass was stopped to give its lane to a higher-ranked
+	// group. It waits again and carries on below ResumeFrom, at no attempt's
+	// cost.
+	Preempted bool `json:"preempted,omitempty"`
 	// A pass that stopped part-way carries on below ResumeFrom (the oldest
 	// message it reached); Carried counts what earlier attempts read, and
 	// PassStartedAt is when the pass first started.
@@ -88,6 +93,12 @@ type ixQueueDeps struct {
 	// triage ranks groups when the account is to be deleted: lower goes
 	// first (private chats before public ones). nil or empty: queue order.
 	triage func(ctx context.Context) map[string]int
+	// ranks is each ranked group's place (ix_sched.go): lower goes first, a
+	// group not in it after every group that is. nil: no ranking.
+	ranks func(ctx context.Context) map[string]int
+	// cancel stops a backfill to give its lane to a higher-ranked group. nil:
+	// lanes are not taken back.
+	cancel func(ctx context.Context, jobID string)
 }
 
 func (a *App) ixDeps() ixQueueDeps {
@@ -100,6 +111,8 @@ func (a *App) ixDeps() ixQueueDeps {
 		hold:    a.ixHold,
 		now:     time.Now,
 		triage:  a.ixTriage,
+		ranks:   a.ixRankBases,
+		cancel:  a.ixCancelHistory,
 	}
 }
 
@@ -122,7 +135,7 @@ func (a *App) ixStart() {
 		go func() { defer a.ambientWG.Done(); run(a.ctx) }()
 	}
 	// Lower quality first, and the staging folder's moves to the library.
-	for _, run := range []func(context.Context){a.ixRunLowq, a.ixRunStaging, a.ixRunPreviewsAll} {
+	for _, run := range []func(context.Context){a.ixRunLowq, a.ixRunStaging, a.ixRunPreviewsAll, a.ixRunSched} {
 		a.ambientWG.Add(1)
 		go func() { defer a.ambientWG.Done(); run(a.ctx) }()
 	}
@@ -212,6 +225,7 @@ func ixRetryLater(st *ixQueueState, i int, now time.Time, reason string) {
 	item.Attempts++
 	item.Error = reason
 	item.JobID = ""
+	item.Preempted = false
 	if st.MaxAttempts > 0 && item.Attempts >= st.MaxAttempts {
 		item.State = "failed"
 		item.FinishedAt = now.UnixMilli()
@@ -269,7 +283,20 @@ func (a *App) ixQueueStep(ctx context.Context, deps ixQueueDeps) error {
 	if deps.triage != nil {
 		ranks = deps.triage(ctx)
 	}
+	var places map[string]int
+	if deps.ranks != nil {
+		places = deps.ranks(ctx)
+	}
+	place := func(groupID string) int {
+		if p, ok := places[groupID]; ok {
+			return p
+		}
+		return 1 << 30
+	}
 	better := func(i, j int) bool {
+		if a, b := place(st.Items[i].GroupID), place(st.Items[j].GroupID); a != b {
+			return a < b
+		}
 		if st.Items[i].Priority != st.Items[j].Priority {
 			return st.Items[i].Priority
 		}
@@ -287,6 +314,26 @@ func (a *App) ixQueueStep(ctx context.Context, deps ixQueueDeps) error {
 		lane := item.Phase == ixPhaseFiles
 		if j := next[lane]; j < 0 || better(i, j) {
 			next[lane] = i
+		}
+	}
+	// A higher-ranked group waits for a lane a lower one is using: the lower
+	// one gives way and carries on later (ixQueueTrack). Not while new groups
+	// may not start anyway.
+	if deps.cancel != nil && len(places) > 0 {
+		for i := range st.Items {
+			item := &st.Items[i]
+			if item.State != "running" || item.Preempted || item.JobID == "" {
+				continue
+			}
+			j := next[item.Phase == ixPhaseFiles]
+			if j < 0 || place(st.Items[j].GroupID) >= place(item.GroupID) || now.Sub(time.UnixMilli(item.StartedAt)) < ixPreemptAfter {
+				continue
+			}
+			if deps.hold != nil && deps.hold(ctx) != "" {
+				break
+			}
+			item.Preempted = true
+			deps.cancel(ctx, item.JobID)
 		}
 	}
 	if remaining == 0 {
@@ -375,6 +422,13 @@ func (a *App) ixQueueTrack(ctx context.Context, deps ixQueueDeps, st *ixQueueSta
 		return nil
 	}
 	item.Processed, item.Downloaded = job.Processed, job.Downloaded
+	if item.Preempted && job.State != "running" {
+		// It gave its lane to a higher-ranked group: not a failure, no wait.
+		keepPlace(job.Processed)
+		item.State, item.JobID, item.Preempted, item.NextAt, item.Error = "waiting", "", false, 0, ""
+		item.Processed, item.Downloaded = 0, 0
+		return nil
+	}
 	switch job.State {
 	case "running":
 		return nil

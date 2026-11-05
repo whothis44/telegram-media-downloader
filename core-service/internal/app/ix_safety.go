@@ -54,6 +54,7 @@ type ixSettings struct {
 	STTContainer  string `json:"sttContainer"`
 	MLAutoStart   bool   `json:"mlAutoStart"`
 	DeadlineOrder string `json:"deadlineOrder"` // auto (when the backup would not finish before deletion), on, off
+	GroupPolicy   string `json:"groupPolicy"`   // what the group ranking means: order (default), spread (ix_sched.go)
 	// DownloadPacing lets the download pacer set how many file parts are in
 	// flight (ix.9); off goes back to how ix.8 downloaded.
 	DownloadPacing bool `json:"downloadPacing"`

@@ -18,6 +18,8 @@ func registerIxRoutes(mux *http.ServeMux, a *App) {
 	mux.Handle("GET /api/ix/search", a.requireAdmin(http.HandlerFunc(a.handleIxSearch)))
 	mux.Handle("POST /api/ix/queue/add", a.requireAdmin(http.HandlerFunc(a.handleIxQueueAdd)))
 	mux.Handle("POST /api/ix/queue/{action}", a.requireAdmin(http.HandlerFunc(a.handleIxQueueAction)))
+	mux.Handle("GET /api/ix/priorities", a.requireAdmin(http.HandlerFunc(a.handleIxPriorities)))
+	mux.Handle("POST /api/ix/priorities", a.requireAdmin(http.HandlerFunc(a.handleIxPrioritiesSet)))
 	mux.Handle("POST /api/ix/settings", a.requireAdmin(http.HandlerFunc(a.handleIxSettings)))
 	mux.Handle("POST /api/ix/export", a.requireAdmin(http.HandlerFunc(a.handleIxExport)))
 	mux.Handle("POST /api/ix/downloads/retry", a.requireAdmin(http.HandlerFunc(a.handleIxDownloadsRetry)))
@@ -298,6 +300,13 @@ func (a *App) handleIxQueueAdd(w http.ResponseWriter, r *http.Request) {
 		}
 		return nil
 	})
+	if err == nil && body.Priority {
+		for _, item := range added {
+			if err = a.ixRankSet(ctx, item.GroupID, item.Name, true); err != nil {
+				break
+			}
+		}
+	}
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -372,6 +381,17 @@ func (a *App) handleIxQueueAction(w http.ResponseWriter, r *http.Request) {
 		}
 		return nil
 	})
+	if err == nil && action == "priority" {
+		// The star is a place on the ranked list, which outlives this queue row.
+		on, _ := body["priority"].(bool)
+		name := ""
+		if q, e := a.ixLoadQueue(ctx); e == nil {
+			if i := ixQueueIndex(&q, groupID); i >= 0 {
+				name = q.Items[i].Name
+			}
+		}
+		err = a.ixRankSet(ctx, groupID, name, on)
+	}
 	if err == errBadIxAction {
 		writeJSONError(w, http.StatusNotFound, "unknown action")
 		return

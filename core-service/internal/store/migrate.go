@@ -180,23 +180,42 @@ func RunMigrations(ctx context.Context, db *sql.DB) (int, error) {
 			return 0, err
 		}
 	}
-	var prioritySQL sql.NullString
-	if err := db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_tgdl_work_priority'`).Scan(&prioritySQL); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	// A group's rank orders its files (engine.claimPriority): sched_order is
+	// the row's place within its lane. Rebuild indexes of earlier releases
+	// once; the expressions are spelled exactly as in the claim (see
+	// engine.claimPriority), which is the only form SQLite will use.
+	var schedColumn int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('tgdl_work') WHERE name='sched_order'`).Scan(&schedColumn); err != nil {
 		return 0, err
 	}
-	if prioritySQL.Valid && !strings.Contains(prioritySQL.String, "ttl_seconds") {
-		if _, err := db.ExecContext(ctx, `DROP INDEX idx_tgdl_work_priority`); err != nil {
+	if schedColumn == 0 {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE tgdl_work ADD COLUMN sched_order INTEGER NOT NULL DEFAULT 131072`); err != nil {
 			return 0, err
 		}
 	}
-	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_tgdl_work_priority ON tgdl_work(status,paused,CASE WHEN ttl_seconds>0 THEN 0 WHEN origin='history' THEN 2 ELSE 1 END,id)`); err != nil {
+	for _, name := range []string{"idx_tgdl_work_priority", "idx_tgdl_work_claim"} {
+		var indexSQL sql.NullString
+		if err := db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='index' AND name=?`, name).Scan(&indexSQL); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return 0, err
+		}
+		if indexSQL.Valid && !strings.Contains(indexSQL.String, "sched_order") {
+			if _, err := db.ExecContext(ctx, `DROP INDEX `+name); err != nil {
+				return 0, err
+			}
+		}
+	}
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_tgdl_work_priority ON tgdl_work(status,paused,CASE WHEN ttl_seconds>0 THEN 0 WHEN origin NOT IN ('live','history') THEN 1 WHEN origin='history' AND sched_order>=131072 THEN 3 ELSE 2 END,sched_order,id)`); err != nil {
 		return 0, err
 	}
 	// The claim with the big-file lane (engine.claimSelect): pending rows
 	// split into files of 1 GiB or more (engine.BigFileSize) and the
 	// others, each in claim order. The size is written out: SQLite uses an
 	// index on an expression only for the very same expression.
-	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_tgdl_work_claim ON tgdl_work(paused,(ttl_seconds=0 AND file_size>=1073741824),CASE WHEN ttl_seconds>0 THEN 0 WHEN origin='history' THEN 2 ELSE 1 END,id) WHERE status='pending'`); err != nil {
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_tgdl_work_claim ON tgdl_work(paused,(ttl_seconds=0 AND file_size>=1073741824),CASE WHEN ttl_seconds>0 THEN 0 WHEN origin NOT IN ('live','history') THEN 1 WHEN origin='history' AND sched_order>=131072 THEN 3 ELSE 2 END,sched_order,id) WHERE status='pending'`); err != nil {
+		return 0, err
+	}
+	// One transfer per Telegram file: a claim looks up what is downloading now.
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_tgdl_work_active_identity ON tgdl_work(identity) WHERE status='processing'`); err != nil {
 		return 0, err
 	}
 	var refreshColumn int

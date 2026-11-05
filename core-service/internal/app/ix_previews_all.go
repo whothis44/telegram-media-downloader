@@ -258,9 +258,10 @@ func (a *App) ixPreviewAllJobs(ctx context.Context, n int) ([]ixPreviewAllJob, e
 	args := append(append([]any{}, skip...), ixPreviewTries, n*2)
 	rows, err := a.db.Reader.QueryContext(ctx, `SELECT m.group_id, m.message_id, m.media_key, m.tl FROM ix_messages m
 		LEFT JOIN ix_group_info g ON g.group_id=m.group_id
+		LEFT JOIN tgdl_group_rank r ON r.group_id=m.group_id
 		WHERE `+ixPreviewAllWhere+notIn+`
 		AND NOT EXISTS (SELECT 1 FROM ix_copy_thumb t WHERE t.ident=m.media_key AND (t.path<>'' OR t.tries>=?))
-		ORDER BY COALESCE(g.username,'')='' DESC, m.deleted_at=0 DESC, m.date DESC, m.group_id, m.message_id DESC
+		ORDER BY COALESCE(r.sched_base,1<<30), COALESCE(g.username,'')='' DESC, m.deleted_at=0 DESC, m.date DESC, m.group_id, m.message_id DESC
 		LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
@@ -407,7 +408,7 @@ func (a *App) ixPreviewAllPause(err error) time.Duration {
 // a new FLOOD_WAIT stops the pass (errIxWaitSignal); a new speed-limit wait
 // slows it down.
 func (a *App) ixPreviewAllSignalled() error {
-	if ixRemoteChecksBusy(a) {
+	if ixPreviewChecksBusy(a) {
 		return errIxWaitSignal
 	}
 	floods, premium := ixPreviewAllSignal(a)
@@ -505,7 +506,7 @@ func (a *App) ixPreviewAllRound(ctx context.Context) time.Duration {
 		a.ixPreviewAllSetWhy("")
 		return 5 * time.Minute
 	}
-	if ixRemoteChecksBusy(a) {
+	if ixPreviewChecksBusy(a) {
 		a.ixPreviewAllSetWhy("paused: downloads have priority while Telegram is busy or speed-limited")
 		return time.Minute
 	}

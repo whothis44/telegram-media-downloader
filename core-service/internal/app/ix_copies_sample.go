@@ -618,7 +618,8 @@ type ixSampleJob struct {
 
 // ixSampleJobs: queued videos of 200 MB or more not checked yet (or whose
 // check failed for a reason that may pass, once its wait is over: 1 hour
-// after the first failure, doubling up to a day), largest first. Originals of
+// after the first failure, doubling up to a day), those a ranked group needs
+// first (ix_sched.go), then largest first. Originals of
 // videos saved in a lower quality first are not copies (ix_lowq.go): they
 // are left out.
 func (a *App) ixSampleJobs(ctx context.Context, heldOnly bool, n int) ([]ixSampleJob, error) {
@@ -632,7 +633,7 @@ func (a *App) ixSampleJobs(ctx context.Context, heldOnly bool, n int) ([]ixSampl
 		WHERE w.status='pending' AND w.media_type='video' AND w.file_size>=? AND w.ttl_seconds=0 AND length(w.body)>0
 		AND (s.work_id IS NULL OR (s.result='failed' AND s.final=0 AND s.at < ? - MIN(86400000, 3600000*(1<<(MIN(MAX(s.tries,1),6)-1)))))
 		AND w.id NOT IN (SELECT work_id FROM ix_lowq WHERE state IN ('saved','released'))`+cond+`
-		ORDER BY w.file_size DESC, w.id LIMIT ?`, ixSampleMinSize, time.Now().UnixMilli(), n)
+		ORDER BY w.sched_order, w.file_size DESC, w.id LIMIT ?`, ixSampleMinSize, time.Now().UnixMilli(), n)
 	if err != nil {
 		return nil, err
 	}
@@ -650,7 +651,7 @@ func (a *App) ixSampleJobs(ctx context.Context, heldOnly bool, n int) ([]ixSampl
 // ixSampleRound checks a few big queued videos (heldOnly: only held ones,
 // as just before they would be let go).
 func (a *App) ixSampleRound(ctx context.Context, heldOnly bool) error {
-	if ixRemoteChecksBusy(a) {
+	if ixSampleChecksBusy(a) {
 		return nil
 	}
 	if a.ixIsGone() {
@@ -671,7 +672,7 @@ func (a *App) ixSampleRound(ctx context.Context, heldOnly bool) error {
 		}
 	}()
 	for _, j := range jobs {
-		if ixRemoteChecksBusy(a) {
+		if ixSampleChecksBusy(a) {
 			return nil
 		}
 		if ctx.Err() != nil {

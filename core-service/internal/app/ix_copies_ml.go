@@ -492,7 +492,7 @@ func (a *App) ixPreviewRound(ctx context.Context) error {
 		}
 		data, w, h := a.ixPreviewKept(j.kept)
 		if data == nil {
-			if ixRemoteChecksBusy(a) {
+			if ixPreviewChecksBusy(a) {
 				continue
 			}
 			if asked > 0 && ixPreviewGap > 0 {

@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS tgdl_work (
  refresh_required INTEGER NOT NULL DEFAULT 0,
  origin TEXT NOT NULL DEFAULT 'live',
  ttl_seconds INTEGER NOT NULL DEFAULT 0,
+ sched_order INTEGER NOT NULL DEFAULT 131072,
  attempts INTEGER NOT NULL DEFAULT 0,
  retry_at INTEGER NOT NULL DEFAULT 0,
  error TEXT,
@@ -54,6 +55,13 @@ CREATE TABLE IF NOT EXISTS tgdl_work (
  UNIQUE(group_id,message_id)
 );
 CREATE INDEX IF NOT EXISTS idx_tgdl_work_pending ON tgdl_work(status,account_id,retry_at,id);
+CREATE TABLE IF NOT EXISTS tgdl_group_rank (
+ group_id TEXT PRIMARY KEY,
+ rank INTEGER NOT NULL,
+ sched_base INTEGER NOT NULL,
+ name TEXT NOT NULL DEFAULT '',
+ updated_at INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS tgdl_queue_state (
  id INTEGER PRIMARY KEY CHECK (id=1),
  paused INTEGER NOT NULL DEFAULT 0,

@@ -187,6 +187,10 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 	for _, l := range a.ixTransferDiag(ctx, r.clean) {
 		line("%s", l)
 	}
+	line("\n[group priorities]")
+	for _, l := range a.ixPrioritiesDiag(ctx, r.group) { // ix_coverage.go
+		line("%s", l)
+	}
 	line("\n[background work]")
 	pic := a.ixMediaStatus()
 	line("pictures %d/%d (errors %d, grouped %d, to review %d, running %v)", pic.Done, pic.Total, pic.Errors, pic.Grouped, pic.Suggested, pic.Running)

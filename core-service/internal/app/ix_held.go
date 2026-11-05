@@ -242,7 +242,7 @@ func (a *App) ixHeldStep(ctx context.Context) error {
 	}
 	// Just before they would go, big held videos not checked yet are
 	// checked by sampling (ix_copies_sample.go): a confirmed copy stays.
-	if ixRemoteChecksBusy(a) {
+	if ixSampleChecksBusy(a) {
 		return nil // defer release too; skipping a check is not a negative result
 	}
 	ixBeforeReleaseHook(a, ctx)
@@ -703,7 +703,7 @@ func (a *App) ixReleaseHeld(ctx context.Context, n int) error {
 }
 
 // ixReleaseSome lets up to n held items go (all when n <= 0): copies not
-// confirmed first, oldest first. When only some go, lesser copies whose
+// confirmed first, those a ranked group needs first (ix_sched.go), oldest first. When only some go, lesser copies whose
 // better copy is still waiting or downloading stay (they are checked
 // against it once it is saved), and confirmed copies go only with
 // confirmed.
@@ -717,7 +717,8 @@ func (a *App) ixReleaseSome(ctx context.Context, n int, confirmed bool) error {
 		cond += ` AND COALESCE(c.confirm,'')<>'confirmed'`
 	}
 	rows, err := a.db.Reader.QueryContext(ctx, `SELECT h.work_id FROM ix_held h LEFT JOIN ix_copy_hold c ON c.work_id=h.work_id
-		WHERE h.released_at=0 AND h.reason<>''`+cond+` ORDER BY COALESCE(c.confirm,'')='confirmed', h.held_at`+limit)
+		LEFT JOIN tgdl_work rw ON rw.id=h.work_id
+		WHERE h.released_at=0 AND h.reason<>''`+cond+` ORDER BY COALESCE(c.confirm,'')='confirmed', COALESCE(rw.sched_order,1<<30), h.held_at`+limit)
 	if err != nil {
 		return err
 	}

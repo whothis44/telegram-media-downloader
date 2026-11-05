@@ -332,7 +332,7 @@ function viewRescan() {
   const notQueued = groups().filter((g) => !g.finishedAt && !items.some((i) => i.groupId === g.id && (i.state === 'waiting' || i.state === 'running')));
   let h = `<div class="card"><h2>Rescan everything</h2><div class="muted">Full history of every group, one group after another, with photos, videos <b>and files/documents</b> switched on. Groups already in the queue are skipped.</div>
 <div class="btns"><button class="b primary" data-act="p-everything" ${notQueued.length ? '' : 'disabled'}>Rescan all ${notQueued.length} group(s)</button></div></div>`;
-  h += `<div class="status">${head} Two lanes run side by side, one group each. <b>Messages:</b> every group's history is saved, without waiting for downloads. <b>Files:</b> as soon as a group's messages are saved, it is walked again to fetch the files still missing (failed files get another try too). <b>★ First</b> groups go first in both lanes. Runs inside the server — you can close this page.${q.notice ? `<div class="muted" style="margin-top:4px">${esc(q.notice)}</div>` : ''}<div style="margin-top:6px">${viewDlState()}</div></div>`;
+  h += `<div class="status">${head} Two lanes run side by side, one group each. <b>Messages:</b> every group's history is saved, without waiting for downloads. <b>Files:</b> as soon as a group's messages are saved, it is walked again to fetch the files still missing (failed files get another try too). <b>★ First</b> groups go on the <a href="#priorities">ranked list</a>: first in both lanes, and their files download first. Runs inside the server — you can close this page.${q.notice ? `<div class="muted" style="margin-top:4px">${esc(q.notice)}</div>` : ''}<div style="margin-top:6px">${viewDlState()}</div></div>`;
   h += `<div class="btns" style="margin-bottom:12px">${q.running ? `<button class="b" data-act="q-pause">Pause</button>` : `<button class="b primary" data-act="q-start" ${counts.waiting ? '' : 'disabled'}>Start</button>`}
 <button class="b" data-act="q-clear-finished" ${counts.done + counts.failed ? '' : 'disabled'}>Remove finished</button><button class="b" data-act="q-clear" ${items.length ? '' : 'disabled'}>Clear queue</button>
 <span class="muted">Retries: ${q.maxAttempts ? 'up to ' + q.maxAttempts : 'unlimited'}</span></div>`;
@@ -380,7 +380,71 @@ function viewRescan() {
 <div class="list">${shown.map((x) => `<div class="row" style="grid-template-columns:1fr"><label><input type="checkbox" data-pick="${esc(x.id)}" data-name="${esc(x.name)}" data-finished="${x.finished ? '1' : ''}" ${state.pick.has(x.id) ? 'checked' : ''}><span><b>${esc(x.name)}</b> <span class="muted">${x.extra ? esc(x.sub) : x.sub}${queued.has(x.id) ? ' · in the queue' : ''}</span></span></label></div>`).join('') || '<div class="muted" style="padding:8px">No chats match.</div>'}</div>
 <label class="muted"><input type="checkbox" data-in-check="ensureFilters" ${state.ensureFilters ? 'checked' : ''}> Switch on photos, videos <b>and files/documents</b> for these groups (recommended)</label>
 <div class="btns"><button class="b primary" data-act="p-add" ${state.pick.size ? '' : 'disabled'}>Rescan ${state.pick.size} ticked group(s)</button><button class="b" data-act="p-add-first" ${state.pick.size ? '' : 'disabled'}>★ Rescan ${state.pick.size} ticked first</button><span class="grow"></span><button class="b" data-act="p-finish" ${state.pick.size ? '' : 'disabled'}>✓ Mark ${state.pick.size} ticked finished</button><button class="mini" data-act="p-reopen" ${state.pick.size ? '' : 'disabled'}>Reopen ticked</button></div>
-<div class="muted">★ First: these groups go ahead of all others, for their messages and then their files. Ticking a group that is already queued just moves it to the front, keeping its progress.</div></div>`;
+<div class="muted">★ First: these groups join the <a href="#priorities">ranked list</a> and go ahead of all others, for their messages, then queueing their files, then downloading them. Ticking a group that is already queued keeps its progress.</div></div>`;
+  return h;
+}
+
+// ---------------- Priorities ----------------
+async function loadPrio() {
+  const r = await api('GET', '/api/ix/priorities');
+  if (r.ok) { state.prio = r.data; state.prioError = ''; } else state.prioError = errText(r);
+  if (state.tab === 'priorities' && !state.prioDrag) render();
+}
+function prioOrder() { return ((state.prio && state.prio.groups) || []).filter((g) => g.rank > 0).sort((a, b) => a.rank - b.rank).map((g) => g.groupId); }
+async function prioSave(order) {
+  const names = {};
+  ((state.prio && state.prio.groups) || []).forEach((g) => { if (order.includes(g.groupId)) names[g.groupId] = g.name; });
+  // Move the rows at once; the figures follow the server's answer.
+  const r = await api('POST', '/api/ix/priorities', { order, names });
+  if (r.ok) { state.prio = r.data; state.prioError = ''; } else state.prioError = errText(r);
+  render();
+}
+const fmtDays = (sec) => (sec >= 172800 ? Math.round(sec / 86400) + ' days' : sec >= 7200 ? Math.round(sec / 3600) + ' h' : Math.max(1, Math.round(sec / 60)) + ' min');
+function prioCount(c) { c = c || {}; return `<b>${fmtNum(c.files)}</b><div class="muted">${fmtSize(c.bytes || 0)}</div>`; }
+// How long until a group's files are in, when the speeds are known: the range
+// the last 3 hours and the last day give. An estimate only, and only of what
+// the rescans have read so far.
+function prioEta(cum, g, p) {
+  const speeds = [p.rate3h, p.rateDay].filter((x) => x > 0);
+  if (!speeds.length || !cum) return '';
+  const lo = cum / Math.max(...speeds), hi = cum / Math.min(...speeds);
+  const late = p.until && Date.now() / 1000 + lo > p.until;
+  const span = fmtDays(lo) === fmtDays(hi) ? fmtDays(lo) : `${fmtDays(lo)}–${fmtDays(hi)}`;
+  return `<div class="muted">${late ? '<span class="bad">after the deletion date</span> · ' : ''}about ${span} from now${g.scanned ? '' : ' (more once it is fully read)'}</div>`;
+}
+function viewPriorities() {
+  const p = state.prio;
+  if (!p) { if (!state.prioLoading) { state.prioLoading = true; loadPrio().finally(() => { state.prioLoading = false; }); } return '<p class="muted">Loading…</p>'; }
+  const ranked = p.groups.filter((g) => g.place > 0).sort((a, b) => a.rank - b.rank);
+  const inOrder = p.groups.filter((g) => g.place > 0).sort((a, b) => a.place - b.place);
+  const qq = (state.prioSearch || '').trim().toLowerCase();
+  const others = p.groups.filter((g) => !g.place && (!qq || g.name.toLowerCase().includes(qq)));
+  const spread = p.policy === 'spread';
+  const eta = new Map();
+  let cum = 0;
+  for (const g of inOrder) { cum += ((g.needed || {}).bytes || 0) - ((g.neededAhead || {}).bytes || 0); eta.set(g.groupId, cum); }
+  let h = `<div class="card"><h2>Which groups go first</h2><div class="muted">Rank the groups that matter most. The ranking reaches every step: reading their messages, queueing their files, and which file downloads next. It stays when a rescan ends or its row is removed. A file posted in several groups downloads once, as soon as the highest-ranked group needing it comes up, and counts for all of them.</div>
+<div class="btns"><label><input type="radio" name="ixprio" data-prio-policy="order" ${spread ? '' : 'checked'}> <b>Finish in order</b></label><span class="muted">Rank 1 until nothing of it can download, then rank 2… Lower groups may get little, but rank 1 is as complete as it can be.</span></div>
+<div class="btns"><label><input type="radio" name="ixprio" data-prio-policy="spread" ${spread ? 'checked' : ''}> <b>Spread coverage</b></label><span class="muted">Groups take turns by how much they already have for their rank (rechecked every 10 minutes), so no important group stays almost empty. No group is promised to finish first.</span></div>
+<div class="muted">Files already downloading finish first: stopping them would throw away their bytes. Self-destructing media, links you paste and files you paused keep their own rules. Probable copies stay held at the back whatever the rank: their group's rank goes to the better copy they wait for.</div></div>`;
+  if (state.prioError) h += `<div class="status bad">${esc(state.prioError)}</div>`;
+  if (!p.known) h += `<div class="status warn">Coverage appears once the browser index has been built (about a minute after starting).</div>`;
+  const d = p.distinct || {};
+  h += `<div class="status">${p.focus ? `<b>Going first now:</b> ${esc(p.focus)}.<br>` : ''}Each file counted once across all groups: <b>${fmtNum((d.saved || {}).files)}</b> saved (${fmtSize((d.saved || {}).bytes || 0)}), <b>${fmtNum((d.needed || {}).files)}</b> still needed (${fmtSize((d.needed || {}).bytes || 0)}), ${fmtNum((d.probable || {}).files)} probable copies (${fmtSize((d.probable || {}).bytes || 0)}).${p.rate > 0 ? ` Recent speed: ${fmtSize(p.rate3h * 3600)}/h over 3 hours, ${fmtSize(p.rateDay * 3600)}/h over the day.` : ''}</div>`;
+  h += `<div class="card"><h2>Ranked groups (${ranked.length})</h2>`;
+  if (ranked.length) {
+    const head = `<tr><th>Rank</th><th>Group</th><th title="In the library because this group's message brought it">Saved</th><th title="In the library through another group: the same Telegram file, or the same bytes confirmed by every part's hash">Through others</th><th title="Evidence only: a held copy, a look-alike of a saved file, or a re-upload checked on sampled parts. Never counted as saved.">Probable</th><th>Still needed</th><th>Queue</th></tr>`;
+    const rows = ranked.map((g, i) => {
+      const ahead = (g.neededAhead || {}).files ? `<div class="muted" title="A group going before this one needs these too: they come free">${fmtNum(g.neededAhead.files)} also needed ahead</div>` : '';
+      return `<tr draggable="true" data-prio-row="${esc(g.groupId)}" style="cursor:grab"><td class="n"><b>${g.rank}</b>${spread && g.place !== g.rank ? `<div class="muted" title="Spread coverage: where it goes now">now ${g.place}</div>` : ''}</td><td><b>${esc(g.name)}</b>${g.scanned ? '' : ' <span class="pill" title="Its messages have not all been read: these figures are incomplete">not fully read</span>'}<div class="muted">${esc(g.waiting || '')}</div><div style="white-space:nowrap"><button class="mini" data-act="pr-move" data-id="${esc(g.groupId)}" data-key="-1" ${i ? '' : 'disabled'} aria-label="Move ${esc(g.name)} up">↑</button><button class="mini" data-act="pr-move" data-id="${esc(g.groupId)}" data-key="1" ${i < ranked.length - 1 ? '' : 'disabled'} aria-label="Move ${esc(g.name)} down">↓</button><button class="mini" data-act="pr-top" data-id="${esc(g.groupId)}" ${i ? '' : 'disabled'}>Top</button><button class="mini" data-act="pr-remove" data-id="${esc(g.groupId)}">Remove</button></div></td><td class="n">${prioCount(g.saved)}</td><td class="n">${prioCount(g.shared)}</td><td class="n">${prioCount(g.probable)}</td><td class="n">${prioCount(g.needed)}${ahead}${prioEta(eta.get(g.groupId), g, p)}</td><td class="n">${fmtNum(g.left)}${g.apart ? `<div class="muted">${fmtNum(g.apart)} held back</div>` : ''}</td></tr>`;
+    }).join('');
+    h += `<div class="list" style="max-height:none"><table>${head}${rows}</table></div><div class="muted">Drag a row, or use the arrows.</div>`;
+  } else {
+    h += `<div class="muted">No group is ranked: downloads go in the order of the deadline rules alone. Add the groups that matter most below.</div>`;
+  }
+  h += `</div><div class="card"><h2>Not ranked (${others.length})</h2><div class="muted">These go after every ranked group, private chats and smaller files first while time is short.</div>
+<input class="t" placeholder="Search groups…" data-in="prioSearch" data-focus="prios" value="${esc(state.prioSearch || '')}">
+<div class="list"><table><tr><th>Group</th><th>Saved</th><th>Through others</th><th>Probable</th><th>Still needed</th></tr>${others.map((g) => `<tr><td><b>${esc(g.name)}</b>${g.scanned ? '' : ' <span class="pill">not fully read</span>'}<div class="muted">${esc(g.waiting || '')}</div><button class="mini" data-act="pr-add" data-id="${esc(g.groupId)}">Add to the ranking</button></td><td class="n">${prioCount(g.saved)}</td><td class="n">${prioCount(g.shared)}</td><td class="n">${prioCount(g.probable)}</td><td class="n">${prioCount(g.needed)}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">Nothing here.</td></tr>'}</table></div></div>`;
   return h;
 }
 
@@ -606,7 +670,7 @@ ${state.sttMsg ? `<div class="muted">${esc(state.sttMsg)}</div>` : ''}</div>
 <div class="btns"><button class="b primary" data-act="set-save">Save settings</button><button class="b" data-act="alert-test">Send a test alert</button></div></div>`;
 }
 
-const TABS = [['overview', 'Overview'], ['rescan', 'Rescan'], ['categories', 'Categories'], ['duplicates', 'Duplicates'], ['search', 'Search'], ['settings', 'Settings']];
+const TABS = [['overview', 'Overview'], ['priorities', 'Priorities'], ['rescan', 'Rescan'], ['categories', 'Categories'], ['duplicates', 'Duplicates'], ['search', 'Search'], ['settings', 'Settings']];
 function render() {
   const prev = document.activeElement;
   const focusKey = prev && prev.getAttribute ? prev.getAttribute('data-focus') : null;
@@ -618,7 +682,7 @@ function render() {
   if (state.error) h += `<div class="status bad">${esc(state.error)} <button class="b" data-act="reload">Try again</button></div>`;
   if (!state.status) { $app.innerHTML = h + (state.error ? '' : '<p class="muted">Loading…</p>'); return; }
   h += banner();
-  const view = { overview: viewOverview, rescan: viewRescan, categories: viewCategories, duplicates: viewDuplicates, search: viewSearch, settings: viewSettings }[state.tab] || viewOverview;
+  const view = { overview: viewOverview, priorities: viewPriorities, rescan: viewRescan, categories: viewCategories, duplicates: viewDuplicates, search: viewSearch, settings: viewSettings }[state.tab] || viewOverview;
   h += view();
   $app.innerHTML = h;
   window.scrollTo(0, y);
@@ -675,7 +739,11 @@ $app.addEventListener('click', async (ev) => {
   const id = el.getAttribute('data-id');
   const all = groups();
   switch (act) {
-    case 'tab': state.tab = key; location.hash = key; render(); if (key !== 'search') load(); if (key === 'duplicates') loadDups(false); break;
+    case 'tab': state.tab = key; location.hash = key; render(); if (key !== 'search') load(); if (key === 'duplicates') loadDups(false); if (key === 'priorities') loadPrio(); break;
+    case 'pr-move': { const o = prioOrder(); const i = o.indexOf(id); const j = i + Number(key); if (i >= 0 && j >= 0 && j < o.length) { [o[i], o[j]] = [o[j], o[i]]; prioSave(o); } break; }
+    case 'pr-top': { const o = prioOrder().filter((x) => x !== id); o.unshift(id); prioSave(o); break; }
+    case 'pr-remove': prioSave(prioOrder().filter((x) => x !== id)); break;
+    case 'pr-add': { const o = prioOrder(); if (!o.includes(id)) o.push(id); prioSave(o); break; }
     case 'd-more': loadDups(true); break;
     case 'd-retry': { const r = await api('POST', '/api/ix/dups/retry'); if (!r.ok) state.error = errText(r); loadDups(false); break; }
     case 'd-save': {
@@ -812,7 +880,7 @@ $app.addEventListener('input', (ev) => {
     const k = t.getAttribute('data-in');
     state[k] = t.value;
     if (k === 'pickSearch') state.pickOnly = false;
-    if (k === 'search' || k === 'pickSearch') render();
+    if (k === 'search' || k === 'pickSearch' || k === 'prioSearch') render();
   } else if (t.matches('[data-cat]')) {
     state.draft.set(t.getAttribute('data-cat'), t.value);
     const n = changed().length;
@@ -829,10 +897,43 @@ $app.addEventListener('change', (ev) => {
   else if (t.matches('[data-in-check]')) state[t.getAttribute('data-in-check')] = t.checked;
   else if (t.matches('[data-sel-in]')) state[t.getAttribute('data-sel-in')] = t.value;
 });
+$app.addEventListener('change', async (ev) => {
+  const policy = ev.target.getAttribute && ev.target.getAttribute('data-prio-policy');
+  if (!policy) return;
+  const r = await api('POST', '/api/ix/priorities', { policy });
+  if (r.ok) { state.prio = r.data; state.prioError = ''; } else state.prioError = errText(r);
+  render();
+});
+// Dragging a ranked row. The list is not redrawn while a row is held.
+$app.addEventListener('dragstart', (ev) => {
+  const row = ev.target.closest && ev.target.closest('[data-prio-row]');
+  if (!row) return;
+  state.prioDrag = row.getAttribute('data-prio-row');
+  ev.dataTransfer.effectAllowed = 'move';
+  ev.dataTransfer.setData('text/plain', state.prioDrag);
+});
+$app.addEventListener('dragover', (ev) => {
+  if (!state.prioDrag) return;
+  const row = ev.target.closest && ev.target.closest('[data-prio-row]');
+  if (!row) return;
+  ev.preventDefault();
+  const held = $app.querySelector(`[data-prio-row="${CSS.escape(state.prioDrag)}"]`);
+  if (!held || held === row) return;
+  const below = ev.clientY > row.getBoundingClientRect().top + row.offsetHeight / 2;
+  row.parentNode.insertBefore(held, below ? row.nextSibling : row);
+});
+$app.addEventListener('drop', (ev) => {
+  if (!state.prioDrag) return;
+  ev.preventDefault();
+  const order = [...$app.querySelectorAll('[data-prio-row]')].map((r) => r.getAttribute('data-prio-row'));
+  state.prioDrag = null;
+  prioSave(order);
+});
+$app.addEventListener('dragend', () => { if (state.prioDrag) { state.prioDrag = null; render(); } });
 $app.addEventListener('keydown', (ev) => {
   if (ev.key === 'Enter' && ev.target.matches('[data-in="q"]')) runSearch(false);
 });
-window.addEventListener('hashchange', () => { const k = (location.hash || '#overview').slice(1); if (k !== state.tab) { state.tab = k; render(); } });
+window.addEventListener('hashchange', () => { const k = (location.hash || '#overview').slice(1); if (k !== state.tab) { state.tab = k; render(); if (k === 'priorities') loadPrio(); } });
 
 load();
 if (state.tab === 'duplicates') loadDups(false);
@@ -841,6 +942,7 @@ setInterval(() => {
   const busy = document.activeElement && document.activeElement.matches && document.activeElement.matches('[data-dset],[data-dset-text],[data-dset-select]');
   if (busy) return; // don't redraw under someone editing the duplicate settings
   if (state.tab === 'rescan' || state.tab === 'overview') load();
+  if (state.tab === 'priorities' && !state.prioDrag) { const typing = document.activeElement && document.activeElement.getAttribute('data-focus') === 'prios'; if (!typing) loadPrio(); }
   if (state.tab === 'duplicates' && state.dups && state.dups.clusters.length <= 50) loadDups(false);
 }, 10000);
 })();

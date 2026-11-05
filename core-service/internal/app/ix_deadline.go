@@ -20,7 +20,8 @@ import (
 // goes. Files of private chats go before those of public ones (see
 // ixPublicLane). Nothing is skipped, only put back: the deferred files are queue
 // items set aside (as held copies are) and let go band by band. Live
-// downloads, self-destructing media and held copies are not touched. Where
+// downloads, self-destructing media, held copies and files a ranked group needs
+// (ix_sched.go, where the bands order files within a rank) are not touched. Where
 // this stands among the other things that wait at the back of the queue
 // is set in ix_order.go: right after normal work.
 
@@ -303,6 +304,11 @@ func (a *App) ixDeadlineStep(ctx context.Context) error {
 	if err := a.ixDeadlineLetGo(ctx, `(w.origin<>'history' OR w.ttl_seconds>0)`); err != nil {
 		return err
 	}
+	// A ranked group's files are never set aside for an unranked group's
+	// (ix_sched.go): the bands are only a tie-break within a rank.
+	if err := a.ixDeadlineLetGo(ctx, `w.sched_order<`+strconv.Itoa(engine.UnrankedOrder)); err != nil {
+		return err
+	}
 	if _, err := a.db.Writer.ExecContext(ctx, `UPDATE ix_deferred SET band=(SELECT `+ixBandSQL("w")+` FROM tgdl_work w WHERE w.id=ix_deferred.work_id)
 		WHERE released_at=0 AND EXISTS (SELECT 1 FROM tgdl_work w WHERE w.id=ix_deferred.work_id)`); err != nil {
 		return err
@@ -340,7 +346,7 @@ func (a *App) ixDeadlineStep(ctx context.Context) error {
 	}
 	var cur sql.NullInt64
 	if err := a.db.Reader.QueryRowContext(ctx, `SELECT MIN(b) FROM (
-			SELECT `+ixBandSQL("tgdl_work")+` AS b FROM tgdl_work WHERE status='pending' AND paused=0 AND origin='history' AND ttl_seconds=0 AND retry_at<=?`+acctClause+`
+			SELECT `+ixBandSQL("tgdl_work")+` AS b FROM tgdl_work WHERE status='pending' AND paused=0 AND origin='history' AND ttl_seconds=0 AND sched_order>=`+strconv.Itoa(engine.UnrankedOrder)+` AND retry_at<=?`+acctClause+`
 			UNION ALL SELECT x.band FROM ix_deferred x JOIN tgdl_work w ON w.id=x.work_id WHERE x.released_at=0 AND w.status='pending')`, args...).Scan(&cur); err != nil {
 		return err
 	}
@@ -362,11 +368,11 @@ func (a *App) ixDeadlineStep(ctx context.Context) error {
 	}
 	defer tx.Rollback()
 	if _, err = tx.ExecContext(ctx, `INSERT OR REPLACE INTO ix_deferred(work_id,band,deferred_at,released_at)
-		SELECT id, `+ixBandSQL("tgdl_work")+`, ?, 0 FROM tgdl_work WHERE status='pending' AND paused=0 AND origin='history' AND ttl_seconds=0 AND `+ixBandSQL("tgdl_work")+`>?
+		SELECT id, `+ixBandSQL("tgdl_work")+`, ?, 0 FROM tgdl_work WHERE status='pending' AND paused=0 AND origin='history' AND ttl_seconds=0 AND sched_order>=`+strconv.Itoa(engine.UnrankedOrder)+` AND `+ixBandSQL("tgdl_work")+`>?
 		AND id NOT IN (SELECT work_id FROM ix_deferred WHERE released_at=-1)`, now, band); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE tgdl_work SET paused=1 WHERE status='pending' AND paused=0 AND origin='history' AND ttl_seconds=0 AND `+ixBandSQL("tgdl_work")+`>?
+	if _, err = tx.ExecContext(ctx, `UPDATE tgdl_work SET paused=1 WHERE status='pending' AND paused=0 AND origin='history' AND ttl_seconds=0 AND sched_order>=`+strconv.Itoa(engine.UnrankedOrder)+` AND `+ixBandSQL("tgdl_work")+`>?
 		AND id IN (SELECT work_id FROM ix_deferred WHERE released_at=0)`, band); err != nil {
 		return err
 	}

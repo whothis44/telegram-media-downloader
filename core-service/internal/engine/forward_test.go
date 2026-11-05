@@ -53,7 +53,7 @@ func TestSelfDestructingMediaIsClaimedFirst(t *testing.T) {
 	if len(order) != 4 || order[0] != 4 || order[1] != 2 || order[2] != 3 || order[3] != 1 {
 		t.Fatalf("claim order=%v, want TTL, live, live, history", order)
 	}
-	rows, err := s.reader.Query(`EXPLAIN QUERY PLAN SELECT id FROM tgdl_work WHERE status='pending' AND paused=0 ORDER BY ` + claimPriority + `,id LIMIT 1`)
+	rows, err := s.reader.Query(`EXPLAIN QUERY PLAN SELECT id FROM tgdl_work WHERE status='pending' AND paused=0 ORDER BY ` + claimOrderSQL + ` LIMIT 1`)
 	if err != nil {
 		t.Fatal(err)
 	}

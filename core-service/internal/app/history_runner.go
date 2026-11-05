@@ -111,7 +111,10 @@ func (a *App) runHistory(ctx context.Context, id string) error {
 		if j.MessagesOnly {
 			pending = 0 // archive: this walk queues nothing, so the queue never holds it back
 		} else {
-			pending = max(0, pending-a.ixWaitingApart(ctx, cap)) // archive: held copies, set-aside files and upgrades wait apart, they do not fill the queue
+			// archive: held copies, set-aside files and upgrades wait apart, they do
+			// not fill the queue; nor do rows that take no transfer of their own, or
+			// rows of files this group outranks (ix_sched.go).
+			pending = max(0, pending-a.ixWaitingApart(ctx, cap)-a.ixSharedWaiting()-a.ixAdmissionCredit(ctx, j.GroupID))
 		}
 		// Progress is a shrinking queue or bytes still arriving: several
 		// backfills feeding one queue with large files can keep it full for

@@ -1049,7 +1049,10 @@ func (c *Controller) worker(run *running, index int) {
 		}
 		budget := newAttemptBudget(ctx, c.attemptLimit(work.FileSize))
 		attemptCtx := budget.ctx
-		if err == nil && (work.ForceRefresh || work.Attempts > 1 || time.Since(time.UnixMilli(work.CreatedAt)) > time.Minute) {
+		// A file already saved under another message takes no bytes, so it
+		// needs no fresh reference and costs Telegram no request.
+		needsRefresh := work.ForceRefresh || work.Attempts > 1 || (time.Since(time.UnixMilli(work.CreatedAt)) > time.Minute && !c.work.IdentitySaved(ctx, work.Identity))
+		if err == nil && needsRefresh {
 			var fresh *telegram.RefreshedMessage
 			if work.Origin == "stories" {
 				if source, ok := run.accounts[work.AccountID].(storySource); ok {
@@ -1088,13 +1091,25 @@ func (c *Controller) worker(run *running, index int) {
 			}
 		}
 		if err == nil {
-			err = c.sink(attemptCtx, work, message, trackedTransport{MediaDownloader: run.accounts[work.AccountID], stats: progress, total: &c.received, bandwidth: &c.bandwidth, budget: budget})
+			// Waits for a file or part slot go by the row's place in the claim
+			// order, and a file still waiting for its slot gives way to better
+			// work rather than hold this worker.
+			key, manual := work.ClaimKey, !run.observing.Load()
+			rankedCtx := telegram.WithDownloadRank(attemptCtx, key, func() bool {
+				better, err := c.work.Outranked(ctx, run.unthrottled(), time.Now(), key, manual)
+				return err == nil && better
+			})
+			err = c.sink(rankedCtx, work, message, trackedTransport{MediaDownloader: run.accounts[work.AccountID], stats: progress, total: &c.received, bandwidth: &c.bandwidth, budget: budget})
 		}
 		if err != nil && attemptCtx.Err() != nil {
 			err = context.Cause(attemptCtx)
 		}
 		budget.stop()
 		wasCancelled := ctx.Err() != nil
+		if errors.Is(err, telegram.ErrDownloadYield) {
+			// Back to the queue as it was: no bytes moved, no attempt spent.
+			err, wasCancelled = nil, true
+		}
 		cancel()
 		run.mu.Lock()
 		delete(run.active, work.ID)

@@ -81,6 +81,7 @@ type dcPace struct {
 	dc       int
 	window   int
 	inflight int
+	ranks    rankWaiters // who waits for room, by rank (WithDownloadRank)
 	waiting  int
 	wake     chan struct{}
 
@@ -169,38 +170,55 @@ func (d *dcPace) broadcast() {
 	d.wake = make(chan struct{})
 }
 
-// acquire waits for room to ask for one more part from dc.
+// acquire waits for room to ask for one more part from dc. Among the parts
+// waiting, the best rank goes first (WithDownloadRank).
 func (p *downloadPacer) acquire(ctx context.Context, dc int) error {
+	rank := downloadRankOf(ctx).key
+	registered := false
+	leave := func(d *dcPace) {
+		if registered {
+			registered = false
+			d.ranks.remove(rank)
+			d.waiting--
+		}
+	}
 	for {
 		if err := ctx.Err(); err != nil {
+			p.mu.Lock()
+			d := p.dcLocked(dc)
+			if registered {
+				leave(d)
+				d.broadcast() // room it was first in line for may be free
+			}
+			p.mu.Unlock()
 			return err
 		}
 		p.mu.Lock()
 		d := p.dcLocked(dc)
 		d.lastUse = p.now()
-		if d.inflight < d.window {
+		if d.inflight < d.window && !d.ranks.better(rank) {
 			d.inflight++
+			leave(d)
 			p.mu.Unlock()
 			return nil
 		}
 		d.waited = true
-		d.waiting++
+		if !registered {
+			if d.ranks == nil {
+				d.ranks = rankWaiters{}
+			}
+			d.ranks.add(rank)
+			d.waiting++
+			registered = true
+		}
 		ch := d.wake
 		p.mu.Unlock()
 		resume := pauseDownloadWait(ctx)
 		select {
 		case <-ctx.Done():
-			resume()
-			p.mu.Lock()
-			d.waiting--
-			p.mu.Unlock()
-			return ctx.Err()
 		case <-ch:
 		}
 		resume()
-		p.mu.Lock()
-		d.waiting--
-		p.mu.Unlock()
 	}
 }
 

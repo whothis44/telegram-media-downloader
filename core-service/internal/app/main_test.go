@@ -13,5 +13,7 @@ func TestMain(m *testing.M) {
 	diskRotatorStartDelay = 24 * time.Hour
 	// Tests look at the figures right after changing the queue.
 	ixStatusCacheTTL, ixApartCacheTTL = 0, 0
+	// Busy means busy: the tests of the budget turn it on themselves.
+	ixRemoteBudgetOn = false
 	os.Exit(m.Run())
 }
