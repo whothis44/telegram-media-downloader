@@ -77,7 +77,7 @@ const (
 var (
 	ixSampleMaxParts     = 32
 	ixSampleTimeout      = 60 * time.Second // not counting the waits for parts
-	ixSampleHardTimeout  = 4 * time.Minute  // in all
+	ixSampleHardTimeout  = 10 * time.Minute // in all: a part read alone may take 5 (engine.filePartWaitLimit)
 	ixSampleClockTick    = 250 * time.Millisecond
 	ixSamplesPerRun      = 3
 	errIxSampleTimeout   = errors.New("the check took too long")

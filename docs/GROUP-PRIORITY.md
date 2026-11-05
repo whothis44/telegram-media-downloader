@@ -51,6 +51,8 @@ Global totals count each file once, however many groups have it; per-group credi
 
 On a speed-limited account, "Telegram is busy" stays true for days, so simply yielding meant the checks most worth their bytes never ran. Under pressure each kind of check now gets a bounded turn: at most 1 minute of big-video sampling and 30 seconds of preview fetching in each 10-minute window, the highest-ranked candidates first. Telegram's own `FLOOD_WAIT` is still a hard stop for ten minutes. A timeout remains "unknown": never a match and never a non-match.
 
+A check's reads may now wait through Telegram's speed-limit waits (5 minutes a part, 10 in all, up from 45 seconds and 4), because a wait is not a failure. A sampled match only moves a file to the back of the queue: nothing is deleted or skipped for good. Very high-motion footage may not match its own fingerprint, so it reads as "no match" and downloads, which is the safe way to be wrong.
+
 These numbers are engineering choices, not measured optima. Compare the `big videos sampled` and `previews` lines of the diagnostics over a few days before changing them.
 
 ## Limits

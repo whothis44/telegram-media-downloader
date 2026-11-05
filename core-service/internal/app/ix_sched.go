@@ -486,9 +486,13 @@ func ixIdentityFile(identity string) string {
 	return identity
 }
 
-// ixSavedIdentities is the Telegram files the library holds.
+// ixSavedIdentities is the Telegram files the library holds. A file the
+// integrity check found missing is not held: it must not count as covering
+// anything, nor send its only other copy to a row that expects no download.
 func (a *App) ixSavedIdentities(ctx context.Context) (map[string]bool, error) {
-	rows, err := a.db.Reader.QueryContext(ctx, `SELECT DISTINCT telegram_media_kind, telegram_media_id FROM downloads WHERE COALESCE(telegram_media_id,'')<>'' AND status='completed'`)
+	rows, err := a.db.Reader.QueryContext(ctx, `SELECT DISTINCT d.telegram_media_kind, d.telegram_media_id FROM downloads d
+		WHERE COALESCE(d.telegram_media_id,'')<>'' AND d.status='completed'
+		AND NOT EXISTS (SELECT 1 FROM ix_fixity f WHERE f.path=d.file_path AND f.result='missing')`)
 	if err != nil {
 		return nil, err
 	}

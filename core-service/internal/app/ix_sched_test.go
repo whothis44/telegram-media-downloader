@@ -912,3 +912,36 @@ func TestIxBackgroundTaskCrashDoesNotEndTheProcess(t *testing.T) {
 		t.Fatal("the fault was not reported")
 	}
 }
+
+// A saved file that has since gone missing covers nothing: its rows are real
+// downloads again, and no group is credited with it.
+func TestIxMissingRepresentativeCoversNothing(t *testing.T) {
+	a, ctx := ixTestApp(t)
+	if _, err := a.db.Writer.Exec(`INSERT INTO downloads(group_id,message_id,file_name,file_size,file_type,file_path,status,telegram_media_kind,telegram_media_id,telegram_media_size) VALUES('other',1,'a',5,'video','c/a.mp4','completed','video','42',5)`); err != nil {
+		t.Fatal(err)
+	}
+	row := ixSchedRowAdd(t, a, "low", 2, ixSchedIdent(42, 5), 5)
+	ixSchedStepOK(t, a, ctx)
+	if got := ixSchedOrder(t, a, row); got != ixFreeOrder {
+		t.Fatalf("setup: order %d", got)
+	}
+	if _, err := a.db.Writer.Exec(`INSERT INTO ix_fixity(path,result) VALUES('c/a.mp4','missing')`); err != nil {
+		t.Fatal(err)
+	}
+	ixSchedStepOK(t, a, ctx)
+	if got := ixSchedOrder(t, a, row); got != engine.UnrankedOrder {
+		t.Fatalf("order %d: a row of a missing file still expects no download", got)
+	}
+	saved, err := a.ixSavedIdentities(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := ixCovFixtureModel()
+	if c := ixCoverage(m, saved, nil)["low"]; c.Shared.Files != 0 || c.Needed.Files != 1 {
+		t.Fatalf("credited with a missing file: %+v", c)
+	}
+}
+
+func ixCovFixtureModel() *ixModel {
+	return ixCoverModel(ixCovFixture{group: "low", cluster: 0, ident: "video:42:5", size: 5})
+}
