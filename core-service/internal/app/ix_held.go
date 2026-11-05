@@ -249,9 +249,12 @@ func (a *App) ixHeldStep(ctx context.Context) error {
 	return a.ixReleaseSome(ctx, 25, s.ConfirmedGoEarly || a.ixOnlyConfirmedLeft(ctx))
 }
 
-// ixQueuePaused: a person paused the whole download queue; nothing moving
-// then is not a stuck queue.
+// ixQueuePaused: a person paused the whole download queue, or an update is
+// waiting for the downloads to finish; nothing moving then is not a stuck queue.
 func (a *App) ixQueuePaused(ctx context.Context) bool {
+	if a.monitor != nil && a.monitor.Draining() {
+		return true
+	}
 	var p int
 	_ = a.db.Reader.QueryRowContext(ctx, `SELECT paused FROM tgdl_queue_state WHERE id=1`).Scan(&p)
 	return p != 0

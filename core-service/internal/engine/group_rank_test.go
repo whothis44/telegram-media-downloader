@@ -346,3 +346,119 @@ func TestSavedFileNeedsNoRefresh(t *testing.T) {
 		}
 	}
 }
+
+// While an update waits no new file starts, except what may vanish. Going back
+// brings the rest, and the queue's own pause is not involved.
+func TestDrainingHoldsNewFilesAndLetsExpiringOnesGo(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	for _, id := range []int{1, 2} {
+		if _, _, err := s.Enqueue(ctx, "one", Target{}, testMessage(id, 1, int64(id))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.writer.Exec(`UPDATE tgdl_work SET ttl_seconds=60 WHERE message_id=2`); err != nil {
+		t.Fatal(err)
+	}
+	var waiting, expiring int64
+	if err := s.reader.QueryRow(`SELECT id FROM tgdl_work WHERE message_id=1`).Scan(&waiting); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.reader.QueryRow(`SELECT id FROM tgdl_work WHERE message_id=2`).Scan(&expiring); err != nil {
+		t.Fatal(err)
+	}
+	factory := func(AccountConfig, *telegram.UpdateState, func(context.Context, tg.UpdatesClass) error, func(int64)) (Account, error) {
+		return &readyAccount{}, nil
+	}
+	filter := func(context.Context, string, *tg.Message, tg.UpdatesClass) (Target, bool, error) {
+		return Target{}, true, nil
+	}
+	var mu sync.Mutex
+	var seen []int64
+	sink := func(_ context.Context, w *Work, _ *tg.Message, _ telegram.MediaDownloader) error {
+		mu.Lock()
+		seen = append(seen, w.ID)
+		mu.Unlock()
+		return nil
+	}
+	c := New(s.writer, s.reader, t.TempDir(), factory, filter, sink, nil)
+	c.SetDraining(true)
+	if err := c.Start(ctx, ctx, []AccountConfig{{ID: "one"}}, 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Stop(ctx)
+	got := func() []int64 {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]int64(nil), seen...)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && len(got()) == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if g := got(); len(g) != 1 || g[0] != expiring {
+		t.Fatalf("while draining the worker took %v, want only %d", g, expiring)
+	}
+	if files, left, err := c.DrainStatus(ctx); err != nil || files != 0 || left != 0 {
+		t.Fatalf("drain status %d %d %v", files, left, err)
+	}
+	c.SetDraining(false)
+	deadline = time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) && len(got()) < 2 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if g := got(); len(g) != 2 || g[1] != waiting {
+		t.Fatalf("after going back the worker took %v", g)
+	}
+}
+
+// A file still waiting for its slot goes back to the queue when an update waits.
+func TestDrainingMakesWaitingFilesGiveWay(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	if _, _, err := s.Enqueue(ctx, "one", Target{}, testMessage(1, 1, 1)); err != nil {
+		t.Fatal(err)
+	}
+	factory := func(AccountConfig, *telegram.UpdateState, func(context.Context, tg.UpdatesClass) error, func(int64)) (Account, error) {
+		return &readyAccount{}, nil
+	}
+	filter := func(context.Context, string, *tg.Message, tg.UpdatesClass) (Target, bool, error) {
+		return Target{}, true, nil
+	}
+	var c *Controller
+	asked := make(chan bool, 1)
+	sink := func(wctx context.Context, _ *Work, _ *tg.Message, _ telegram.MediaDownloader) error {
+		c.SetDraining(true)
+		asked <- telegram.ShouldYieldForTest(wctx)
+		return telegram.ErrDownloadYield
+	}
+	c = New(s.writer, s.reader, t.TempDir(), factory, filter, sink, nil)
+	if err := c.Start(ctx, ctx, []AccountConfig{{ID: "one"}}, 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Stop(ctx)
+	select {
+	case yes := <-asked:
+		if !yes {
+			t.Fatal("a file waiting for its slot does not give way to an update")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no attempt")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	var status string
+	var attempts int
+	for time.Now().Before(deadline) {
+		if err := s.reader.QueryRow(`SELECT status,attempts FROM tgdl_work`).Scan(&status, &attempts); err != nil {
+			t.Fatal(err)
+		}
+		if status == "pending" {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if status != "pending" || attempts != 0 {
+		t.Fatalf("status=%s attempts=%d", status, attempts)
+	}
+}

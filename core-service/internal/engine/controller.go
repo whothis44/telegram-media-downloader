@@ -62,6 +62,7 @@ type UpdateObserver func(context.Context, string, tg.UpdateClass) error
 var ErrEngineNotRunning = errors.New("Engine is not running. Start the monitor first.")
 
 type Controller struct {
+	draining       atomic.Bool // no new downloads: an update is waiting (SetDraining)
 	writer, reader *sql.DB
 	work           *WorkStore
 	dataDir        string
@@ -335,6 +336,56 @@ func (c *Controller) Running() (accounts []string, observing, ok bool) {
 func (c *Controller) RequireRunning() error {
 	_, err := c.queueRun()
 	return err
+}
+
+// SetDraining stops new downloads starting, for an update (app/ix_update.go), or
+// lets them start again. Downloads moving bytes finish. It is deliberately not the
+// queue's pause: resuming that clears every item's own pause, which would let go
+// files the archive has set aside or held back.
+func (c *Controller) SetDraining(on bool) {
+	c.draining.Store(on)
+	if !on {
+		c.mu.Lock()
+		run := c.run
+		c.mu.Unlock()
+		if run != nil {
+			c.wake(run)
+		}
+	}
+}
+
+// Draining reports whether new downloads are held back for an update.
+func (c *Controller) Draining() bool { return c.draining.Load() }
+
+// DrainStatus is how many downloads are in progress and what they still have to
+// fetch.
+func (c *Controller) DrainStatus(ctx context.Context) (files int, bytesLeft int64, err error) {
+	c.mu.Lock()
+	run := c.run
+	c.mu.Unlock()
+	if run == nil {
+		return 0, 0, nil
+	}
+	select {
+	case <-run.done:
+		return 0, 0, nil
+	default:
+	}
+	var received int64
+	run.mu.Lock()
+	files = len(run.active)
+	for _, p := range run.progress {
+		received += p.received.Load()
+	}
+	run.mu.Unlock()
+	if files == 0 {
+		return 0, 0, nil
+	}
+	var total int64
+	if err = c.reader.QueryRowContext(ctx, `SELECT COALESCE(SUM(file_size),0) FROM tgdl_work WHERE status='processing'`).Scan(&total); err != nil {
+		return files, 0, err
+	}
+	return files, max(0, total-received), nil
 }
 
 func (c *Controller) wake(run *running) {
@@ -1001,7 +1052,13 @@ func (c *Controller) worker(run *running, index int) {
 			}
 			continue
 		}
-		work, err := c.work.Claim(run.ctx, run.unthrottled(), time.Now(), !run.observing.Load())
+		var work *Work
+		var err error
+		if c.draining.Load() {
+			work, err = c.work.ClaimExpiring(run.ctx, run.unthrottled(), time.Now(), !run.observing.Load())
+		} else {
+			work, err = c.work.Claim(run.ctx, run.unthrottled(), time.Now(), !run.observing.Load())
+		}
 		if err != nil {
 			if run.ctx.Err() == nil {
 				run.cancel(fmt.Errorf("claim work: %w", err))
@@ -1096,6 +1153,9 @@ func (c *Controller) worker(run *running, index int) {
 			// work rather than hold this worker.
 			key, manual := work.ClaimKey, !run.observing.Load()
 			rankedCtx := telegram.WithDownloadRank(attemptCtx, key, func() bool {
+				if c.draining.Load() && key >= claimLaneBase {
+					return true // an update is waiting, and this file has not started
+				}
 				better, err := c.work.Outranked(ctx, run.unthrottled(), time.Now(), key, manual)
 				return err == nil && better
 			})

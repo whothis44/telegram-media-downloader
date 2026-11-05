@@ -101,10 +101,26 @@ function groups() { return ((state.status && state.status.groups) || []).filter(
 function catOf(g) { return state.draft.has(g.id) ? state.draft.get(g.id) : (g.category || ''); }
 function changed() { return groups().filter((g) => state.draft.has(g.id) && state.draft.get(g.id).trim() !== (g.category || '')); }
 
+// A new version, and an update waiting for the downloads to finish.
+function updateBanner() {
+  const u = (state.status && state.status.update) || {};
+  if (u.exiting) return '<div class="status" role="status"><b>Restarting for the update…</b> This page comes back in about a minute.</div>';
+  if (u.draining) {
+    if (u.ready) {
+      return u.restarts
+        ? '<div class="status" role="status"><b>Downloads are done.</b> Restarting…</div>'
+        : '<div class="status warn" role="status"><b>Downloads are done: nothing will be lost.</b> Close the downloader\'s window and open <code>start.bat</code> to finish updating. Until then no new file starts. <button class="mini" data-act="u-cancel">Go back to downloading</button></div>';
+    }
+    return `<div class="status" role="status"><b>Waiting for ${fmtNum(u.files)} download${u.files === 1 ? '' : 's'} to finish</b> (${fmtSize(u.bytesLeft || 0)} left). No new file starts meanwhile, apart from self-destructing media.${u.restarts ? ' It restarts by itself when they are done.' : ''} <span class="btns" style="margin-top:6px">${u.restarts ? '<button class="b" data-act="u-now">Update now</button>' : ''}<button class="b" data-act="u-cancel">Go back to downloading</button></span></div>`;
+  }
+  if (u.newer) return `<div class="status" role="status"><b>Version ${esc(u.latest)} is out</b> (you have ${esc(u.current)}). <span class="btns" style="margin-top:6px"><button class="b primary" data-act="u-start">Update when downloads finish</button><span class="muted">No new file starts until then. Files in progress are not lost.</span></span></div>`;
+  return '';
+}
+
 function banner() {
   const s = state.status;
   if (!s) return '';
-  let h = '';
+  let h = updateBanner();
   const acct = s.account || {};
   const fz = s.freeze || {};
   // Read-only archive (ix_gone.go): the other account banners no longer apply.
@@ -814,6 +830,16 @@ $app.addEventListener('click', async (ev) => {
     case 'pr-remove': prioSave(prioOrder().filter((x) => x !== id)); break;
     case 'pr-add': { const o = prioOrder(); if (!o.includes(id)) o.push(id); prioSave(o); break; }
     case 'pr-batch': prioBatch(key); break;
+    case 'u-start': case 'u-cancel': case 'u-now': {
+      if (act === 'u-now') {
+        const u = state.status.update || {};
+        if (!confirm(`Restart now? ${fmtNum(u.files)} download(s) in progress (${fmtSize(u.bytesLeft || 0)} left) will start over.`)) break;
+      }
+      const r = await api('POST', '/api/ix/update', { action: act.slice(2) });
+      if (r.ok) { state.status.update = r.data; state.error = ''; } else state.error = errText(r);
+      render();
+      break;
+    }
     case 'pr-tick-all': prioOthersShown().forEach((g) => state.prioSel.add(g.groupId)); render(); break;
     case 'pr-untick': state.prioSel.clear(); render(); break;
     case 'd-more': loadDups(true); break;
@@ -1017,7 +1043,8 @@ setInterval(() => {
   if (document.visibilityState !== 'visible') return;
   const busy = document.activeElement && document.activeElement.matches && document.activeElement.matches('[data-dset],[data-dset-text],[data-dset-select]');
   if (busy) return; // don't redraw under someone editing the duplicate settings
-  if (state.tab === 'rescan' || state.tab === 'overview') load();
+  // An update under way shows on every page.
+  if (state.tab === 'rescan' || state.tab === 'overview' || (state.status && state.status.update && state.status.update.draining)) load();
   if (state.tab === 'priorities' && !state.prioDrag) { const typing = document.activeElement && document.activeElement.getAttribute('data-focus') === 'prios'; if (!typing) loadPrio(); }
   if (state.tab === 'duplicates' && state.dups && state.dups.clusters.length <= 50) loadDups(false);
 }, 10000);

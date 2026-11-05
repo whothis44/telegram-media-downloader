@@ -187,6 +187,7 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 	for _, l := range a.ixTransferDiag(ctx, r.clean) {
 		line("%s", l)
 	}
+	line("%s", a.ixUpdateDiag(ctx))
 	line("\n[group priorities]")
 	for _, l := range a.ixPrioritiesDiag(ctx, r.group) { // ix_coverage.go
 		line("%s", l)

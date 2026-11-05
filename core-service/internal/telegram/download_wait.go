@@ -73,3 +73,9 @@ func (w rankWaiters) better(key int64) bool {
 	}
 	return false
 }
+
+// ShouldYieldForTest reports what a file waiting for its slot would be told.
+func ShouldYieldForTest(ctx context.Context) bool {
+	r := downloadRankOf(ctx)
+	return r.yield != nil && r.yield()
+}

@@ -34,6 +34,8 @@ import (
 )
 
 type Config struct {
+	// RequestExit ends the server as Ctrl+C does, for an update (ix_update.go).
+	RequestExit         func()
 	HTTP                HTTPOptions
 	AccountFactory      engine.Factory
 	AccountLoginFactory telegram.LoginFactory
@@ -48,6 +50,7 @@ type Config struct {
 }
 type App struct {
 	httpOptions      HTTPOptions
+	requestExit      func()
 	proxyPolicy      proxyPolicy
 	webPolicy        webPolicyCache
 	apiRL            *rateLimiter
@@ -211,6 +214,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	read := dbread.NewHandler(filepath.Join(cfg.DataDir, "db.sqlite"), nil)
 	a := &App{db: db, sessions: auth.NewSessionStore(db.Writer, cookie, ttl), hub: ws.NewHub(64), read: read, config: auth.ConfigStore{DB: db.Writer}, jobs: jobs.NewTracker(), dataDir: cfg.DataDir, loginRL: newRateLimiter(10, 15*time.Minute), setupRL: newRateLimiter(20, 15*time.Minute), secureCookies: cfg.SecureCookies, output: cfg.Output, resetTokens: make(map[string]time.Time), dedupLastScan: map[string]any{}, dedupScanStatus: dedupIdleStatus("dedupScan"), dedupDeleteStatus: dedupIdleStatus("dedupDelete"), leaveBatchStatus: dedupIdleStatus("chatLeaveBatch"), updateStatus: dedupIdleStatus("autoUpdate"), faststartStatus: faststartIdleStatus(), faststartLastRun: map[string]any{}, thumbBuildStatus: thumbsIdleStatus("thumbsBuild"), thumbRebuildStatus: thumbsIdleStatus("thumbsRebuild"), dbIntegrityStatus: maintenanceIdleStatus("dbIntegrity"), filesVerifyStatus: maintenanceIdleStatus("filesVerify"), reindexStatus: maintenanceIdleStatus("reindex"), vacuumStatus: maintenanceIdleStatus("dbVacuum"), nsfw: newNSFWRuntime()}
 	a.httpOptions, a.proxyPolicy, a.apiRL = cfg.HTTP, proxy, newRateLimiter(10000, time.Minute)
+	a.requestExit = cfg.RequestExit
 	a.seekbar = newSeekbarState()
 	a.faces = newFacesService(a)
 	a.downloadsDir = cfg.DownloadsDir

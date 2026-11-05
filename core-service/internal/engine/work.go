@@ -270,6 +270,30 @@ func (s *WorkStore) Claim(ctx context.Context, accounts []string, now time.Time,
 		return nil, nil
 	}
 	pick, pickArgs := claimSelect(accounts, now, len(manualOnly) > 0 && manualOnly[0])
+	return s.claim(ctx, now, pick, pickArgs)
+}
+
+// ClaimExpiring claims only self-destructing media: what may vanish goes on even
+// while an update waits for the downloads to finish.
+func (s *WorkStore) ClaimExpiring(ctx context.Context, accounts []string, now time.Time, manualOnly bool) (*Work, error) {
+	if len(accounts) == 0 {
+		return nil, nil
+	}
+	marks := strings.TrimSuffix(strings.Repeat("?,", len(accounts)), ",")
+	args := make([]any, 0, len(accounts)+1)
+	for _, id := range accounts {
+		args = append(args, id)
+	}
+	args = append(args, now.UnixMilli())
+	where := `status='pending' AND paused=0 AND ttl_seconds>0 AND +account_id IN (` + marks + `) AND retry_at<=?` + claimFree
+	if manualOnly {
+		where += ` AND origin<>'live'`
+	}
+	pick := `SELECT id FROM tgdl_work WHERE ` + where + ` AND (SELECT paused FROM tgdl_queue_state WHERE id=1)=0 ORDER BY id LIMIT 1`
+	return s.claim(ctx, now, pick, args)
+}
+
+func (s *WorkStore) claim(ctx context.Context, now time.Time, pick string, pickArgs []any) (*Work, error) {
 	args := append([]any{now.UnixMilli()}, pickArgs...)
 	row := s.writer.QueryRowContext(ctx, `UPDATE tgdl_work SET status='processing',claim_generation=generation,attempts=attempts+1,updated_at=?
 	 WHERE id=(`+pick+`)

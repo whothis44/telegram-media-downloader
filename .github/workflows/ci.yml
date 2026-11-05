@@ -110,3 +110,4 @@ jobs:
       - run: python tests/ui/forum_routes.py
       - run: python tests/ui/queue_place.py
       - run: python tests/ui/archive_priorities.py
+      - run: python tests/ui/archive_update_banner.py

@@ -18,6 +18,8 @@ func registerIxRoutes(mux *http.ServeMux, a *App) {
 	mux.Handle("GET /api/ix/search", a.requireAdmin(http.HandlerFunc(a.handleIxSearch)))
 	mux.Handle("POST /api/ix/queue/add", a.requireAdmin(http.HandlerFunc(a.handleIxQueueAdd)))
 	mux.Handle("POST /api/ix/queue/{action}", a.requireAdmin(http.HandlerFunc(a.handleIxQueueAction)))
+	mux.Handle("GET /api/ix/update", a.requireAdmin(http.HandlerFunc(a.handleIxUpdate)))
+	mux.Handle("POST /api/ix/update", a.requireAdmin(http.HandlerFunc(a.handleIxUpdateAction)))
 	mux.Handle("GET /api/ix/priorities", a.requireAdmin(http.HandlerFunc(a.handleIxPriorities)))
 	mux.Handle("POST /api/ix/priorities", a.requireAdmin(http.HandlerFunc(a.handleIxPrioritiesSet)))
 	mux.Handle("POST /api/ix/settings", a.requireAdmin(http.HandlerFunc(a.handleIxSettings)))
@@ -184,6 +186,7 @@ func (a *App) handleIxStatus(w http.ResponseWriter, r *http.Request) {
 	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE name='ix_fts'`).Scan(&fts)
 	out := map[string]any{
 		"version":   version.AppVersion,
+		"update":    a.ixUpdateNow(ctx),
 		"groups":    groups,
 		"queue":     queue,
 		"queueLeft": a.ixQueueLeft(ctx),
