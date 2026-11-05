@@ -92,6 +92,18 @@ func (a *App) ixDiagHours(ctx context.Context, now time.Time) []string {
 				r.accts++
 				r.pace.Bytes += h.Bytes
 				r.pace.Parts += h.Parts
+				for dc, b := range h.DCBytes {
+					if r.pace.DCBytes == nil {
+						r.pace.DCBytes = map[int]int64{}
+					}
+					r.pace.DCBytes[dc] += b
+				}
+				for dc, n := range h.DCPremium {
+					if r.pace.DCPremium == nil {
+						r.pace.DCPremium = map[int]int{}
+					}
+					r.pace.DCPremium[dc] += n
+				}
 				r.pace.Waits += h.Waits
 				r.pace.Premium += h.Premium
 				r.pace.Seconds = max(r.pace.Seconds, h.Seconds)
@@ -112,6 +124,8 @@ func (a *App) ixDiagHours(ctx context.Context, now time.Time) []string {
 	tot.errs = map[string]int{}
 	var fullSum, partSum float64
 	var pacedHours, partHours int
+	// Speed-limited hours, all servers and each one: whether the limit is per server.
+	limited, limitedBytes, limitedDC := 0, int64(0), map[int]int64{}
 	for _, s := range starts {
 		r := rows[s]
 		tot.files += r.files
@@ -130,6 +144,16 @@ func (a *App) ixDiagHours(ctx context.Context, now time.Time) []string {
 				partHours++
 			}
 			line += fmt.Sprintf(" | waits %d, speed limit %d | %.1f s a part, %.1f parts allowed, full %d%% of the time", r.pace.Waits, r.pace.Premium, r.pace.PartSecs, r.winSum, int(r.pace.FullShare*100+0.5))
+			if len(r.pace.DCBytes) > 0 || len(r.pace.DCPremium) > 0 {
+				line += " | per server: " + ixDCList(r.pace.DCBytes, r.pace.DCPremium)
+			}
+			if r.pace.Premium > 0 {
+				limited++
+				limitedBytes += r.pace.Bytes
+				for dc, b := range r.pace.DCBytes {
+					limitedDC[dc] += b
+				}
+			}
 		}
 		if len(r.errs) > 0 {
 			line += " | errors: " + ixKindList(r.errs)
@@ -149,7 +173,42 @@ func (a *App) ixDiagHours(ctx context.Context, now time.Time) []string {
 	if len(tot.errs) > 0 {
 		sum += " · errors: " + ixKindList(tot.errs)
 	}
-	return append([]string{sum, "  what limits downloads (a guess from these numbers): " + ixLimitGuess(tot, fullSum, pacedHours, partSum, partHours)}, out...)
+	head := []string{sum, "  what limits downloads (a guess from these numbers): " + ixLimitGuess(tot, fullSum, pacedHours, partSum, partHours)}
+	if limited > 0 {
+		// Bytes an hour in the hours with speed-limit waits. If the limit were per
+		// server, more servers busy would give more in all; the hours' files differ
+		// in size, so this is a hint, not a measurement.
+		per := make(map[int]int64, len(limitedDC))
+		for dc, b := range limitedDC {
+			per[dc] = b / int64(limited)
+		}
+		head = append(head, fmt.Sprintf("  speed-limited hours: %d, %d MB an hour in all; per server, MB an hour: %s", limited, limitedBytes/int64(limited)>>20, ixDCList(per, nil)))
+	}
+	return append(head, out...)
+}
+
+// ixDCList is "DC1 820 MB (3 limit waits), DC4 10 MB", by server number.
+func ixDCList(bytes map[int]int64, premium map[int]int) string {
+	seen := map[int]bool{}
+	var dcs []int
+	for dc := range bytes {
+		seen[dc] = true
+		dcs = append(dcs, dc)
+	}
+	for dc := range premium {
+		if !seen[dc] {
+			dcs = append(dcs, dc)
+		}
+	}
+	sort.Ints(dcs)
+	parts := make([]string, len(dcs))
+	for i, dc := range dcs {
+		parts[i] = fmt.Sprintf("DC%d %d MB", dc, bytes[dc]>>20)
+		if n := premium[dc]; n > 0 {
+			parts[i] += fmt.Sprintf(" (%d limit waits)", n)
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 func ixKindList(m map[string]int) string {

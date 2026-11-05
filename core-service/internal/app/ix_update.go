@@ -31,10 +31,30 @@ import (
 //
 // Draining is kept in memory on purpose: a restart for any other reason must not
 // come back refusing to download.
+//
+// From ix.12.3 a file that keeps its progress (8 MiB or more) does not have to
+// finish: it stops right after its next checkpoint (at most 30 s away) and carries
+// on after the restart, so the drain takes seconds to minutes, not hours. Files
+// too small to resume, and nearly finished ones, finish.
+//
+// "Install updates automatically" (AutoUpdate) starts the drain by itself when a
+// newer release is out, but only with a launcher that says it loops: otherwise
+// the app would stop downloading and wait for a person. Going back to downloading
+// by hand leaves that version alone. An automatic drain that has not finished
+// after ixAutoDrainLimit gives up and goes back to downloading, and tries again
+// later, so it can never hold the downloads for long.
 
 const (
 	ixUpdateCheckEvery = time.Hour
 	ixUpdateWatchEvery = 2 * time.Second
+)
+
+// The automatic update: how often it looks, how long a drain may take before it
+// gives up, and how long it then waits to try again (variables for tests).
+var (
+	ixAutoUpdateEvery = time.Minute
+	ixAutoDrainLimit  = 20 * time.Minute
+	ixAutoRetryAfter  = time.Hour
 )
 
 // ixLatestRelease asks for the newest published version (replaceable in tests).
@@ -102,6 +122,9 @@ type ixUpdateInfo struct {
 	Ready     bool   `json:"ready"`     // nothing in progress: safe to restart
 	Restarts  bool   `json:"restarts"`  // a launcher brings the app back after it exits
 	Exiting   bool   `json:"exiting"`
+	Auto      bool   `json:"auto"`    // Install updates automatically is on
+	AutoNow   bool   `json:"autoNow"` // this drain was started automatically
+	AutoNote  string `json:"autoNote,omitempty"`
 }
 
 type ixUpdateBox struct {
@@ -112,6 +135,12 @@ type ixUpdateBox struct {
 	checking bool
 	watching bool
 	exiting  bool
+	// The automatic update: its drain began at autoSince (zero: none), a person
+	// went back to downloading during one for declined, and it gave up at gaveUp.
+	autoSince time.Time
+	declined  string
+	gaveUp    time.Time
+	autoNote  string
 }
 
 var ixUpdateState sync.Map // *App -> *ixUpdateBox
@@ -157,6 +186,10 @@ func (a *App) ixUpdateNow(ctx context.Context) ixUpdateInfo {
 	info := ixUpdateInfo{Current: version.AppVersion, Latest: box.latest, CheckErr: box.checkErr, Exiting: box.exiting, Restarts: ixLauncherRestarts()}
 	box.mu.Unlock()
 	info.Newer = info.Latest != "" && ixVersionNewer(info.Latest, info.Current)
+	info.Auto = a.ixLoadSettings(ctx).AutoUpdate
+	box.mu.Lock()
+	info.AutoNow, info.AutoNote = !box.autoSince.IsZero(), box.autoNote
+	box.mu.Unlock()
 	if a.monitor != nil {
 		info.Draining = a.monitor.Draining()
 		if info.Draining {
@@ -191,6 +224,14 @@ func (a *App) handleIxUpdateAction(w http.ResponseWriter, r *http.Request) {
 		a.monitor.SetDraining(true)
 		a.ixUpdateWatch()
 	case "cancel":
+		box := a.ixUpdates()
+		box.mu.Lock()
+		if !box.autoSince.IsZero() {
+			// Back to downloading by hand: this version is not tried again by itself.
+			box.declined, box.autoSince = box.latest, time.Time{}
+			box.autoNote = "You went back to downloading: version " + box.latest + " is not installed by itself. Use the button to install it."
+		}
+		box.mu.Unlock()
 		a.monitor.SetDraining(false)
 	case "now":
 		if !ixLauncherRestarts() {
@@ -242,6 +283,73 @@ func (a *App) ixUpdateWatch() {
 	}()
 }
 
+// ixRunUpdates is the background task of the automatic update.
+func (a *App) ixRunUpdates(ctx context.Context) {
+	tick := time.NewTicker(ixAutoUpdateEvery)
+	defer tick.Stop()
+	for {
+		a.ixAutoUpdateStep(ctx, time.Now())
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+	}
+}
+
+// ixAutoUpdateStep starts the drain when it should, and gives an automatic one
+// up when it takes too long.
+func (a *App) ixAutoUpdateStep(ctx context.Context, now time.Time) {
+	if a.monitor == nil {
+		return
+	}
+	a.ixUpdateCheck()
+	auto := a.ixLoadSettings(ctx).AutoUpdate
+	if a.ixAutoDrainCheck(now) {
+		return // one is under way
+	}
+	if !auto || !ixLauncherRestarts() || a.monitor.Draining() {
+		return // off; nothing would bring the app back; or a person started one
+	}
+	box := a.ixUpdates()
+	box.mu.Lock()
+	start := !box.exiting && box.latest != "" && ixVersionNewer(box.latest, version.AppVersion) && box.latest != box.declined &&
+		(box.gaveUp.IsZero() || now.Sub(box.gaveUp) >= ixAutoRetryAfter)
+	if start {
+		box.autoSince, box.autoNote = now, ""
+	}
+	latest := box.latest
+	box.mu.Unlock()
+	if !start {
+		return
+	}
+	a.ixLog("automatic update to %s: waiting for the downloads in progress (large files stop at their next checkpoint)", latest)
+	a.monitor.SetDraining(true)
+	a.ixUpdateWatch()
+}
+
+// ixAutoDrainCheck looks after an automatic drain under way, and says whether
+// there is one.
+func (a *App) ixAutoDrainCheck(now time.Time) bool {
+	box := a.ixUpdates()
+	box.mu.Lock()
+	defer box.mu.Unlock()
+	if box.autoSince.IsZero() {
+		return false
+	}
+	switch {
+	case !a.monitor.Draining():
+		box.autoSince = time.Time{} // ended elsewhere
+		return false
+	case !box.exiting && now.Sub(box.autoSince) >= ixAutoDrainLimit:
+		a.monitor.SetDraining(false)
+		box.autoSince, box.gaveUp = time.Time{}, now
+		box.autoNote = "The automatic update waited " + ixAutoDrainLimit.String() + " for the downloads in progress and went back to downloading; it tries again later."
+		a.ixLog("automatic update: downloads did not finish in %s; back to downloading, trying again later", ixAutoDrainLimit)
+	}
+	return true
+}
+
 // ixUpdateExit ends the server as Ctrl+C does.
 func (a *App) ixUpdateExit() {
 	box := a.ixUpdates()
@@ -271,5 +379,5 @@ func (a *App) ixUpdateDiag(ctx context.Context) string {
 	if a.library != nil {
 		kept, keptBytes = a.library.PartsKept(ctx)
 	}
-	return fmt.Sprintf("update: running %s · latest release %s · waiting for downloads to finish %v (%d files, %d MB left) · launcher restarts the app %v · partial downloads kept for resuming %d (%d MB)", info.Current, latest, info.Draining, info.Files, info.BytesLeft>>20, info.Restarts, kept, keptBytes>>20)
+	return fmt.Sprintf("update: running %s · latest release %s · waiting for downloads to finish %v (%d files, %d MB left%s) · install automatically %v · launcher restarts the app %v · partial downloads kept for resuming %d (%d MB)", info.Current, latest, info.Draining, info.Files, info.BytesLeft>>20, map[bool]string{true: ", started automatically"}[info.AutoNow], info.Auto, info.Restarts, kept, keptBytes>>20)
 }

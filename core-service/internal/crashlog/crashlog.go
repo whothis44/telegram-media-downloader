@@ -246,8 +246,20 @@ func (r Run) Text() string {
 	if r.Version != "" {
 		fmt.Fprintf(&b, " · %s", r.Version)
 	}
-	if !r.Started.IsZero() && r.Ended.After(r.Started) {
-		fmt.Fprintf(&b, " · after %s", r.Ended.Sub(r.Started).Round(time.Minute))
+	if !r.Started.IsZero() && !r.Ended.Before(r.Started) {
+		d := r.Ended.Sub(r.Started)
+		switch {
+		case r.How == HowNoReport && d < Beat:
+			// Its end is only known to within a beat: the marker is touched once
+			// a minute, so "after 0s" would claim more than is known.
+			b.WriteString(" · within its first minute")
+		case r.How == HowNoReport:
+			fmt.Fprintf(&b, " · after about %s", d.Round(time.Minute))
+		case d < time.Minute:
+			fmt.Fprintf(&b, " · after %s", d.Round(time.Second))
+		default:
+			fmt.Fprintf(&b, " · after %s", d.Round(time.Minute))
+		}
 	}
 	if r.Cause != "" {
 		fmt.Fprintf(&b, " · %s", r.Cause)

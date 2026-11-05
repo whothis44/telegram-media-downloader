@@ -273,7 +273,7 @@ func (p *downloadPacer) flood(dc int, premium bool) {
 	defer p.mu.Unlock()
 	now := p.now()
 	d := p.dcLocked(dc)
-	p.hourWaitLocked(now, premium)
+	p.hourWaitLocked(now, dc, premium)
 	if premium {
 		d.premium++
 		d.premiumAt = append(d.premiumAt, now)

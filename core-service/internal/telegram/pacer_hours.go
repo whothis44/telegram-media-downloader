@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"time"
 )
@@ -25,6 +26,10 @@ type PaceHour struct {
 	Window    float64 `json:"window"`    // average parts allowed in flight
 	FullShare float64 `json:"fullShare"` // share of the hour downloads waited for room (0–1)
 	Seconds   int     `json:"seconds"`   // seconds of the hour the pacer was measuring
+	// Per Telegram server (datacenter): bytes received and speed-limit waits,
+	// to tell whether the limit is per server (ix.12.3).
+	DCBytes   map[int]int64 `json:"dcBytes,omitempty"`
+	DCPremium map[int]int   `json:"dcPremium,omitempty"`
 
 	took    time.Duration
 	answers int
@@ -55,6 +60,12 @@ func (p *downloadPacer) recordHourLocked(now time.Time, secs float64) {
 	full := false
 	for _, d := range p.dcs {
 		h.Bytes += d.bytes
+		if d.bytes > 0 {
+			if h.DCBytes == nil {
+				h.DCBytes = map[int]int64{}
+			}
+			h.DCBytes[d.dc] += d.bytes
+		}
 		h.Parts += d.parts
 		h.took += d.took
 		h.answers += d.answers
@@ -82,10 +93,14 @@ func (h *PaceHour) derive() {
 	}
 }
 
-func (p *downloadPacer) hourWaitLocked(now time.Time, premium bool) {
+func (p *downloadPacer) hourWaitLocked(now time.Time, dc int, premium bool) {
 	h := p.hourLocked(now)
 	if premium {
 		h.Premium++
+		if h.DCPremium == nil {
+			h.DCPremium = map[int]int{}
+		}
+		h.DCPremium[dc]++
 	} else {
 		h.Waits++
 	}
@@ -152,7 +167,9 @@ func (p *downloadPacer) hoursNewestFirst() []PaceHour {
 	defer p.mu.Unlock()
 	out := make([]PaceHour, 0, len(p.hours))
 	for i := len(p.hours) - 1; i >= 0; i-- {
-		out = append(out, p.hours[i])
+		h := p.hours[i]
+		h.DCBytes, h.DCPremium = maps.Clone(h.DCBytes), maps.Clone(h.DCPremium) // the live hour's maps change under the lock
+		out = append(out, h)
 	}
 	return out
 }

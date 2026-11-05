@@ -77,7 +77,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "crash log: %v\n", crashErr)
 	}
 	if lastRun != nil {
-		_, _ = fmt.Fprintf(stderr, "The last run did not stop cleanly: %s\n", lastRun.Text())
+		// ASCII: a Windows console's code page showed the middle dot as "Â·".
+		_, _ = fmt.Fprintf(stderr, "The last run did not stop cleanly: %s\n", strings.ReplaceAll(lastRun.Text(), " · ", " - "))
 	}
 	defer crashes.Finish()
 	defer a.Close()

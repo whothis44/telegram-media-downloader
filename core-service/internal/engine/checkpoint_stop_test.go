@@ -242,3 +242,34 @@ func TestMakeRoomClaimsASmallerFileNext(t *testing.T) {
 		t.Fatalf("making room spent an attempt: %d", attempts)
 	}
 }
+
+// The queue page gets the next files to download in the order they will
+// (ix.12.3), not the first by id: rows no longer jump in from deep in the queue.
+func TestSnapshotListsTheQueueInDownloadOrder(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	for id := 1; id <= 4; id++ {
+		if _, _, err := s.Enqueue(ctx, "one", Target{}, testMessage(id, 1, int64(id))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Ranked: 3 first, then 1; 2 and 4 not ranked; 4 paused.
+	if _, err := s.writer.Exec(`UPDATE tgdl_work SET origin='history', sched_order=CASE message_id WHEN 3 THEN 1 WHEN 1 THEN 2 ELSE 131072 END, paused=CASE message_id WHEN 4 THEN 1 ELSE 0 END`); err != nil {
+		t.Fatal(err)
+	}
+	c := New(s.writer, s.reader, t.TempDir(), nil, nil, nil, nil)
+	snap, err := c.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []int64
+	for i, item := range snap["queued"].([]map[string]any) {
+		got = append(got, item["messageId"].(int64))
+		if item["order"] != i {
+			t.Fatalf("row %d says order %v", i, item["order"])
+		}
+	}
+	if len(got) != 4 || got[0] != 3 || got[1] != 1 || got[2] != 2 || got[3] != 4 {
+		t.Fatalf("queued in the order %v, want [3 1 2 4]: ranked first, the paused row last", got)
+	}
+}
