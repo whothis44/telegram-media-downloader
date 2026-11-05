@@ -79,3 +79,17 @@ func ShouldYieldForTest(ctx context.Context) bool {
 	r := downloadRankOf(ctx)
 	return r.yield != nil && r.yield()
 }
+
+type downloadOffsetKey struct{}
+
+// WithDownloadOffset has DownloadMedia send the file from offset on (a multiple
+// of PartSize). Only for a source AttachmentClient.CanResume found: another would
+// ignore it and send the file from the start.
+func WithDownloadOffset(ctx context.Context, offset int64) context.Context {
+	return context.WithValue(ctx, downloadOffsetKey{}, offset)
+}
+
+func downloadOffsetOf(ctx context.Context) int64 {
+	offset, _ := ctx.Value(downloadOffsetKey{}).(int64)
+	return offset
+}

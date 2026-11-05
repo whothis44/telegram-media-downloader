@@ -17,8 +17,9 @@ import (
 
 // Updating without throwing work away.
 //
-// A download in progress starts over after a restart, so the update does not
-// restart at once. It drains: no new file starts (self-destructing media still
+// A restart costs a download in progress its bytes since its last checkpoint (a small
+// file, all of them: download/resume.go), so the update does not restart at once. It
+// drains: no new file starts (self-destructing media still
 // does: it may vanish while waiting), files that have only been waiting for a
 // slot go back to the queue, and those already moving bytes finish. Then the
 // server exits and the launcher updates it and starts it again.
@@ -266,5 +267,9 @@ func (a *App) ixUpdateDiag(ctx context.Context) string {
 	if info.CheckErr != "" {
 		latest += " (last check failed)"
 	}
-	return fmt.Sprintf("update: running %s · latest release %s · waiting for downloads to finish %v (%d files, %d MB left) · launcher restarts the app %v", info.Current, latest, info.Draining, info.Files, info.BytesLeft>>20, info.Restarts)
+	kept, keptBytes := 0, int64(0)
+	if a.library != nil {
+		kept, keptBytes = a.library.PartsKept(ctx)
+	}
+	return fmt.Sprintf("update: running %s · latest release %s · waiting for downloads to finish %v (%d files, %d MB left) · launcher restarts the app %v · partial downloads kept for resuming %d (%d MB)", info.Current, latest, info.Draining, info.Files, info.BytesLeft>>20, info.Restarts, kept, keptBytes>>20)
 }

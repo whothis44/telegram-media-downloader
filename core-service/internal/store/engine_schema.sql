@@ -55,6 +55,17 @@ CREATE TABLE IF NOT EXISTS tgdl_work (
  UNIQUE(group_id,message_id)
 );
 CREATE INDEX IF NOT EXISTS idx_tgdl_work_pending ON tgdl_work(status,account_id,retry_at,id);
+CREATE TABLE IF NOT EXISTS tgdl_part_progress (
+ group_id TEXT NOT NULL,
+ message_id INTEGER NOT NULL,
+ identity TEXT NOT NULL,
+ path TEXT NOT NULL,
+ size INTEGER NOT NULL,
+ offset INTEGER NOT NULL,
+ sha256 TEXT NOT NULL,
+ updated_at INTEGER NOT NULL,
+ PRIMARY KEY (group_id,message_id,identity)
+);
 CREATE TABLE IF NOT EXISTS tgdl_group_rank (
  group_id TEXT PRIMARY KEY,
  rank INTEGER NOT NULL,

@@ -113,7 +113,7 @@ function updateBanner() {
     }
     return `<div class="status" role="status"><b>Waiting for ${fmtNum(u.files)} download${u.files === 1 ? '' : 's'} to finish</b> (${fmtSize(u.bytesLeft || 0)} left). No new file starts meanwhile, apart from self-destructing media.${u.restarts ? ' It restarts by itself when they are done.' : ''} <span class="btns" style="margin-top:6px">${u.restarts ? '<button class="b" data-act="u-now">Update now</button>' : ''}<button class="b" data-act="u-cancel">Go back to downloading</button></span></div>`;
   }
-  if (u.newer) return `<div class="status" role="status"><b>Version ${esc(u.latest)} is out</b> (you have ${esc(u.current)}). <span class="btns" style="margin-top:6px"><button class="b primary" data-act="u-start">Update when downloads finish</button><span class="muted">No new file starts until then. Files in progress are not lost.</span></span></div>`;
+  if (u.newer) return `<div class="status" role="status"><b>Version ${esc(u.latest)} is out</b> (you have ${esc(u.current)}). <span class="btns" style="margin-top:6px"><button class="b primary" data-act="u-start">Update when downloads finish</button><span class="muted">No new file starts until then, and files in progress finish first.</span></span></div>`;
   return '';
 }
 
@@ -833,7 +833,7 @@ $app.addEventListener('click', async (ev) => {
     case 'u-start': case 'u-cancel': case 'u-now': {
       if (act === 'u-now') {
         const u = state.status.update || {};
-        if (!confirm(`Restart now? ${fmtNum(u.files)} download(s) in progress (${fmtSize(u.bytesLeft || 0)} left) will start over.`)) break;
+        if (!confirm(`Restart now? ${fmtNum(u.files)} download(s) are in progress (${fmtSize(u.bytesLeft || 0)} left). Big files carry on from their last checkpoint, losing up to 64 MB each; files under 64 MB start over.`)) break;
       }
       const r = await api('POST', '/api/ix/update', { action: act.slice(2) });
       if (r.ok) { state.status.update = r.data; state.error = ''; } else state.error = errText(r);

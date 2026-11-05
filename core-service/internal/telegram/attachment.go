@@ -255,6 +255,37 @@ type AttachmentClient struct {
 	Media  Attachment
 }
 
+// CanResume reports whether the transport can send a file from an offset. It
+// looks through wrappers, which pass the context on.
+func (c AttachmentClient) CanResume() bool {
+	src := c.Source
+	for range 8 {
+		if src == nil {
+			return false
+		}
+		if r, ok := src.(interface{ ResumesDownloads() bool }); ok {
+			return r.ResumesDownloads()
+		}
+		w, ok := src.(TransportWrapper)
+		if !ok {
+			return false
+		}
+		src = w.UnwrapTransport()
+	}
+	return false
+}
+
+// DownloadFrom sends the file from offset on, only after CanResume said yes.
+func (c AttachmentClient) DownloadFrom(ctx context.Context, id MediaIdentity, offset int64, w io.Writer) error {
+	if c.Source == nil {
+		return errors.New("Telegram media transport unavailable")
+	}
+	if id.Key() != c.Media.Identity.Key() {
+		return errors.New("Telegram attachment identity mismatch")
+	}
+	return c.Source.DownloadMedia(WithDownloadOffset(ctx, offset), c.Media, w)
+}
+
 func (c AttachmentClient) Download(ctx context.Context, id MediaIdentity, w io.Writer) error {
 	if c.Source == nil {
 		return errors.New("Telegram media transport unavailable")
@@ -264,6 +295,10 @@ func (c AttachmentClient) Download(ctx context.Context, id MediaIdentity, w io.W
 	}
 	return c.Source.DownloadMedia(ctx, c.Media, w)
 }
+
+// ResumesDownloads: a file can be read on from an offset, except with per-chunk
+// verification (TGDL_VERIFY_CHUNKS), whose reader always starts at the beginning.
+func (c *GotdClient) ResumesDownloads() bool { return c != nil && !verifyChunks }
 
 func (c *GotdClient) DownloadMedia(ctx context.Context, a Attachment, w io.Writer) error {
 	if c == nil || c.client == nil || a.Location == nil || a.DC <= 0 {
@@ -493,6 +528,12 @@ func downloadMedia(ctx context.Context, client downloadClient, a Attachment, w i
 		return err
 	}
 	defer pool.Close()
+	if offset := downloadOffsetOf(ctx); offset > 0 {
+		if offset%downloadPartSize != 0 || offset >= a.Identity.Size {
+			return fmt.Errorf("invalid resume offset %d of %d", offset, a.Identity.Size)
+		}
+		return fetchParallelFrom(ctx, tg.NewClient(pool), a.Location, a.Identity.Size, offset, max(threads, 1), w)
+	}
 	if !verify && threads > 1 && a.Identity.Size > downloadPartSize {
 		return fetchParallel(ctx, tg.NewClient(pool), a.Location, a.Identity.Size, threads, w)
 	}

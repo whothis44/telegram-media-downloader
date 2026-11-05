@@ -5,8 +5,12 @@ package download
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"os"
 	"path/filepath"
@@ -21,9 +25,47 @@ type Client interface {
 	Download(context.Context, telegram.MediaIdentity, io.Writer) error
 }
 
+// ResumeClient can send a file from an offset. CanResume may say no: a client
+// that cannot do it must start from the beginning, never append.
+type ResumeClient interface {
+	Client
+	CanResume() bool
+	DownloadFrom(context.Context, telegram.MediaIdentity, int64, io.Writer) error
+}
+
+// Files at least this big keep their progress, every this many bytes.
+var (
+	resumeMinSize       int64 = 64 << 20
+	partCheckpointEvery int64 = 64 << 20
+)
+
+// partAfterPublish is for tests: between publishing a file and clearing its record.
+var partAfterPublish func()
+
+var errPartTooLong = errors.New("Telegram media exceeds declared size")
+
+// partResume is what a transfer needs to carry on across restarts. Parts arrive
+// in order, so progress is one offset and the SHA-256 of everything before it.
+//
+// The order is what makes it safe: the bytes are synced before the offset is
+// recorded, so a record never claims more than is on disk. Coming back, the bytes
+// are read and compared with the recorded hash before anything is reused, and on
+// any difference the file starts from the beginning. Nothing is trusted that was
+// not checked, because the file's hash is what the library believes afterwards.
+type partResume struct {
+	offset int64  // from an earlier attempt (0: none)
+	sum    string // of the bytes before offset
+	save   func(context.Context, int64, string) error
+	clear  func(context.Context)
+	digest hash.Hash // the caller's hash of the whole file, restored past the bytes kept
+	// beforeSave is called between syncing the bytes and recording them (tests).
+	beforeSave func()
+}
+
 type Manager struct {
 	Client Client
 	Index  *telegram.DedupIndex
+	resume *partResume
 	// prepared records durable recovery metadata after sync, before publication.
 	prepared func() error
 }
@@ -136,24 +178,127 @@ func (m *Manager) DownloadInRoot(ctx context.Context, identity telegram.MediaIde
 	return relative, nil
 }
 
+// reopenPart checks a part kept by an earlier attempt and readies it to carry on.
+// A nil file means there is nothing usable: the transfer starts from the beginning.
+// An error means it could not tell (the attempt was cancelled, say): the part stays.
+func (m *Manager) reopenPart(ctx context.Context, root *os.Root, tmpName string, identity telegram.MediaIdentity, running hash.Hash) (*os.File, int64, error) {
+	r := m.resume
+	if r.offset <= 0 || r.offset >= identity.Size {
+		return nil, 0, nil
+	}
+	tmp, err := root.OpenFile(tmpName, os.O_RDWR, 0600)
+	if err != nil {
+		return nil, 0, nil // gone
+	}
+	info, err := tmp.Stat()
+	if err != nil || info.Size() < r.offset {
+		tmp.Close()
+		return nil, 0, nil // shorter than recorded: a sync that did not hold
+	}
+	if _, err := io.CopyN(running, &contextReader{ctx: ctx, r: tmp}, r.offset); err != nil {
+		tmp.Close()
+		if ctx.Err() != nil {
+			return nil, 0, ctx.Err()
+		}
+		return nil, 0, nil
+	}
+	if hex.EncodeToString(running.Sum(nil)) != r.sum {
+		tmp.Close()
+		return nil, 0, nil
+	}
+	// The whole file's hash goes on from here, without reading the bytes again.
+	state, stateErr := running.(encoding.BinaryMarshaler).MarshalBinary()
+	if stateErr == nil {
+		stateErr = r.digest.(encoding.BinaryUnmarshaler).UnmarshalBinary(state)
+	}
+	if stateErr != nil || tmp.Truncate(r.offset) != nil {
+		tmp.Close()
+		return nil, 0, nil
+	}
+	if _, err := tmp.Seek(r.offset, io.SeekStart); err != nil {
+		tmp.Close()
+		return nil, 0, nil
+	}
+	return tmp, r.offset, nil
+}
+
 func (m *Manager) transfer(ctx context.Context, identity telegram.MediaIdentity, root *os.Root, finalName string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	tmpName := partName(finalName)
-	tmp, err := root.OpenFile(tmpName, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if err != nil {
-		return fmt.Errorf("create partial file: %w", err)
+	var tmp *os.File
+	var start int64
+	var running hash.Hash
+	if m.resume != nil {
+		running = sha256.New()
+		var err error
+		if tmp, start, err = m.reopenPart(ctx, root, tmpName, identity, running); err != nil {
+			return err
+		}
+		if tmp == nil && m.resume.offset > 0 {
+			// Not usable: as if it had never been.
+			m.resume.clear(context.WithoutCancel(ctx))
+			_ = root.Remove(tmpName)
+			running.Reset()
+		}
 	}
-	defer func() { tmp.Close(); root.Remove(tmpName) }()
-	writer := &mediaWriter{ctx: ctx, dst: tmp, remaining: identity.Size}
-	if err := m.Client.Download(ctx, identity, writer); err != nil {
-		return fmt.Errorf("download Telegram media: %w", err)
+	if tmp == nil {
+		var err error
+		tmp, err = root.OpenFile(tmpName, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if err != nil {
+			return fmt.Errorf("create partial file: %w", err)
+		}
+	}
+	// With a checkpoint recorded the part stays for the next attempt, whatever
+	// stopped this one. Without one it has nothing worth keeping.
+	keep := start > 0
+	defer func() {
+		tmp.Close()
+		if !keep {
+			root.Remove(tmpName)
+		}
+	}()
+	writer := &mediaWriter{ctx: ctx, dst: tmp, remaining: identity.Size - start, sum: running, written: start, saved: start}
+	if running != nil {
+		writer.checkpoint = func(offset int64) error {
+			if err := tmp.Sync(); err != nil {
+				return fmt.Errorf("sync partial file: %w", err)
+			}
+			if m.resume.beforeSave != nil {
+				m.resume.beforeSave()
+			}
+			// A record that cannot be written only costs the progress since the
+			// last one: not a reason to fail a good download.
+			if err := m.resume.save(ctx, offset, hex.EncodeToString(running.Sum(nil))); err == nil {
+				keep = true
+			}
+			return nil
+		}
+	}
+	var downloadErr error
+	if start > 0 {
+		downloadErr = m.Client.(ResumeClient).DownloadFrom(ctx, identity, start, writer)
+	} else {
+		downloadErr = m.Client.Download(ctx, identity, writer)
+	}
+	discard := func() {
+		keep = false
+		if m.resume != nil {
+			m.resume.clear(context.WithoutCancel(ctx))
+		}
+	}
+	if downloadErr != nil {
+		if errors.Is(downloadErr, errPartTooLong) {
+			discard()
+		}
+		return fmt.Errorf("download Telegram media: %w", downloadErr)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if writer.remaining != 0 {
+		discard()
 		return fmt.Errorf("Telegram media size mismatch: expected %d, received %d", identity.Size, identity.Size-writer.remaining)
 	}
 	if err := tmp.Sync(); err != nil {
@@ -179,9 +324,17 @@ func (m *Manager) transfer(ctx context.Context, identity telegram.MediaIdentity,
 	defer dir.Close()
 	if err := publishExclusiveAt(dir, tmpName, finalName); err != nil {
 		if errors.Is(err, os.ErrExist) {
+			discard()
 			return fmt.Errorf("final file already exists: %w", ErrDuplicate)
 		}
 		return fmt.Errorf("publish media file: %w", err)
+	}
+	keep = false
+	if m.resume != nil {
+		if partAfterPublish != nil {
+			partAfterPublish()
+		}
+		m.resume.clear(context.WithoutCancel(ctx))
 	}
 	return nil
 }
@@ -190,6 +343,11 @@ type mediaWriter struct {
 	ctx       context.Context
 	dst       io.Writer
 	remaining int64
+	// With sum set, progress is recorded on part boundaries, where Telegram can
+	// be asked to carry on.
+	sum            hash.Hash
+	written, saved int64
+	checkpoint     func(int64) error
 }
 
 func (w *mediaWriter) Write(p []byte) (int, error) {
@@ -197,10 +355,20 @@ func (w *mediaWriter) Write(p []byte) (int, error) {
 		return 0, err
 	}
 	if int64(len(p)) > w.remaining {
-		return 0, errors.New("Telegram media exceeds declared size")
+		return 0, errPartTooLong
 	}
 	n, err := w.dst.Write(p)
 	w.remaining -= int64(n)
+	if w.sum != nil {
+		w.sum.Write(p[:n])
+		w.written += int64(n)
+		if err == nil && w.remaining > 0 && w.written%telegram.PartSize == 0 && w.written-w.saved >= partCheckpointEvery {
+			w.saved = w.written
+			if err := w.checkpoint(w.written); err != nil {
+				return n, err
+			}
+		}
+	}
 	return n, err
 }
 

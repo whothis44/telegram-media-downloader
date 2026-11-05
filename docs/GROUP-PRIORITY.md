@@ -57,8 +57,7 @@ These numbers are engineering choices, not measured optima. Compare the `big vid
 
 ## Limits
 
-- **Running transfers keep the place they were claimed with.** They are not stopped when ranks change, because there is no resume across attempts and stopping would discard their bytes. A very large low-ranked file already downloading holds its file slot until it finishes, though its parts wait behind higher-ranked ones.
-- **No durable resume.** A restart still loses a partial file.
+- **Running transfers keep the place they were claimed with.** They are not stopped when ranks change. A very large low-ranked file already downloading holds its file slot until it finishes, though its parts wait behind higher-ranked ones.
 - **One group per lane.** Only one group queues files at a time, so under Spread a rotation happens every 10 minutes at most, when the places change.
 - **The overlap between groups is not predicted.** Demand comes from messages actually read, so unread groups contribute none. There is no prior estimate from a family of similar groups, and no rule that weighs a check against a download by expected value beyond the bounded turns and candidate order above.
 - **Value is rank only.** All of a group's files are equal within a rank apart from the size tie-break; a lower-quality copy is not credited as provisional coverage.

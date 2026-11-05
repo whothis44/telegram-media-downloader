@@ -14,7 +14,8 @@ import (
 // Recover must run once before accepting new transfers. A synced, published
 // file is verified and cataloged without network I/O. Incomplete transfers
 // remain the responsibility of the persistent work queue; their partial files
-// are removed so the next attempt starts from a known state.
+// are removed so the next attempt starts from a known state, except those with
+// progress recorded (resume.go), which the next attempt checks before reusing.
 func (l *Library) Recover(ctx context.Context) error {
 	rows, err := l.reader.QueryContext(ctx, `SELECT path,item,sha256,generation FROM tgdl_ingest_files`)
 	if err != nil {
@@ -66,8 +67,12 @@ func (l *Library) Recover(ctx context.Context) error {
 					return err
 				}
 			}
-			if err = root.Remove(filepath.Join(filepath.Dir(p.path), partName(filepath.Base(p.path)))); err != nil && !os.IsNotExist(err) {
-				return err
+			if kept, keptErr := l.partKept(ctx, p.path); keptErr != nil {
+				return keptErr
+			} else if !kept {
+				if err = root.Remove(filepath.Join(filepath.Dir(p.path), partName(filepath.Base(p.path)))); err != nil && !os.IsNotExist(err) {
+					return err
+				}
 			}
 			if _, err = l.writer.ExecContext(ctx, `DELETE FROM tgdl_ingest_files WHERE path=?`, p.path); err != nil {
 				return err
@@ -119,12 +124,19 @@ func (l *Library) Recover(ctx context.Context) error {
 			}
 		}
 		part := filepath.Join(filepath.Dir(p.path), partName(filepath.Base(p.path)))
-		if err = root.Remove(part); err != nil && !os.IsNotExist(err) {
-			return err
+		if kept, keptErr := l.partKept(ctx, p.path); keptErr != nil {
+			return keptErr
+		} else if !kept {
+			if err = root.Remove(part); err != nil && !os.IsNotExist(err) {
+				return err
+			}
 		}
 		if _, err = l.writer.ExecContext(ctx, `DELETE FROM tgdl_ingest_files WHERE path=?`, p.path); err != nil {
 			return err
 		}
+	}
+	if err = l.partSweep(ctx, root); err != nil {
+		return err
 	}
 	if err = l.recoverStaging(ctx); err != nil {
 		return err

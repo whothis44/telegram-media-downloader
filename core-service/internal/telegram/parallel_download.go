@@ -84,6 +84,11 @@ type partFetcher interface {
 // wrong size cannot truncate or pad the output. At most threads parts are
 // held in memory.
 func fetchParallel(ctx context.Context, api partFetcher, loc tg.InputFileLocationClass, size int64, threads int, w io.Writer) error {
+	return fetchParallelFrom(ctx, api, loc, size, 0, threads, w)
+}
+
+// fetchParallelFrom is fetchParallel from start on, a multiple of the part size.
+func fetchParallelFrom(ctx context.Context, api partFetcher, loc tg.InputFileLocationClass, size, start int64, threads int, w io.Writer) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	type result struct {
@@ -93,7 +98,7 @@ func fetchParallel(ctx context.Context, api partFetcher, loc tg.InputFileLocatio
 	}
 	parts := int((size + downloadPartSize - 1) / downloadPartSize)
 	results := make(chan result, threads)
-	next, inflight := 0, 0
+	next, inflight := int(start/downloadPartSize), 0
 	launch := func() {
 		index := next
 		next++
@@ -104,7 +109,7 @@ func fetchParallel(ctx context.Context, api partFetcher, loc tg.InputFileLocatio
 		}()
 	}
 	pending := map[int][]byte{}
-	written, last := 0, downloadPartSize
+	written, last := next, downloadPartSize
 	var failure error
 	for {
 		for failure == nil && next < parts && next-written < threads {

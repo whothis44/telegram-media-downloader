@@ -308,7 +308,18 @@ func (l *Library) Ingest(ctx context.Context, item Item, client Client) (Record,
 		record, err := l.ingestStaged(ctx, item, client, st)
 		return tagged(record, DedupAfterDownload), err
 	}
-	relative, err := l.destination(item)
+	// A part kept by an earlier attempt goes on under its own name.
+	resuming := canResume(client, item.Identity.Size)
+	var progress partRow
+	if resuming {
+		progress = l.partLoad(ctx, item)
+	}
+	relative := filepath.FromSlash(progress.path)
+	if progress.path == "" {
+		relative, err = l.destination(item)
+	} else {
+		err = l.ensureDir(filepath.Dir(relative))
+	}
 	if err != nil {
 		return Record{}, err
 	}
@@ -323,6 +334,9 @@ func (l *Library) Ingest(ctx context.Context, item Item, client Client) (Record,
 	// The per-transfer handoff owns exactly one identity; the durable library
 	// owns all cross-message coalescing and does not retain this temporary map.
 	m := NewManager(hashClient{client, digest}, telegram.NewDedupIndex())
+	if resuming {
+		m.resume = l.partResumeFor(item, filepath.ToSlash(relative), progress, digest)
+	}
 	m.prepared = func() error {
 		_, err := l.writer.ExecContext(ctx, `UPDATE tgdl_ingest_files SET sha256=? WHERE path=?`, hex.EncodeToString(digest.Sum(nil)), filepath.ToSlash(relative))
 		return err
@@ -398,6 +412,14 @@ type hashClient struct {
 
 func (c hashClient) Download(ctx context.Context, id telegram.MediaIdentity, w io.Writer) error {
 	return c.Client.Download(ctx, id, io.MultiWriter(w, c.digest))
+}
+
+// CanResume and DownloadFrom pass on to the client, which the library has already
+// asked (canResume).
+func (c hashClient) CanResume() bool { return canResume(c.Client, resumeMinSize) }
+
+func (c hashClient) DownloadFrom(ctx context.Context, id telegram.MediaIdentity, offset int64, w io.Writer) error {
+	return c.Client.(ResumeClient).DownloadFrom(ctx, id, offset, io.MultiWriter(w, c.digest))
 }
 
 func safeComponent(value string) string {
