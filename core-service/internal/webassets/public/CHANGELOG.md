@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.18-ix.12] — 2026-11-05
+
+### Added
+- **Big downloads survive restarts and crashes.** Files of 64 MiB or more keep their progress: they lose at most about 64 MiB when the app stops, and carry on from there. The kept bytes are checked against a recorded hash before they are reused, and on any difference the file starts over. See `docs/UPDATE-AND-RESUME.md`, including its limits.
+- **Update when downloads finish.** The Archive page says when a newer release is out and can wait for the downloads in progress before restarting. For the restart to happen by itself the launcher must say that it loops (`TGDL_LAUNCHER_RESTARTS=1`, see `start.example.bat`); otherwise it tells you when it is safe to close the window.
+
+### Changed
+- No live speed improvement is claimed: neither has been run against a live account.
+
+### Service worker
+- `VERSION = 'v34182'`
+
 ## [3.4.18-ix.11.1] — 2026-11-04
 
 ### Added
