@@ -210,9 +210,13 @@ func ixCoverage(m *ixModel, saved map[string]bool, substHow map[string]string) m
 // ixNeededAhead fills NeededAhead for groups in the order they go: a needed
 // file an earlier group needs too is not extra work for the later one.
 func ixNeededAhead(m *ixModel, groups []ixGroupCoverage, saved map[string]bool) {
-	if m == nil {
-		return
+	if m != nil {
+		ixApplyNeededAhead(ixNeedsByGroup(m, saved), groups)
 	}
+}
+
+// ixNeedsByGroup is each group's needed files, by cluster.
+func ixNeedsByGroup(m *ixModel, saved map[string]bool) map[string]map[int32]int64 {
 	needs := map[string]map[int32]int64{}
 	for i := range m.Items {
 		it := &m.Items[i]
@@ -232,6 +236,10 @@ func ixNeededAhead(m *ixModel, groups []ixGroupCoverage, saved map[string]bool) 
 		}
 		g[it.Cluster] = max(g[it.Cluster], it.Size)
 	}
+	return needs
+}
+
+func ixApplyNeededAhead(needs map[string]map[int32]int64, groups []ixGroupCoverage) {
 	ahead := map[int32]bool{}
 	for i := range groups {
 		for cl, size := range needs[groups[i].GroupID] {
@@ -243,12 +251,35 @@ func ixNeededAhead(m *ixModel, groups []ixGroupCoverage, saved map[string]bool) 
 	}
 }
 
-// ixPrioritiesNow is the report (kept for ixStatusCacheTTL, cleared by a change
-// of the ranks).
-func (a *App) ixPrioritiesNow(ctx context.Context) ixPrioritiesInfo {
-	return a.ixCaches().priorities.get(ixStatusCacheTTL, func() (ixPrioritiesInfo, bool) {
-		return a.ixPrioritiesMeasure(ctx), ctx.Err() == nil
+// ixCoverBase is the slow part of the report: counts over every file the archive
+// knows, which do not depend on the ranks. It is kept for ixStatusCacheTTL, so
+// that a change of the ranks answers at once and shows at once.
+type ixCoverBase struct {
+	cov      map[string]ixGroupCoverage
+	known    bool
+	needs    map[string]map[int32]int64
+	distinct ixPrioritiesInfo // its Distinct
+	estimate ixDeadlineInfo
+}
+
+func (a *App) ixCoverBaseNow(ctx context.Context) ixCoverBase {
+	return a.ixCaches().coverBase.get(ixStatusCacheTTL, func() (ixCoverBase, bool) {
+		var b ixCoverBase
+		b.cov, b.known = a.ixCoverageByGroup(ctx)
+		b.estimate = a.ixDeadlineEstimate(ctx, false)
+		if m := a.ixModelLast(); m != nil {
+			if saved, err := a.ixSavedIdentities(ctx); err == nil {
+				b.needs = ixNeedsByGroup(m, saved)
+				ixDistinctTotals(m, saved, &b.distinct)
+			}
+		}
+		return b, ctx.Err() == nil
 	})
+}
+
+// ixPrioritiesNow is the report.
+func (a *App) ixPrioritiesNow(ctx context.Context) ixPrioritiesInfo {
+	return a.ixPrioritiesMeasure(ctx)
 }
 
 func (a *App) ixPrioritiesMeasure(ctx context.Context) ixPrioritiesInfo {
@@ -267,9 +298,9 @@ func (a *App) ixPrioritiesMeasure(ctx context.Context) ixPrioritiesInfo {
 	for i, g := range places {
 		place[g.GroupID] = i + 1
 	}
-	cov, known := a.ixCoverageByGroup(ctx)
-	info.Known = known
-	saved, _ := a.ixSavedIdentities(ctx)
+	base := a.ixCoverBaseNow(ctx)
+	cov := base.cov
+	info.Known = base.known
 	left := a.ixQueueLeft(ctx)
 	q, _ := a.ixLoadQueue(ctx)
 	scanned := map[string]bool{}
@@ -316,10 +347,8 @@ func (a *App) ixPrioritiesMeasure(ctx context.Context) ixPrioritiesInfo {
 		info.Groups = append(info.Groups, c)
 	}
 	ixSortCoverage(info.Groups)
-	if m := a.ixModelLast(); m != nil {
-		ixNeededAhead(m, info.Groups, saved)
-		ixDistinctTotals(m, saved, &info)
-	}
+	ixApplyNeededAhead(base.needs, info.Groups)
+	info.Distinct = base.distinct.Distinct
 	focus := ""
 	for i := range info.Groups {
 		c := &info.Groups[i]
@@ -330,7 +359,7 @@ func (a *App) ixPrioritiesMeasure(ctx context.Context) ixPrioritiesInfo {
 		}
 		info.GroupRefs += c.Saved.Files + c.Shared.Files
 	}
-	d := a.ixDeadlineEstimate(ctx, false)
+	d := base.estimate
 	info.Rate, info.RateDay, info.Rate3h, info.Until = d.Rate, d.Rate24h, d.Rate3h, d.Until
 	return info
 }
@@ -455,30 +484,37 @@ func (a *App) handleIxPrioritiesSet(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		a.ixAfterRankChange(ctx)
+		a.ixRankChanged()
 	}
 	if body.Order != nil {
 		if len(*body.Order) > ixRankMax {
 			writeJSONError(w, http.StatusBadRequest, "too many ranked groups")
 			return
 		}
-		if err := a.ixSetRanks(ctx, *body.Order, body.Names); err != nil {
+		if err := a.ixSaveRanks(ctx, *body.Order, body.Names); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		// The queue's stars follow the ranked list.
+		// The queue's stars follow the ranked list. A rescan step can hold the
+		// queue for a while: nobody waits for that.
 		on := map[string]bool{}
 		for _, id := range *body.Order {
 			on[strings.TrimSpace(id)] = true
 		}
-		_, _ = a.ixQueueEdit(ctx, func(st *ixQueueState) error {
-			for i := range st.Items {
-				st.Items[i].Priority = on[st.Items[i].GroupID]
-			}
-			return nil
-		})
+		a.ambientWG.Add(1)
+		go func() {
+			defer a.ambientWG.Done()
+			_, _ = a.ixQueueEdit(a.ctx, func(st *ixQueueState) error {
+				for i := range st.Items {
+					st.Items[i].Priority = on[st.Items[i].GroupID]
+				}
+				return nil
+			})
+		}()
+		a.ixRankChanged()
 	}
-	writeJSON(w, http.StatusOK, a.ixPrioritiesNow(ctx))
+	// The page has already moved the rows; it reads the figures separately.
+	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
 
 // ixPrioritiesDiag is the report's lines, with groups as placeholders.

@@ -72,12 +72,6 @@ type ixCached[T any] struct {
 	set bool
 }
 
-func (c *ixCached[T]) clear() {
-	c.mu.Lock()
-	c.set = false
-	c.mu.Unlock()
-}
-
 func (c *ixCached[T]) get(ttl time.Duration, load func() (T, bool)) T {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -92,10 +86,10 @@ func (c *ixCached[T]) get(ttl time.Duration, load func() (T, bool)) T {
 }
 
 type ixCacheBox struct {
-	queueLeft  ixCached[map[string]ixGroupLeft]
-	bigFiles   ixCached[ixBigFiles]
-	apart      ixCached[[2]int]
-	priorities ixCached[ixPrioritiesInfo]
+	queueLeft ixCached[map[string]ixGroupLeft]
+	bigFiles  ixCached[ixBigFiles]
+	apart     ixCached[[2]int]
+	coverBase ixCached[ixCoverBase]
 }
 
 var ixCacheState sync.Map // *App -> *ixCacheBox

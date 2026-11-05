@@ -1,10 +1,10 @@
-# Group priorities and shared content (ix.11)
+# Group priorities and shared content (ix.11.1)
 
 The account can be lost at any time and its download volume is limited, so not everything will arrive. This is how the archive decides what goes first. It does not change what Telegram allows, and it makes no claim about speed: ranking changes *which* bytes arrive, not how many.
 
 ## What a person controls
 
-**Archive → Priorities** holds a ranked list of groups: drag a row or use the arrows. The list is stored apart from the rescan queue (`tgdl_group_rank`), so it survives restarts, finished rescans and "Remove finished". The Rescan tab's **★ First** puts a group on the same list; groups starred by an earlier version join it once, on the first start.
+**Archive → Priorities** holds a ranked list of groups: drag a row or use the arrows. Tick several groups to put them first, last or at a rank together. A change shows at once and is saved in about a millisecond; rows already queued follow in the background within a few seconds, so the very next download may still come from the old order. The list is stored apart from the rescan queue (`tgdl_group_rank`), so it survives restarts, finished rescans and "Remove finished". The Rescan tab's **★ First** puts a group on the same list; groups starred by an earlier version join it once, on the first start.
 
 Two policies:
 

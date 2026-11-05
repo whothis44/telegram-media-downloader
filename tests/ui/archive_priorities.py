@@ -2,8 +2,10 @@
 
 The Archive page's Priorities tab: ranked groups in their order, moving and
 removing one sends the whole list, a policy change reaches the server, and
-probable copies are shown apart from what is saved. Runs the real ix.html with
-the API answered from invented data.
+probable copies are shown apart from what is saved. Rows move before the server
+answers, changes made meanwhile go in one more request, a refused change goes
+back, and several groups move together. Runs the real ix.html with the API
+answered from invented data.
 """
 import json
 import os
@@ -44,6 +46,8 @@ state = {
 status = {'version': 'test', 'groups': [], 'queue': {'items': []}, 'queueLeft': {}, 'dlState': {}, 'settings': {}, 'account': {},
           'export': {}, 'freeze': {}, 'held': {}, 'dedup': {}, 'copies': {}, 'downloads': {}, 'dups': {}, 'readonly': {}}
 posts = []
+held = []
+control = {'hold': False, 'refuse': False}
 
 
 def apply(body):
@@ -64,7 +68,14 @@ def handle(route, request):
         return route.fulfill(status=200, content_type='text/html', body=html)
     if url.startswith('/api/ix/priorities'):
         if request.method == 'POST':
+            if control['refuse']:
+                return route.fulfill(status=500, content_type='application/json', body='{"error":"invented failure"}')
+            if control['hold']:
+                held.append(route)
+                posts.append(json.loads(request.post_data))
+                return None
             apply(json.loads(request.post_data))
+            return route.fulfill(status=200, content_type='application/json', body='{"success":true}')
         return route.fulfill(status=200, content_type='application/json', body=json.dumps(state))
     if url.startswith('/api/ix/status'):
         return route.fulfill(status=200, content_type='application/json', body=json.dumps(status))
@@ -122,7 +133,73 @@ with sync_playwright() as p:
     page.wait_for_function('document.querySelector("[data-prio-policy=spread]").checked')
     assert any(b.get('policy') == 'spread' for b in posts), posts
 
+    page.check('[data-prio-policy="order"]')
+    page.wait_for_function('document.querySelector("[data-prio-policy=order]").checked')
+
+    # Rows move before the server has answered.
+    page.click('[data-act="pr-add"][data-id="a"]')
+    page.wait_for_selector('[data-prio-row="a"]')
+    page.wait_for_timeout(200)
+    control['hold'] = True
+    sent = len(posts)
+    page.click('[data-prio-row="a"] [data-act="pr-top"]')
+    assert ranked()[0] == 'a', ranked()  # at once: nothing has been answered
+    assert page.locator('text=Saving…').count() == 1
+    assert len(held) <= 1 and len(posts) == sent + 1, posts
+    # Changes made meanwhile wait, and go as one request with the latest order.
+    page.click('[data-prio-row="a"] [data-act="pr-remove"]')
+    page.click('[data-prio-row="b"] [data-act="pr-top"]')
+    page.click('[data-prio-row="c"] [data-act="pr-remove"]')
+    assert ranked() == ['b', 'z'], ranked()
+    assert len(posts) == sent + 1, 'a request per click while one is under way'
+    control['hold'] = False
+    first = held.pop()
+    apply(posts.pop())  # records it again
+    first.fulfill(status=200, content_type='application/json', body='{"success":true}')
+    page.wait_for_function('!document.body.innerText.includes("Saving")')
+    assert posts[-1]['order'] == ['b', 'z'], posts[-1]
+    assert len(posts) == sent + 2, posts[sent:]
+
+    # A figures answer from before an edit does not undo it (the next read has it).
+    page.wait_for_timeout(1700)
+    assert ranked() == ['b', 'z'], ranked()
+
+    # Several together: tick, put first, at a rank, take off.
+    page.check('[data-prio-sel="a"]')
+    page.check('[data-prio-sel="c"]')
+    assert page.locator('text=2 ticked').count() == 1
+    page.click('[data-act="pr-batch"][data-key="first"]')
+    page.wait_for_function('document.querySelector("[data-prio-row]").getAttribute("data-prio-row") === "a"')
+    assert ranked() == ['a', 'c', 'b', 'z'], ranked()
+    assert page.locator('[data-prio-sel]:checked').count() == 0
+    page.check('[data-prio-sel="a"]')
+    page.check('[data-prio-sel="c"]')
+    page.fill('[data-in="prioTo"]', '2')
+    page.click('[data-act="pr-batch"][data-key="to"]')
+    page.wait_for_function('document.querySelectorAll("[data-prio-row]")[0].getAttribute("data-prio-row") === "b"')
+    assert ranked() == ['b', 'a', 'c', 'z'], ranked()
+    page.check('[data-prio-sel="a"]')
+    page.check('[data-prio-sel="z"]')
+    page.click('[data-act="pr-batch"][data-key="remove"]')
+    page.wait_for_function('document.querySelectorAll("[data-prio-row]").length === 2')
+    assert ranked() == ['b', 'c'], ranked()
+    # Tick all shown, by a search.
+    page.fill('[data-in="prioSearch"]', 'One')
+    page.click('[data-act="pr-tick-all"]')
+    assert page.locator('[data-prio-sel]:checked').count() == 1
+    page.click('[data-act="pr-untick"]')
+    page.fill('[data-in="prioSearch"]', '')
+
+    # A refused change goes back, and says so.
+    control['refuse'] = True
+    page.click('[data-prio-row="c"] [data-act="pr-top"]')
+    page.wait_for_selector('text=Could not save the ranking')
+    assert ranked() == ['b', 'c'], ranked()
+    control['refuse'] = False
+    page.wait_for_timeout(1700)
+
     if os.environ.get('UI_SHOTS'):
+        page.check('[data-prio-sel="c"]')
         page.screenshot(path=os.path.join(os.environ['UI_SHOTS'], 'priorities.png'), full_page=True)
 
     # A phone: the page itself never scrolls sideways.

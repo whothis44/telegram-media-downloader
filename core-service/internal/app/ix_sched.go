@@ -57,6 +57,7 @@ const (
 	ixGroupPolicySpread = "spread"
 
 	ixSchedEvery   = time.Minute
+	ixSchedSettle  = time.Second      // several changes in a row make one step
 	ixSpreadEvery  = 10 * time.Minute // how often spread may change who goes first
 	ixRankMax      = 16000            // keeps every order below engine.UnrankedOrder
 	ixSchedBatch   = 500              // rows rewritten in one transaction
@@ -79,8 +80,10 @@ type ixRankedGroup struct {
 type ixSchedBox struct {
 	mu       sync.Mutex
 	spreadAt time.Time
-	wake     chan struct{}
-	shared   atomic.Int64 // rows that take no transfer of their own (ixSharedWaiting)
+	// Set by a change of the ranks, so that it never waits for a running step.
+	spreadReset atomic.Bool
+	wake        chan struct{}
+	shared      atomic.Int64 // rows that take no transfer of their own (ixSharedWaiting)
 
 	creditMu    sync.Mutex
 	creditGroup string
@@ -115,6 +118,15 @@ func (a *App) ixRunSched(ctx context.Context) {
 			return
 		case <-time.After(ixSchedEvery):
 		case <-box.wake:
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(ixSchedSettle):
+			}
+			select {
+			case <-box.wake:
+			default:
+			}
 		}
 	}
 }
@@ -151,9 +163,21 @@ func (a *App) ixRankBases(ctx context.Context) map[string]int {
 	return out
 }
 
-// ixSetRanks makes ids the whole ranked list, in that order. names may hold
-// the groups' names; a group already ranked keeps the one it has otherwise.
+// ixSetRanks is ixSaveRanks, with the rows brought up to date before it returns.
 func (a *App) ixSetRanks(ctx context.Context, ids []string, names map[string]string) error {
+	if err := a.ixSaveRanks(ctx, ids, names); err != nil {
+		return err
+	}
+	a.ixAfterRankChange(ctx)
+	return nil
+}
+
+// ixSaveRanks makes ids the whole ranked list, in that order. names may hold
+// the groups' names; a group already ranked keeps the one it has otherwise. It
+// is quick: a person is waiting for it. New rows of the group take their place
+// from this table at once, and the rows already queued follow in the background
+// (ixRankChanged).
+func (a *App) ixSaveRanks(ctx context.Context, ids []string, names map[string]string) error {
 	if len(ids) > ixRankMax {
 		return errors.New("too many ranked groups")
 	}
@@ -191,11 +215,7 @@ func (a *App) ixSetRanks(ctx context.Context, ids []string, names map[string]str
 		}
 		position++
 	}
-	if err = tx.Commit(); err != nil {
-		return err
-	}
-	a.ixAfterRankChange(ctx)
-	return nil
+	return tx.Commit()
 }
 
 // ixRankSet puts a group on the ranked list (after the others) or takes it off.
@@ -221,17 +241,24 @@ func (a *App) ixRankSet(ctx context.Context, id, name string, on bool) error {
 	if on == found {
 		return nil
 	}
-	return a.ixSetRanks(ctx, ids, map[string]string{id: name})
+	if err := a.ixSaveRanks(ctx, ids, map[string]string{id: name}); err != nil {
+		return err
+	}
+	a.ixRankChanged()
+	return nil
 }
 
-// ixAfterRankChange makes a change felt now: the rows at once (a person is
-// watching), and the rescan lanes on their next step.
+// ixRankChanged has a change of the ranks reach the queued rows and the rescan
+// lanes, without anyone waiting for it: at a large queue that takes seconds.
+func (a *App) ixRankChanged() {
+	a.ixSched().spreadReset.Store(true)
+	a.ixSchedWake()
+	a.ixWake()
+}
+
+// ixAfterRankChange is ixRankChanged done before it returns.
 func (a *App) ixAfterRankChange(ctx context.Context) {
-	box := a.ixSched()
-	box.mu.Lock()
-	box.spreadAt = time.Time{}
-	box.mu.Unlock()
-	a.ixCaches().priorities.clear()
+	a.ixSched().spreadReset.Store(true)
 	if err := a.ixSchedStep(ctx); err != nil && ctx.Err() == nil {
 		a.ixLog("group priorities: %v", err)
 	}
@@ -445,9 +472,6 @@ func (a *App) ixSchedStep(ctx context.Context) error {
 			return err
 		}
 	}
-	if len(changes) > 0 {
-		a.ixCaches().priorities.clear()
-	}
 	return nil
 }
 
@@ -629,6 +653,9 @@ func (a *App) ixAdmissionCredit(ctx context.Context, groupID string) int {
 // last. It changes at most every ixSpreadEvery: each change rewrites rows and
 // may make a rescan change groups. Under order, places follow the ranks.
 func (a *App) ixSpreadUpdate(ctx context.Context, box *ixSchedBox) error {
+	if box.spreadReset.Swap(false) {
+		box.spreadAt = time.Time{}
+	}
 	ranks, err := a.ixRanks(ctx)
 	if err != nil || len(ranks) == 0 {
 		return err

@@ -51,7 +51,9 @@ func (a reviewAPI) UpdatesGetChannelDifference(ctx context.Context, r *tg.Update
 func TestChannelDifferenceFailureKeepsCursorBeforeAsynchronousDispatch(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	db, err := store.Open(ctx, t.TempDir())
+	// Opening the database is not what is timed: on a loaded machine it can take
+	// longer than the limit.
+	db, err := store.Open(context.Background(), t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -83,6 +83,8 @@ const state = {
   pick: new Set(), pickOnly: false, pickSearch: '', ensureFilters: true, dialogs: null, dialogsLoading: false, showAll: false,
   // search
   q: '', qCategory: '', hits: null, searching: false, qMore: false, qMode: '',
+  // priorities
+  prio: null, prioSel: new Set(), prioSeq: 0, prioBusy: false, prioNext: null, prioTo: '', prioSearch: '',
 };
 
 async function load() {
@@ -386,18 +388,83 @@ function viewRescan() {
 
 // ---------------- Priorities ----------------
 async function loadPrio() {
+  const seq = state.prioSeq;
   const r = await api('GET', '/api/ix/priorities');
+  // An edit made meanwhile is newer than this answer.
+  if (seq !== state.prioSeq || state.prioBusy) return;
   if (r.ok) { state.prio = r.data; state.prioError = ''; } else state.prioError = errText(r);
   if (state.tab === 'priorities' && !state.prioDrag) render();
 }
 function prioOrder() { return ((state.prio && state.prio.groups) || []).filter((g) => g.rank > 0).sort((a, b) => a.rank - b.rank).map((g) => g.groupId); }
-async function prioSave(order) {
-  const names = {};
-  ((state.prio && state.prio.groups) || []).forEach((g) => { if (order.includes(g.groupId)) names[g.groupId] = g.name; });
-  // Move the rows at once; the figures follow the server's answer.
-  const r = await api('POST', '/api/ix/priorities', { order, names });
-  if (r.ok) { state.prio = r.data; state.prioError = ''; } else state.prioError = errText(r);
+function prioOthersShown() {
+  const qq = (state.prioSearch || '').trim().toLowerCase();
+  return ((state.prio && state.prio.groups) || []).filter((g) => !g.place && (!qq || g.name.toLowerCase().includes(qq)));
+}
+// A change shows at once; the server is told behind it. Changes made while it is
+// being told go together in one more request, the latest order only.
+function prioSave(order) {
+  state.prioSeq++;
+  const at = new Map(order.map((id, i) => [id, i + 1]));
+  const spread = state.prio.policy === 'spread';
+  state.prio.groups.forEach((g) => {
+    const r = at.get(g.groupId) || 0;
+    if (!r) { g.rank = 0; g.place = 0; return; }
+    g.rank = r;
+    if (!spread || !g.place) g.place = r;
+  });
+  state.prioError = '';
+  state.prioNext = order;
+  prioPush();
   render();
+}
+async function prioPush() {
+  if (state.prioBusy) return;
+  state.prioBusy = true;
+  let failed = '';
+  while (state.prioNext && !failed) {
+    const order = state.prioNext;
+    state.prioNext = null;
+    const names = {};
+    state.prio.groups.forEach((g) => { if (g.rank > 0) names[g.groupId] = g.name; });
+    const r = await api('POST', '/api/ix/priorities', { order, names });
+    if (!r.ok) failed = errText(r);
+  }
+  state.prioBusy = false;
+  state.prioNext = null;
+  if (failed) {
+    // Back to what the server has.
+    state.prioSeq++;
+    await loadPrio();
+    state.prioError = 'Could not save the ranking: ' + failed;
+    if (state.tab === 'priorities') render();
+    return;
+  }
+  if (state.tab === 'priorities' && !state.prioDrag) render();
+  // The figures follow: who goes first, what waits for what.
+  clearTimeout(state.prioTimer);
+  state.prioTimer = setTimeout(loadPrio, 1500);
+}
+// Ticked groups in the order they are shown: ranked ones first, by rank.
+function prioTicked() {
+  const sel = state.prioSel;
+  const ranked = prioOrder().filter((id) => sel.has(id));
+  const others = prioOthersShown().map((g) => g.groupId).filter((id) => sel.has(id));
+  return ranked.concat(others);
+}
+function prioBatch(how) {
+  const picked = prioTicked();
+  if (!picked.length) return;
+  const rest = prioOrder().filter((id) => !state.prioSel.has(id));
+  let order;
+  if (how === 'first') order = picked.concat(rest);
+  else if (how === 'last') order = rest.concat(picked);
+  else if (how === 'remove') order = rest;
+  else {
+    const at = Math.max(1, Math.min(Number(state.prioTo) || 1, rest.length + 1));
+    order = rest.slice(0, at - 1).concat(picked, rest.slice(at - 1));
+  }
+  state.prioSel.clear();
+  prioSave(order);
 }
 const fmtDays = (sec) => (sec >= 172800 ? Math.round(sec / 86400) + ' days' : sec >= 7200 ? Math.round(sec / 3600) + ' h' : Math.max(1, Math.round(sec / 60)) + ' min');
 function prioCount(c) { c = c || {}; return `<b>${fmtNum(c.files)}</b><div class="muted">${fmtSize(c.bytes || 0)}</div>`; }
@@ -417,9 +484,10 @@ function viewPriorities() {
   if (!p) { if (!state.prioLoading) { state.prioLoading = true; loadPrio().finally(() => { state.prioLoading = false; }); } return '<p class="muted">Loading…</p>'; }
   const ranked = p.groups.filter((g) => g.place > 0).sort((a, b) => a.rank - b.rank);
   const inOrder = p.groups.filter((g) => g.place > 0).sort((a, b) => a.place - b.place);
-  const qq = (state.prioSearch || '').trim().toLowerCase();
-  const others = p.groups.filter((g) => !g.place && (!qq || g.name.toLowerCase().includes(qq)));
+  const others = prioOthersShown();
   const spread = p.policy === 'spread';
+  const sel = state.prioSel;
+  const tick = (g) => `<input type="checkbox" data-prio-sel="${esc(g.groupId)}" aria-label="Tick ${esc(g.name)}" ${sel.has(g.groupId) ? 'checked' : ''}> `;
   const eta = new Map();
   let cum = 0;
   for (const g of inOrder) { cum += ((g.needed || {}).bytes || 0) - ((g.neededAhead || {}).bytes || 0); eta.set(g.groupId, cum); }
@@ -431,20 +499,21 @@ function viewPriorities() {
   if (!p.known) h += `<div class="status warn">Coverage appears once the browser index has been built (about a minute after starting).</div>`;
   const d = p.distinct || {};
   h += `<div class="status">${p.focus ? `<b>Going first now:</b> ${esc(p.focus)}.<br>` : ''}Each file counted once across all groups: <b>${fmtNum((d.saved || {}).files)}</b> saved (${fmtSize((d.saved || {}).bytes || 0)}), <b>${fmtNum((d.needed || {}).files)}</b> still needed (${fmtSize((d.needed || {}).bytes || 0)}), ${fmtNum((d.probable || {}).files)} probable copies (${fmtSize((d.probable || {}).bytes || 0)}).${p.rate > 0 ? ` Recent speed: ${fmtSize(p.rate3h * 3600)}/h over 3 hours, ${fmtSize(p.rateDay * 3600)}/h over the day.` : ''}</div>`;
-  h += `<div class="card"><h2>Ranked groups (${ranked.length})</h2>`;
+  if (sel.size) h += `<div class="sticky"><div class="btns"><b>${fmtNum(sel.size)} ticked</b><button class="b primary" data-act="pr-batch" data-key="first">Put first</button><button class="b" data-act="pr-batch" data-key="last">Put last</button><span class="muted">or at rank</span><input class="t" type="number" min="1" style="width:76px" aria-label="Rank to move the ticked groups to" data-in="prioTo" data-focus="prioto" value="${esc(state.prioTo || '')}"><button class="b" data-act="pr-batch" data-key="to">Move</button><button class="b" data-act="pr-batch" data-key="remove">Take off the ranking</button><button class="mini" data-act="pr-untick">Untick all</button></div></div>`;
+  h += `<div class="card"><h2>Ranked groups (${ranked.length})</h2>${state.prioBusy ? '<div class="muted" role="status">Saving…</div>' : ''}`;
   if (ranked.length) {
     const head = `<tr><th>Rank</th><th>Group</th><th title="In the library because this group's message brought it">Saved</th><th title="In the library through another group: the same Telegram file, or the same bytes confirmed by every part's hash">Through others</th><th title="Evidence only: a held copy, a look-alike of a saved file, or a re-upload checked on sampled parts. Never counted as saved.">Probable</th><th>Still needed</th><th>Queue</th></tr>`;
     const rows = ranked.map((g, i) => {
       const ahead = (g.neededAhead || {}).files ? `<div class="muted" title="A group going before this one needs these too: they come free">${fmtNum(g.neededAhead.files)} also needed ahead</div>` : '';
-      return `<tr draggable="true" data-prio-row="${esc(g.groupId)}" style="cursor:grab"><td class="n"><b>${g.rank}</b>${spread && g.place !== g.rank ? `<div class="muted" title="Spread coverage: where it goes now">now ${g.place}</div>` : ''}</td><td><b>${esc(g.name)}</b>${g.scanned ? '' : ' <span class="pill" title="Its messages have not all been read: these figures are incomplete">not fully read</span>'}<div class="muted">${esc(g.waiting || '')}</div><div style="white-space:nowrap"><button class="mini" data-act="pr-move" data-id="${esc(g.groupId)}" data-key="-1" ${i ? '' : 'disabled'} aria-label="Move ${esc(g.name)} up">↑</button><button class="mini" data-act="pr-move" data-id="${esc(g.groupId)}" data-key="1" ${i < ranked.length - 1 ? '' : 'disabled'} aria-label="Move ${esc(g.name)} down">↓</button><button class="mini" data-act="pr-top" data-id="${esc(g.groupId)}" ${i ? '' : 'disabled'}>Top</button><button class="mini" data-act="pr-remove" data-id="${esc(g.groupId)}">Remove</button></div></td><td class="n">${prioCount(g.saved)}</td><td class="n">${prioCount(g.shared)}</td><td class="n">${prioCount(g.probable)}</td><td class="n">${prioCount(g.needed)}${ahead}${prioEta(eta.get(g.groupId), g, p)}</td><td class="n">${fmtNum(g.left)}${g.apart ? `<div class="muted">${fmtNum(g.apart)} held back</div>` : ''}</td></tr>`;
+      return `<tr draggable="true" data-prio-row="${esc(g.groupId)}" style="cursor:grab"><td class="n"><b>${g.rank}</b>${spread && g.place !== g.rank ? `<div class="muted" title="Spread coverage: where it goes now">now ${g.place}</div>` : ''}</td><td>${tick(g)}<b>${esc(g.name)}</b>${g.scanned ? '' : ' <span class="pill" title="Its messages have not all been read: these figures are incomplete">not fully read</span>'}<div class="muted">${esc(g.waiting || '')}</div><div style="white-space:nowrap"><button class="mini" data-act="pr-move" data-id="${esc(g.groupId)}" data-key="-1" ${i ? '' : 'disabled'} aria-label="Move ${esc(g.name)} up">↑</button><button class="mini" data-act="pr-move" data-id="${esc(g.groupId)}" data-key="1" ${i < ranked.length - 1 ? '' : 'disabled'} aria-label="Move ${esc(g.name)} down">↓</button><button class="mini" data-act="pr-top" data-id="${esc(g.groupId)}" ${i ? '' : 'disabled'}>Top</button><button class="mini" data-act="pr-remove" data-id="${esc(g.groupId)}">Remove</button></div></td><td class="n">${prioCount(g.saved)}</td><td class="n">${prioCount(g.shared)}</td><td class="n">${prioCount(g.probable)}</td><td class="n">${prioCount(g.needed)}${ahead}${prioEta(eta.get(g.groupId), g, p)}</td><td class="n">${fmtNum(g.left)}${g.apart ? `<div class="muted">${fmtNum(g.apart)} held back</div>` : ''}</td></tr>`;
     }).join('');
-    h += `<div class="list" style="max-height:none"><table>${head}${rows}</table></div><div class="muted">Drag a row, or use the arrows.</div>`;
+    h += `<div class="list" style="max-height:none"><table>${head}${rows}</table></div><div class="muted">Drag a row, use the arrows, or tick several and move them together.</div>`;
   } else {
     h += `<div class="muted">No group is ranked: downloads go in the order of the deadline rules alone. Add the groups that matter most below.</div>`;
   }
   h += `</div><div class="card"><h2>Not ranked (${others.length})</h2><div class="muted">These go after every ranked group, private chats and smaller files first while time is short.</div>
-<input class="t" placeholder="Search groups…" data-in="prioSearch" data-focus="prios" value="${esc(state.prioSearch || '')}">
-<div class="list"><table><tr><th>Group</th><th>Saved</th><th>Through others</th><th>Probable</th><th>Still needed</th></tr>${others.map((g) => `<tr><td><b>${esc(g.name)}</b>${g.scanned ? '' : ' <span class="pill">not fully read</span>'}<div class="muted">${esc(g.waiting || '')}</div><button class="mini" data-act="pr-add" data-id="${esc(g.groupId)}">Add to the ranking</button></td><td class="n">${prioCount(g.saved)}</td><td class="n">${prioCount(g.shared)}</td><td class="n">${prioCount(g.probable)}</td><td class="n">${prioCount(g.needed)}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">Nothing here.</td></tr>'}</table></div></div>`;
+<div class="btns"><input class="t" style="flex:1;min-width:180px" placeholder="Search groups…" data-in="prioSearch" data-focus="prios" value="${esc(state.prioSearch || '')}"><button class="mini" data-act="pr-tick-all" ${others.length ? '' : 'disabled'}>Tick all ${fmtNum(others.length)} shown</button></div>
+<div class="list"><table><tr><th>Group</th><th>Saved</th><th>Through others</th><th>Probable</th><th>Still needed</th></tr>${others.map((g) => `<tr><td>${tick(g)}<b>${esc(g.name)}</b>${g.scanned ? '' : ' <span class="pill">not fully read</span>'}<div class="muted">${esc(g.waiting || '')}</div><button class="mini" data-act="pr-add" data-id="${esc(g.groupId)}">Add to the ranking</button></td><td class="n">${prioCount(g.saved)}</td><td class="n">${prioCount(g.shared)}</td><td class="n">${prioCount(g.probable)}</td><td class="n">${prioCount(g.needed)}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">Nothing here.</td></tr>'}</table></div></div>`;
   return h;
 }
 
@@ -744,6 +813,9 @@ $app.addEventListener('click', async (ev) => {
     case 'pr-top': { const o = prioOrder().filter((x) => x !== id); o.unshift(id); prioSave(o); break; }
     case 'pr-remove': prioSave(prioOrder().filter((x) => x !== id)); break;
     case 'pr-add': { const o = prioOrder(); if (!o.includes(id)) o.push(id); prioSave(o); break; }
+    case 'pr-batch': prioBatch(key); break;
+    case 'pr-tick-all': prioOthersShown().forEach((g) => state.prioSel.add(g.groupId)); render(); break;
+    case 'pr-untick': state.prioSel.clear(); render(); break;
     case 'd-more': loadDups(true); break;
     case 'd-retry': { const r = await api('POST', '/api/ix/dups/retry'); if (!r.ok) state.error = errText(r); loadDups(false); break; }
     case 'd-save': {
@@ -892,7 +964,8 @@ $app.addEventListener('input', (ev) => {
 });
 $app.addEventListener('change', (ev) => {
   const t = ev.target;
-  if (t.matches('[data-sel]')) { const gid = t.getAttribute('data-sel'); if (t.checked) state.sel.add(gid); else state.sel.delete(gid); render(); }
+  if (t.matches('[data-prio-sel]')) { const gid = t.getAttribute('data-prio-sel'); if (t.checked) state.prioSel.add(gid); else state.prioSel.delete(gid); render(); }
+  else if (t.matches('[data-sel]')) { const gid = t.getAttribute('data-sel'); if (t.checked) state.sel.add(gid); else state.sel.delete(gid); render(); }
   else if (t.matches('[data-pick]')) { const gid = t.getAttribute('data-pick'); if (t.checked) state.pick.add(gid); else state.pick.delete(gid); render(); }
   else if (t.matches('[data-in-check]')) state[t.getAttribute('data-in-check')] = t.checked;
   else if (t.matches('[data-sel-in]')) state[t.getAttribute('data-sel-in')] = t.value;
@@ -900,9 +973,12 @@ $app.addEventListener('change', (ev) => {
 $app.addEventListener('change', async (ev) => {
   const policy = ev.target.getAttribute && ev.target.getAttribute('data-prio-policy');
   if (!policy) return;
+  state.prioSeq++;
   const r = await api('POST', '/api/ix/priorities', { policy });
-  if (r.ok) { state.prio = r.data; state.prioError = ''; } else state.prioError = errText(r);
+  if (r.ok) { state.prio.policy = policy; state.prioError = ''; } else state.prioError = errText(r);
   render();
+  clearTimeout(state.prioTimer);
+  state.prioTimer = setTimeout(loadPrio, 1500);
 });
 // Dragging a ranked row. The list is not redrawn while a row is held.
 $app.addEventListener('dragstart', (ev) => {

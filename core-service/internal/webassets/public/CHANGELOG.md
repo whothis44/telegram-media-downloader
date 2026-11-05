@@ -2,10 +2,10 @@
 
 All notable changes to this project are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [3.4.18-ix.11] — 2026-11-04
+## [3.4.18-ix.11.1] — 2026-11-04
 
 ### Added
-- **Archive -> Priorities: rank your groups, and the ranking reaches the downloads.** It orders reading messages, queueing files and which file downloads next, and it outlives a rescan. Two policies: finish in order, or spread coverage. See `docs/GROUP-PRIORITY.md`, including its limits.
+- **Archive -> Priorities: rank your groups, and the ranking reaches the downloads.** It orders reading messages, queueing files and which file downloads next, and it outlives a rescan. Two policies: finish in order, or spread coverage. Tick several groups to move them together; rows move at once and the queue follows in the background. See `docs/GROUP-PRIORITY.md`, including its limits.
 - **A file in several groups is one piece of work.** It goes at the best rank of any group needing it and transfers once, and every group is credited. Rows of a file already saved take no bytes and no Telegram request.
 - **Honest coverage per group, in files and bytes:** saved, through other groups, probable, still needed. Each file counts once globally, and sampled or look-alike matches are never counted as saved.
 

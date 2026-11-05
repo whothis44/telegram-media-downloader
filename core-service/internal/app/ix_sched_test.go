@@ -624,6 +624,9 @@ func TestIxPrioritiesAPI(t *testing.T) {
 	if code, _ := ixCall(ctx, a.handleIxPrioritiesSet, http.MethodPost, "/api/ix/priorities", map[string]any{"policy": "random"}, nil); code != http.StatusBadRequest {
 		t.Fatalf("bad policy: %d", code)
 	}
+	if out["success"] != true {
+		t.Fatalf("%v", out)
+	}
 	code, out = ixCall(ctx, a.handleIxPriorities, http.MethodGet, "/api/ix/priorities", nil, nil)
 	if code != http.StatusOK || out["policy"] != "spread" {
 		t.Fatalf("%d %v", code, out)
@@ -840,6 +843,16 @@ func BenchmarkIxSchedAtQueueSize(b *testing.B) {
 		}
 	}
 	b.Logf("a claim and its finish: %s", time.Since(started)/100)
+	started = time.Now()
+	if code, out := ixCall(ctx, a.handleIxPrioritiesSet, http.MethodPost, "/api/ix/priorities", map[string]any{"order": []string{"g2", "g1", "g3"}}, nil); code != http.StatusOK {
+		b.Fatal(code, out)
+	}
+	b.Logf("a click on the ranking, saved: %s", time.Since(started))
+	started = time.Now()
+	if code, out := ixCall(ctx, a.handleIxPriorities, http.MethodGet, "/api/ix/priorities", nil, nil); code != http.StatusOK {
+		b.Fatal(code, out)
+	}
+	b.Logf("the figures read: %s", time.Since(started))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if err := a.ixSchedStep(ctx); err != nil {
@@ -944,4 +957,47 @@ func TestIxMissingRepresentativeCoversNothing(t *testing.T) {
 
 func ixCovFixtureModel() *ixModel {
 	return ixCoverModel(ixCovFixture{group: "low", cluster: 0, ident: "video:42:5", size: 5})
+}
+
+// A click on the ranking does not wait for the queue: saving returns before the
+// rows are rewritten, and the step that follows brings them up to date.
+func TestIxRankSaveDoesNotTouchTheQueue(t *testing.T) {
+	a, ctx := ixTestApp(t)
+	row := ixSchedRowAdd(t, a, "top", 1, ixSchedIdent(1, 10), 10)
+	code, out := ixCall(ctx, a.handleIxPrioritiesSet, http.MethodPost, "/api/ix/priorities", map[string]any{"order": []string{"top"}}, nil)
+	if code != http.StatusOK {
+		t.Fatalf("%d %v", code, out)
+	}
+	if got := ixSchedOrder(t, a, row); got != engine.UnrankedOrder {
+		t.Fatalf("the click rewrote the row itself: %d", got)
+	}
+	if !a.ixSched().spreadReset.Load() {
+		t.Fatal("the step was not told")
+	}
+	ixSchedStepOK(t, a, ctx)
+	if got := ixSchedOrder(t, a, row); got != ixRankBase(0) {
+		t.Fatalf("order %d after the step", got)
+	}
+}
+
+// The report's slow counts do not depend on the ranks: a change shows at once,
+// even with them kept.
+func TestIxPrioritiesShowANewRankAtOnce(t *testing.T) {
+	a, ctx := ixTestApp(t)
+	old := ixStatusCacheTTL
+	ixStatusCacheTTL = time.Hour
+	defer func() { ixStatusCacheTTL = old }()
+	if err := a.ixSaveRanks(ctx, []string{"one"}, map[string]string{"one": "One"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.ixPrioritiesNow(ctx); len(got.Groups) != 1 || got.Groups[0].Rank != 1 {
+		t.Fatalf("%+v", got.Groups)
+	}
+	if err := a.ixSaveRanks(ctx, []string{"two", "one"}, map[string]string{"two": "Two", "one": "One"}); err != nil {
+		t.Fatal(err)
+	}
+	got := a.ixPrioritiesNow(ctx)
+	if len(got.Groups) != 2 || got.Groups[0].GroupID != "two" || got.Groups[0].Rank != 1 || got.Groups[1].Rank != 2 {
+		t.Fatalf("%+v", got.Groups)
+	}
 }
