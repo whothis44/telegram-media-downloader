@@ -867,3 +867,48 @@ func TestIxRankedWorkDoesNotDecideTheBandOfTheOthers(t *testing.T) {
 		t.Fatal("an unranked file was set aside for a ranked group's smaller one")
 	}
 }
+
+// The fault that crashed 10.x: a nil pointer in a background task. It must cost
+// that task a restart, not every download; and a task that ends by itself stays
+// ended.
+func TestIxBackgroundTaskCrashDoesNotEndTheProcess(t *testing.T) {
+	a, _ := ixTestApp(t)
+	old := ixPanicRestart
+	ixPanicRestart = time.Millisecond
+	defer func() { ixPanicRestart = old }()
+	runs := make(chan int, 8)
+	n := 0
+	a.ixBackground("invented task", func(context.Context) {
+		n++
+		runs <- n
+		if n < 3 {
+			var cause error
+			_ = cause.Error() // as ixSampleCheck did
+		}
+	})
+	for want := 1; want <= 3; want++ {
+		select {
+		case got := <-runs:
+			if got != want {
+				t.Fatalf("run %d, want %d", got, want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("not restarted after run %d", want-1)
+		}
+	}
+	select {
+	case got := <-runs:
+		t.Fatalf("a task that ended by itself ran again: %d", got)
+	case <-time.After(50 * time.Millisecond):
+	}
+	found := false
+	rt := a.ix()
+	rt.mu.Lock()
+	for _, l := range rt.recent {
+		found = found || strings.Contains(l.Text, "program error in invented task")
+	}
+	rt.mu.Unlock()
+	if !found {
+		t.Fatal("the fault was not reported")
+	}
+}

@@ -6,8 +6,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"runtime/debug"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -118,27 +120,73 @@ func (a *App) ixDeps() ixQueueDeps {
 
 func (a *App) ixStart() {
 	ixApplyEngineSettings(a.ixLoadSettings(a.ctx))
-	a.ambientWG.Add(1)
-	go func() { defer a.ambientWG.Done(); a.ixRunQueue(a.ctx) }()
-	a.ambientWG.Add(1)
-	go func() { defer a.ambientWG.Done(); a.ixRunExports(a.ctx) }()
-	a.ambientWG.Add(1)
-	go func() { defer a.ambientWG.Done(); a.ixRunSafety(a.ctx) }()
-	a.ambientWG.Add(1)
-	go func() { defer a.ambientWG.Done(); a.ixRunVdup(a.ctx) }()
-	a.ambientWG.Add(1)
-	go func() { defer a.ambientWG.Done(); a.ixRunRetry(a.ctx) }()
-	a.ambientWG.Add(1)
-	go func() { defer a.ambientWG.Done(); a.ixRunAlerts(a.ctx) }()
-	for _, run := range []func(context.Context){a.ixRunFreeze, a.ixRunMedia, a.ixRunFixity, a.ixRunBrowse, a.ixRunHeld, a.ixRunML, a.ixRunSTT, a.ixRunDeadline, a.ixRunMLAutoStart, a.ixRunBackups, a.ixRunGone, a.ixRunCopies} {
-		a.ambientWG.Add(1)
-		go func() { defer a.ambientWG.Done(); run(a.ctx) }()
+	for _, task := range []struct {
+		name string
+		run  func(context.Context)
+	}{
+		{"rescan queue", a.ixRunQueue},
+		{"exports", a.ixRunExports},
+		{"safety checks", a.ixRunSafety},
+		{"video index", a.ixRunVdup},
+		{"download retry", a.ixRunRetry},
+		{"alerts", a.ixRunAlerts},
+		{"freeze watch", a.ixRunFreeze},
+		{"picture index", a.ixRunMedia},
+		{"integrity check", a.ixRunFixity},
+		{"browser index", a.ixRunBrowse},
+		{"held copies", a.ixRunHeld},
+		{"recognition", a.ixRunML},
+		{"speech to text", a.ixRunSTT},
+		{"deadline order", a.ixRunDeadline},
+		{"recognition start", a.ixRunMLAutoStart},
+		{"backups", a.ixRunBackups},
+		{"account check", a.ixRunGone},
+		{"duplicate checks", a.ixRunCopies},
+		{"lower quality first", a.ixRunLowq}, // lower quality first, and the staging folder's moves to the library
+		{"staging", a.ixRunStaging},
+		{"previews", a.ixRunPreviewsAll},
+		{"group priorities", a.ixRunSched},
+	} {
+		a.ixBackground(task.name, task.run)
 	}
-	// Lower quality first, and the staging folder's moves to the library.
-	for _, run := range []func(context.Context){a.ixRunLowq, a.ixRunStaging, a.ixRunPreviewsAll, a.ixRunSched} {
-		a.ambientWG.Add(1)
-		go func() { defer a.ambientWG.Done(); run(a.ctx) }()
-	}
+}
+
+// ixPanicRestart is how long a background task that crashed waits to start
+// again. Long enough that one hitting the same fault every time costs little.
+var ixPanicRestart = time.Minute
+
+// ixBackground runs one of the archive's background tasks. In Go an unrecovered
+// panic in any goroutine ends the whole process, every download included, and a
+// download in progress starts over after a restart. None of these tasks is worth
+// that: a fault in one is reported and the task starts again, and downloads carry
+// on. A goroutine a task starts itself is not covered.
+func (a *App) ixBackground(name string, run func(context.Context)) {
+	a.ambientWG.Add(1)
+	go func() {
+		defer a.ambientWG.Done()
+		for a.ixGuarded(name, run) {
+			select {
+			case <-a.ctx.Done():
+				return
+			case <-time.After(ixPanicRestart):
+			}
+		}
+	}()
+}
+
+// ixGuarded runs a task once; true means it crashed and should run again.
+func (a *App) ixGuarded(name string, run func(context.Context)) (crashed bool) {
+	defer func() {
+		if v := recover(); v != nil {
+			crashed = true
+			a.ixLog("program error in %s, restarting it: %v", name, v)
+			if a.output != nil {
+				fmt.Fprintf(a.output, "archive: program error in %s: %v\n%s\n", name, v, debug.Stack())
+			}
+		}
+	}()
+	run(a.ctx)
+	return false
 }
 
 func (a *App) ixWake() {
