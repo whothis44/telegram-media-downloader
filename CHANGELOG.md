@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.18-ix.12.1] — 2026-11-05
+
+### Fixed
+- **The app crashed by itself every couple of hours** (`fatal error: stack overflow`, from ix.10.2 on). Loose faces alike to a person they could not join (taken out of them, or that person already in their picture) sent each other round for ever while being grouped. No program can catch a stack overflow, so every download in progress was lost each time.
+- **Checks of big videos, and previews, starved under a speed limit** (from ix.11). Their file parts had no rank, so they went behind every download, got no part at all and timed out. They now go first; their own turns limit how much they take.
+
+### Added
+- **A crash log and a run history.** Each crash report is kept in `crashes/` in the data folder (the newest 10), and a new `[restarts]` part of the diagnostics report says how recent runs ended, with the cause and the function. The launcher restarting the app no longer hides a crash.
+
+### Changed
+- **Big-video checks ask once per Telegram file.** Other rows of a file take the answer already known, without reading anything, and wait with it when its check failed. A check stops as soon as more frames could not change its answer: 5 frames, not 8, for a clear copy or for nothing alike.
+- Priorities, Account safety and Rescan now say how they interact.
+
+### Service worker
+- `VERSION = 'v34183'`
+
 ## [3.4.18-ix.12] — 2026-11-05
 
 ### Added

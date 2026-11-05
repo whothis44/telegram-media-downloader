@@ -41,6 +41,20 @@ func WithDownloadRank(ctx context.Context, key int64, yield func() bool) context
 	return context.WithValue(ctx, downloadRankKey{}, downloadRank{key: key, yield: yield})
 }
 
+// fileCheckRank is ahead of every queued transfer (their ranks are 0 or more).
+const fileCheckRank = -1
+
+// WithFileCheckRank is for the few parts a check reads instead of downloading a
+// whole file, or a preview. Their total is limited by the checks' own turns, and
+// unranked they went last: with the window down to one part under a speed limit,
+// behind downloads that always wait, they got no part at all and timed out.
+func WithFileCheckRank(ctx context.Context) context.Context {
+	return WithDownloadRank(ctx, fileCheckRank, nil)
+}
+
+// DownloadRankKeyForTest is the rank key waits use for ctx.
+func DownloadRankKeyForTest(ctx context.Context) int64 { return downloadRankOf(ctx).key }
+
 // downloadRankOf is the transfer's rank; one without any goes last, in no
 // order among others alike.
 func downloadRankOf(ctx context.Context) downloadRank {

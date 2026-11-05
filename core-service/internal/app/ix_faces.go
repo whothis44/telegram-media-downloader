@@ -573,6 +573,27 @@ func (a *App) ixFaceRetryNearLocked(ctx context.Context, placed []int64, unit fu
 // the faces that may go to them). It says which faces were put with a
 // person (none: the face stays loose).
 func (a *App) ixGroupFaceLocked(ctx context.Context, id int64, v []int8, unit func(string) string, reuse func([]int64) (int64, []int64)) ([]int64, error) {
+	var placed []int64
+	tried := map[int64]bool{}
+	for {
+		got, again, err := a.ixGroupFaceOnce(ctx, id, v, unit, reuse, tried)
+		placed = append(placed, got...)
+		if err != nil || !again {
+			return placed, err
+		}
+	}
+}
+
+// ixFaceMayJoinLocked is what lets a face join a person, the same everywhere: not
+// a person it was taken out of, and not a second face in one picture or frame.
+func (s *ixFaceStore) ixFaceMayJoinLocked(person int64, rejected map[int64]bool, shot, id int64) bool {
+	return !rejected[person] && !s.inShotLocked(person, shot, id)
+}
+
+// ixGroupFaceOnce is one look at a face. again: look-alikes went to a person
+// first, so look at it once more. tried holds those already sent to a person: each
+// goes at most once, so the looks at one face come to an end.
+func (a *App) ixGroupFaceOnce(ctx context.Context, id int64, v []int8, unit func(string) string, reuse func([]int64) (int64, []int64), tried map[int64]bool) ([]int64, bool, error) {
 	box := a.ixMLBox()
 	s := &box.faces
 	rejected := a.ixFaceRejects(ctx, id) // people a person took this face out of
@@ -580,7 +601,7 @@ func (a *App) ixGroupFaceLocked(ctx context.Context, id int64, v []int8, unit fu
 	me, ok := s.index[id]
 	if !ok || s.person[me] != 0 || s.tier[me] == ixFaceJunk {
 		s.mu.RUnlock()
-		return nil, nil
+		return nil, false, nil
 	}
 	tier := s.tier[me]
 	myShot := s.shotLocked(me)
@@ -599,7 +620,7 @@ func (a *App) ixGroupFaceLocked(ctx context.Context, id int64, v []int8, unit fu
 		c := cand{n, t, ""}
 		switch {
 		case n.person > 0:
-			if !rejected[n.person] && !s.inShotLocked(n.person, myShot, id) {
+			if s.ixFaceMayJoinLocked(n.person, rejected, myShot, id) {
 				grouped = append(grouped, c)
 			}
 		case n.person == 0:
@@ -613,10 +634,10 @@ func (a *App) ixGroupFaceLocked(ctx context.Context, id int64, v []int8, unit fu
 	myUnit := unit(s.keys[s.key[me]])
 	s.mu.RUnlock()
 	if len(grouped) > 0 {
-		return []int64{id}, a.ixSetFacePerson(ctx, []int64{id}, grouped[0].person)
+		return []int64{id}, false, a.ixSetFacePerson(ctx, []int64{id}, grouped[0].person)
 	}
 	if tier != ixFaceGood {
-		return nil, nil // weak faces only join
+		return nil, false, nil // weak faces only join
 	}
 	units, good := map[string]bool{myUnit: true}, map[string]bool{myUnit: true}
 	take := []int64{id}
@@ -628,18 +649,21 @@ func (a *App) ixGroupFaceLocked(ctx context.Context, id int64, v []int8, unit fu
 		take = append(take, n.id)
 	}
 	if len(units) < ixFaceMinFaces || len(good) < ixFaceMinGood {
-		return nil, nil
+		return nil, false, nil
 	}
 	// A look-alike that would join a person already made goes there first,
 	// and this face is looked at again: files grouped several at a time
 	// must not start a second person out of faces that belong to the first
 	// (one face's turn may come before its look-alike's).
-	if joined, err := a.ixFaceJoinFirstLocked(ctx, take[1:], unit); err != nil || len(joined) > 0 {
-		if err != nil {
-			return nil, err
+	var first []int64
+	for _, f := range take[1:] {
+		if !tried[f] {
+			tried[f] = true
+			first = append(first, f)
 		}
-		got, err := a.ixGroupFaceLocked(ctx, id, v, unit, reuse)
-		return append(joined, got...), err
+	}
+	if joined, err := a.ixFaceJoinFirstLocked(ctx, first); err != nil || len(joined) > 0 {
+		return joined, err == nil, err
 	}
 	var person int64
 	if reuse != nil {
@@ -649,49 +673,44 @@ func (a *App) ixGroupFaceLocked(ctx context.Context, id int64, v []int8, unit fu
 		now := ixNowMs()
 		res, err := a.db.Writer.ExecContext(ctx, `INSERT INTO ix_people(name,created_at,updated_at) VALUES('',?,?)`, now, now)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		person, _ = res.LastInsertId()
 	}
-	return take, a.ixSetFacePerson(ctx, take, person)
+	return take, false, a.ixSetFacePerson(ctx, take, person)
 }
 
-// ixFaceJoinFirstLocked puts each of the loose faces that has a grouped
-// look-alike (at the likeness the pair needs, not a person it was taken out
-// of, not a second face in one picture) with that person, by the usual
-// rules. It says which were put. With the grouping lock held.
-func (a *App) ixFaceJoinFirstLocked(ctx context.Context, ids []int64, unit func(string) string) ([]int64, error) {
+// ixFaceJoinFirstLocked puts each of the loose faces that may join a person
+// (by ixFaceMayJoinLocked, at the likeness the pair needs) with its closest such
+// person. It says which were put. It never starts a person and never looks at a
+// face's other look-alikes: two faces that could not join the person they were
+// both alike to once sent each other here for ever, until the stack ran out. With
+// the grouping lock held.
+func (a *App) ixFaceJoinFirstLocked(ctx context.Context, ids []int64) ([]int64, error) {
 	s := &a.ixMLBox().faces
-	type face struct {
-		id int64
-		v  []int8
-	}
-	var join []face
-	s.mu.RLock()
+	var placed []int64
 	for _, id := range ids {
-		i, ok := s.index[id]
-		if !ok || s.person[i] != 0 || s.tier[i] == ixFaceJunk {
-			continue
-		}
-		d, tier := s.dim, s.tier[i]
-		v := s.vecs[int(i)*d : int(i+1)*d]
-		for _, n := range s.nearLocked(v, ixFaceSameSim, id) {
-			if n.person > 0 && n.sim >= ixFacePairSim(tier, s.tier[n.idx]) {
-				join = append(join, face{id, append([]int8(nil), v...)})
-				break
+		rejected := a.ixFaceRejects(ctx, id)
+		var person int64
+		s.mu.RLock()
+		if i, ok := s.index[id]; ok && s.person[i] == 0 && s.tier[i] != ixFaceJunk {
+			d, tier, shot := s.dim, s.tier[i], s.shotLocked(i)
+			for _, n := range s.nearLocked(s.vecs[int(i)*d:int(i+1)*d], ixFaceSameSim, id) {
+				t := s.tier[n.idx]
+				if n.person > 0 && t != ixFaceJunk && n.sim >= ixFacePairSim(tier, t) && s.ixFaceMayJoinLocked(n.person, rejected, shot, id) {
+					person = n.person
+					break
+				}
 			}
 		}
-	}
-	s.mu.RUnlock()
-	var placed []int64
-	for _, f := range join {
-		// ixGroupFaceLocked joins when it can; with no grouped look-alike it
-		// may start a person, but each of these has one.
-		got, err := a.ixGroupFaceLocked(ctx, f.id, f.v, unit, nil)
-		if err != nil {
+		s.mu.RUnlock()
+		if person == 0 {
+			continue
+		}
+		if err := a.ixSetFacePerson(ctx, []int64{id}, person); err != nil {
 			return placed, err
 		}
-		placed = append(placed, got...)
+		placed = append(placed, id)
 	}
 	return placed, nil
 }

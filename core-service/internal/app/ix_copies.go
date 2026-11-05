@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS ix_copy_sample ( -- big queued videos checked by fram
 	reason     TEXT    NOT NULL DEFAULT '', -- failed: why, a category (ix_copies_sample.go)
 	final      INTEGER NOT NULL DEFAULT 0   -- failed for a reason in the file itself: not tried again
 );
+CREATE INDEX IF NOT EXISTS ix_copy_sample_ident_x ON ix_copy_sample(ident);
 `
 
 func ixEnsureCopiesSchema(ctx context.Context, db *sql.DB) error {
@@ -594,8 +595,8 @@ func (a *App) ixCopiesDiag(ctx context.Context) []string {
 	if s.Failed > 0 {
 		failed = fmt.Sprintf(" (%s; %d to try again later)", s.failedText(), s.Retry)
 	}
-	out = append(out, fmt.Sprintf("  big videos sampled: checked %d big videos using %d MB instead of %.1f GB; %d confirmed copies; %d could not be checked%s · previews kept %d · likeness threshold %.3f",
-		s.Checked, s.PartsMB, float64(s.SizeBytes)/(1<<30), s.Confirmed, s.Failed, failed, c.Previews, c.Threshold))
+	out = append(out, fmt.Sprintf("  big videos sampled: checked %d big videos using %d MB instead of %.1f GB (%d more took the answer for the same file); %d confirmed copies; %d could not be checked%s · previews kept %d · likeness threshold %.3f",
+		s.Checked, s.PartsMB, float64(s.SizeBytes)/(1<<30), s.Reused, s.Confirmed, s.Failed, failed, c.Previews, c.Threshold))
 	out = append(out, a.ixPreviewAllDiag(ctx))
 	return out
 }

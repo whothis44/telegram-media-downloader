@@ -133,6 +133,11 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 		line("freeze: none reported (checked %s)%s", ixAgo(fz.CheckedAt, now), map[bool]string{true: " · last check failed: " + r.clean(fz.Error), false: ""}[fz.Error != ""])
 	}
 	line("hold: %s", r.clean(a.ixHold(ctx)))
+	line("\n[restarts]")
+	for _, l := range a.ixRestartsDiag(now) {
+		line("%s", l)
+	}
+	line("")
 	line("%s", r.clean(a.ixGoneDiag(now)))
 	line("\n[rescan queue]")
 	if st, err := a.ixLoadQueue(ctx); err == nil {

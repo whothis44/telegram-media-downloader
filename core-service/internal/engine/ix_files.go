@@ -37,7 +37,7 @@ func (s *MessageSession) FilePart(a telegram.Attachment, offset int64) ([]byte, 
 	if !ok {
 		return nil, errors.New("account cannot read file parts")
 	}
-	ctx, cancel := context.WithTimeout(s.ctx, filePartWaitLimit)
+	ctx, cancel := context.WithTimeout(telegram.WithFileCheckRank(s.ctx), filePartWaitLimit)
 	defer cancel()
 	return source.FilePart(ctx, a, offset)
 }

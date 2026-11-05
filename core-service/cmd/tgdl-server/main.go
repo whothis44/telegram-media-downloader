@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/botnick/telegram-media-downloader/core-service/internal/app"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/config"
+	"github.com/botnick/telegram-media-downloader/core-service/internal/crashlog"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/version"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/webassets"
 )
@@ -68,6 +70,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, err)
 		return 1
 	}
+	// After app.New, which makes this process the data folder's only owner. Deferred
+	// first so that it runs last: a crash while shutting down still counts.
+	crashes, lastRun, crashErr := crashlog.Start(filepath.Join(cfg.DataDir, app.CrashDir), version.AppVersion)
+	if crashErr != nil {
+		_, _ = fmt.Fprintf(stderr, "crash log: %v\n", crashErr)
+	}
+	if lastRun != nil {
+		_, _ = fmt.Fprintf(stderr, "The last run did not stop cleanly: %s\n", lastRun.Text())
+	}
+	defer crashes.Finish()
 	defer a.Close()
 	address := net.JoinHostPort(cfg.BindHost, strconv.Itoa(cfg.Port))
 	log.Printf("tgdl-server listening on %s", address)

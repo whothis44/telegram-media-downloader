@@ -428,9 +428,10 @@ func TestIxSamplingUnderThrottleAndRetries(t *testing.T) {
 		f, _ := ixCopyFactsOf(msg)
 		return a.ixSampleCheck(ctx, r, msg, f, key)
 	}
-	// 8 parts at 120 ms each: about a second of waits, against 300 ms.
+	// A copy is decided after 5 frames: 5 parts at 120 ms each, about 600 ms of
+	// waits, against 300 ms.
 	file(901, "copy0000")
-	if res := check(901); res.Result != "confirmed" || res.Parts < 6 {
+	if res := check(901); res.Result != "confirmed" || res.Parts < 5 {
 		t.Fatalf("under the speed limit: %+v", res)
 	}
 	// The time in all still stops a check.

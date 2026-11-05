@@ -34,3 +34,26 @@ func TestFilePartOutlastsSpeedLimitWaits(t *testing.T) {
 		t.Fatalf("a part read may only take %s", source.left)
 	}
 }
+
+type rankSeeingSource struct {
+	recoverySource
+	rank int64
+}
+
+func (s *rankSeeingSource) FilePart(ctx context.Context, _ telegram.Attachment, _ int64) ([]byte, error) {
+	s.rank = telegram.DownloadRankKeyForTest(ctx)
+	return nil, nil
+}
+
+// A check's parts go ahead of queued downloads. Unranked they went last, and under
+// a speed limit they never got a turn.
+func TestFilePartsOfChecksGoAheadOfDownloads(t *testing.T) {
+	source := &rankSeeingSource{}
+	session := &MessageSession{ctx: context.Background(), source: source}
+	if _, err := session.FilePart(telegram.Attachment{}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if source.rank >= 0 {
+		t.Fatalf("rank %d: a queued download with rank 0 would go first", source.rank)
+	}
+}

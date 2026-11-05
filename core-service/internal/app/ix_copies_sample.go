@@ -73,6 +73,17 @@ const (
 	ixSampleSlack      = 2.5 // seconds the offsets of matching frames may differ
 )
 
+// ixSampleSameFile: the answer came from an earlier check of the same Telegram file
+// (ix_copy_sample.reason), and nothing was read.
+const ixSampleSameFile = "same-file"
+
+// ixSampleOrder visits the sample points spread out, so that footage shared with a
+// saved video over 3 points or more in a row meets one of the first 5.
+var ixSampleOrder = [ixSamplePoints]int{0, 7, 3, 5, 1, 6, 2, 4}
+
+// ixSampleMissAfter frames matching nothing at all end a check.
+const ixSampleMissAfter = 5
+
 // Limits of one check (variables for tests).
 var (
 	ixSampleMaxParts     = 32
@@ -80,6 +91,7 @@ var (
 	ixSampleHardTimeout  = 10 * time.Minute // in all: a part read alone may take 5 (engine.filePartWaitLimit)
 	ixSampleClockTick    = 250 * time.Millisecond
 	ixSamplesPerRun      = 3
+	ixSampleReusePerRun  = 200
 	errIxSampleTimeout   = errors.New("the check took too long")
 	errIxSampleHardLimit = errors.New("the check took too long, waits for Telegram included")
 )
@@ -439,6 +451,27 @@ type ixSampleResult struct {
 	Samples int
 }
 
+// ixSampleDecided says whether more frames could not change the answer: already a
+// copy whatever the others show, or too little alike to become a copy or partly
+// the same footage. Each frame costs parts of a file under a limit.
+func ixSampleDecided(samples []ixSampledFrame, cands []ixSampleCand, left int) bool {
+	if len(samples) < ixSampleMinHit {
+		return false
+	}
+	best := 0
+	for _, c := range cands {
+		hit, _ := ixSampleMatch(samples, c.frames)
+		best = max(best, hit)
+	}
+	switch {
+	case best >= max(ixSampleMinHit, int(math.Ceil(ixSampleShare*ixSamplePoints))):
+		return true
+	case best == 0 && len(samples) >= ixSampleMissAfter:
+		return true
+	}
+	return best+left < min(ixSampleMinHit, ixSamplePartialHit)
+}
+
 // ixSampleCheck samples a queued video and compares it with saved ones.
 func (a *App) ixSampleCheck(ctx context.Context, r ixCopyReader, msg *tg.Message, f ixCopyFacts, likeKey string) ixSampleResult {
 	att, err := telegram.MessageAttachment(msg)
@@ -504,7 +537,7 @@ func (a *App) ixSampleCheck(ctx context.Context, r ixCopyReader, msg *tg.Message
 	dur := float64(f.Dur) / 1000
 	var samples []ixSampledFrame
 	var lastErr error
-	for i := 0; i < ixSamplePoints; i++ {
+	for n, i := range ixSampleOrder {
 		t := dur * (0.05 + 0.9*float64(i)/float64(ixSamplePoints-1))
 		s, ok, err := ixSampleFrame(ctx, address, t)
 		if err != nil {
@@ -516,6 +549,9 @@ func (a *App) ixSampleCheck(ctx context.Context, r ixCopyReader, msg *tg.Message
 		}
 		if ok {
 			samples = append(samples, s)
+			if ixSampleDecided(samples, cands, ixSamplePoints-n-1) {
+				break
+			}
 		}
 	}
 	res := ixSampleResult{Parts: file.fetchedNow(), Samples: len(samples)}
@@ -623,16 +659,7 @@ type ixSampleJob struct {
 // videos saved in a lower quality first are not copies (ix_lowq.go): they
 // are left out.
 func (a *App) ixSampleJobs(ctx context.Context, heldOnly bool, n int) ([]ixSampleJob, error) {
-	cond := ""
-	if heldOnly {
-		cond = " AND h.work_id IS NOT NULL"
-	}
-	rows, err := a.db.Reader.QueryContext(ctx, `SELECT w.id, w.file_size, w.account_id, w.body, h.work_id IS NOT NULL, COALESCE(h.like_key,'')
-		FROM tgdl_work w LEFT JOIN ix_held h ON h.work_id=w.id AND h.released_at=0 AND h.reason<>''
-		LEFT JOIN ix_copy_sample s ON s.work_id=w.id
-		WHERE w.status='pending' AND w.media_type='video' AND w.file_size>=? AND w.ttl_seconds=0 AND length(w.body)>0
-		AND (s.work_id IS NULL OR (s.result='failed' AND s.final=0 AND s.at < ? - MIN(86400000, 3600000*(1<<(MIN(MAX(s.tries,1),6)-1)))))
-		AND w.id NOT IN (SELECT work_id FROM ix_lowq WHERE state IN ('saved','released'))`+cond+`
+	rows, err := a.db.Reader.QueryContext(ctx, `SELECT w.id, w.file_size, w.account_id, w.body, h.work_id IS NOT NULL, COALESCE(h.like_key,'') `+ixSampleDue(heldOnly)+`
 		ORDER BY w.sched_order, w.file_size DESC, w.id LIMIT ?`, ixSampleMinSize, time.Now().UnixMilli(), n)
 	if err != nil {
 		return nil, err
@@ -648,23 +675,157 @@ func (a *App) ixSampleJobs(ctx context.Context, heldOnly bool, n int) ([]ixSampl
 	return out, rows.Err()
 }
 
+// ixSampleDue is the rows that may be checked now, as the end of a query.
+func ixSampleDue(heldOnly bool) string {
+	cond := ""
+	if heldOnly {
+		cond = " AND h.work_id IS NOT NULL"
+	}
+	return `FROM tgdl_work w LEFT JOIN ix_held h ON h.work_id=w.id AND h.released_at=0 AND h.reason<>''
+		LEFT JOIN ix_copy_sample s ON s.work_id=w.id
+		WHERE w.status='pending' AND w.media_type='video' AND w.file_size>=? AND w.ttl_seconds=0 AND length(w.body)>0
+		AND (s.work_id IS NULL OR (s.result='failed' AND s.final=0 AND s.at < ? - MIN(86400000, 3600000*(1<<(MIN(MAX(s.tries,1),6)-1)))))
+		AND w.id NOT IN (SELECT work_id FROM ix_lowq WHERE state IN ('saved','released'))` + cond
+}
+
+// ixSampleAnswerFor is the answer an earlier check of the same Telegram file gave.
+// The file is the same, and a copy stays a copy. "Not a copy" is passed on only
+// when that check compared with the file this row is held as a copy of, or the row
+// is not held. Checks that compared nothing or failed say nothing.
+func (a *App) ixSampleAnswerFor(ctx context.Context, ident, likeKey string) (ixSampleResult, bool) {
+	if ident == "" {
+		return ixSampleResult{}, false
+	}
+	rows, err := a.db.Reader.QueryContext(ctx, `SELECT s.result, s.note, s.of_key, s.offset_s, s.samples, COALESCE(h.like_key,'')
+		FROM ix_copy_sample s LEFT JOIN ix_held h ON h.work_id=s.work_id
+		WHERE s.ident=? AND s.result IN ('confirmed','nomatch') AND s.samples>0
+		ORDER BY s.result='confirmed' DESC, s.at DESC`, ident)
+	if err != nil {
+		return ixSampleResult{}, false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		res := ixSampleResult{Why: ixSampleSameFile}
+		var like string
+		if rows.Scan(&res.Result, &res.Note, &res.Of, &res.Offset, &res.Samples, &like) != nil {
+			continue
+		}
+		if res.Result == "nomatch" {
+			if likeKey != "" && like != likeKey && res.Of != likeKey {
+				continue
+			}
+			_, _ = fmt.Sscanf(res.Note, "at most %d of", &res.Best)
+		}
+		return res, true
+	}
+	return ixSampleResult{}, false
+}
+
+// ixSampleFileWaits says whether a check of this Telegram file failed and it is
+// not time to try again (or never will be): another row of it would fail alike.
+func (a *App) ixSampleFileWaits(ctx context.Context, ident string) bool {
+	if ident == "" {
+		return false
+	}
+	var n int
+	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM ix_copy_sample WHERE ident=? AND result='failed'
+		AND (final=1 OR at >= ? - MIN(86400000, 3600000*(1<<(MIN(MAX(tries,1),6)-1))))`, ident, time.Now().UnixMilli()).Scan(&n)
+	return n > 0
+}
+
+// ixSampleReuse gives rows the answer already known for their Telegram file. It
+// reads nothing from Telegram, so it does not wait for a check's turn.
+func (a *App) ixSampleReuse(ctx context.Context, heldOnly bool) error {
+	known := map[string]bool{}
+	rows, err := a.db.Reader.QueryContext(ctx, `SELECT DISTINCT ident FROM ix_copy_sample WHERE ident<>'' AND result IN ('confirmed','nomatch') AND samples>0`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var ident string
+		if rows.Scan(&ident) == nil {
+			known[ident] = true
+		}
+	}
+	rows.Close()
+	if len(known) == 0 {
+		return nil
+	}
+	rows, err = a.db.Reader.QueryContext(ctx, `SELECT w.id, w.identity `+ixSampleDue(heldOnly)+`
+		ORDER BY w.sched_order, w.file_size DESC, w.id`, ixSampleMinSize, time.Now().UnixMilli())
+	if err != nil {
+		return err
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		var identity string
+		// The queue writes kind, id and size apart with a NUL, the checks with a colon.
+		if rows.Scan(&id, &identity) == nil && known[strings.ReplaceAll(identity, "\x00", ":")] {
+			ids = append(ids, id)
+		}
+	}
+	rows.Close()
+	done := 0
+	for _, id := range ids {
+		if done >= ixSampleReusePerRun || ctx.Err() != nil {
+			break
+		}
+		var j ixSampleJob
+		if a.db.Reader.QueryRowContext(ctx, `SELECT w.id, w.file_size, w.account_id, w.body, h.work_id IS NOT NULL, COALESCE(h.like_key,'')
+			FROM tgdl_work w LEFT JOIN ix_held h ON h.work_id=w.id AND h.released_at=0 AND h.reason<>'' WHERE w.id=?`, id).
+			Scan(&j.work, &j.size, &j.account, &j.body, &j.held, &j.likeKey) != nil {
+			continue
+		}
+		msg, ok := ixDecodeMessage(j.body)
+		if !ok {
+			continue
+		}
+		f, ok := ixCopyFactsOf(msg)
+		if !ok {
+			continue
+		}
+		f.ID = j.work
+		res, ok := a.ixSampleAnswerFor(ctx, f.Ident, j.likeKey)
+		if !ok {
+			continue
+		}
+		if err := a.ixSampleRecord(ctx, j, f, res); err != nil {
+			return err
+		}
+		done++
+	}
+	if done > 0 {
+		a.ixLog("big videos: %d took the answer of an earlier check of the same file", done)
+	}
+	return nil
+}
+
 // ixSampleRound checks a few big queued videos (heldOnly: only held ones,
 // as just before they would be let go).
 func (a *App) ixSampleRound(ctx context.Context, heldOnly bool) error {
-	if ixSampleChecksBusy(a) {
-		return nil
-	}
 	if a.ixIsGone() {
 		return nil // read-only: nothing may talk to Telegram, and that is no error
 	}
 	s := a.ixLoadSettings(ctx)
-	if !s.HoldLikely || seekbar.FFmpegPath() == "" && !ixSampleFake {
+	if !s.HoldLikely {
 		return nil
 	}
-	jobs, err := a.ixSampleJobs(ctx, heldOnly, ixSamplesPerRun)
+	if err := a.ixSampleReuse(ctx, heldOnly); err != nil {
+		return err
+	}
+	if ixSampleChecksBusy(a) {
+		return nil
+	}
+	if seekbar.FFmpegPath() == "" && !ixSampleFake {
+		return nil
+	}
+	// More rows than checks: rows of one file are passed over without a check.
+	jobs, err := a.ixSampleJobs(ctx, heldOnly, ixSamplesPerRun*8)
 	if err != nil || len(jobs) == 0 {
 		return err
 	}
+	checks := 0
 	readers := map[string]ixCopyReader{}
 	defer func() {
 		for _, r := range readers {
@@ -672,6 +833,9 @@ func (a *App) ixSampleRound(ctx context.Context, heldOnly bool) error {
 		}
 	}()
 	for _, j := range jobs {
+		if checks >= ixSamplesPerRun {
+			return nil
+		}
 		if ixSampleChecksBusy(a) {
 			return nil
 		}
@@ -687,6 +851,16 @@ func (a *App) ixSampleRound(ctx context.Context, heldOnly bool) error {
 			continue
 		}
 		f.ID = j.work
+		if res, ok := a.ixSampleAnswerFor(ctx, f.Ident, j.likeKey); ok {
+			if err := a.ixSampleRecord(ctx, j, f, res); err != nil {
+				return err
+			}
+			continue
+		}
+		if a.ixSampleFileWaits(ctx, f.Ident) {
+			continue
+		}
+		checks++
 		r := readers[j.account]
 		if r == nil {
 			if r, err = ixOpenCopyReader(a, ctx, j.account); err != nil {
@@ -720,7 +894,9 @@ func (a *App) ixSampleRecord(ctx context.Context, j ixSampleJob, f ixCopyFacts, 
 	if res.Result == "failed" {
 		how += " [" + res.Why + map[bool]string{true: ", final", false: ", tried again later"}[final] + "]"
 	}
-	a.ixLog("checked %s #%d (%d MB) from %d MB of parts: %s (%s)", f.Group, f.Msg, j.size>>20, res.Parts, how, res.Note)
+	if res.Why != ixSampleSameFile {
+		a.ixLog("checked %s #%d (%d MB) from %d MB of parts: %s (%s)", f.Group, f.Msg, j.size>>20, res.Parts, how, res.Note)
+	}
 	if j.held {
 		switch res.Result {
 		case "confirmed", "nomatch":
@@ -770,7 +946,8 @@ type ixSampleTotals struct {
 	SizeBytes int64 `json:"sizeBytes"`
 	Confirmed int64 `json:"confirmed"`
 	Failed    int64 `json:"failed"`
-	Retry     int64 `json:"retry"` // of the failed, those tried again later
+	Retry     int64 `json:"retry"`  // of the failed, those tried again later
+	Reused    int64 `json:"reused"` // answered from an earlier check of the same file (not in Checked or SizeBytes)
 	// FailedBy counts the failed by why (ixSampleWhy*; "" for checks made
 	// before the reasons were recorded).
 	FailedBy map[string]int64 `json:"failedBy"`
@@ -778,9 +955,9 @@ type ixSampleTotals struct {
 
 func (a *App) ixSampleTotalsNow(ctx context.Context) ixSampleTotals {
 	t := ixSampleTotals{FailedBy: map[string]int64{}}
-	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(parts),0), COALESCE(SUM(size),0), COALESCE(SUM(result='confirmed'),0), COALESCE(SUM(result='failed'),0),
-		COALESCE(SUM(result='failed' AND final=0),0) FROM ix_copy_sample`).
-		Scan(&t.Checked, &t.PartsMB, &t.SizeBytes, &t.Confirmed, &t.Failed, &t.Retry)
+	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COALESCE(SUM(reason<>?),0), COALESCE(SUM(parts),0), COALESCE(SUM(CASE WHEN reason<>? THEN size ELSE 0 END),0), COALESCE(SUM(result='confirmed'),0), COALESCE(SUM(result='failed'),0),
+		COALESCE(SUM(result='failed' AND final=0),0), COALESCE(SUM(reason=?),0) FROM ix_copy_sample`, ixSampleSameFile, ixSampleSameFile, ixSampleSameFile).
+		Scan(&t.Checked, &t.PartsMB, &t.SizeBytes, &t.Confirmed, &t.Failed, &t.Retry, &t.Reused)
 	if rows, err := a.db.Reader.QueryContext(ctx, `SELECT reason, COUNT(*) FROM ix_copy_sample WHERE result='failed' GROUP BY reason`); err == nil {
 		for rows.Next() {
 			var why string
