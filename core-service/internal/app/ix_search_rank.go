@@ -148,7 +148,7 @@ func (a *App) ixHybridSearch(ctx context.Context, m *ixModel, f ixFeedQuery) *ix
 	var pinned []int32
 	if mode != "looks" {
 		capt, pin := a.ixCaptionList(ctx, m, f.Q)
-		pinned = pin
+		pinned = append(pin, ixNamePins(m, f.Q)...)
 		lists = append(lists, capt)
 		for _, src := range []struct {
 			table  string
@@ -314,6 +314,42 @@ func (a *App) ixCaptionList(ctx context.Context, m *ixModel, q string) (*ixList,
 
 // ixNameList ranks files by their names: the whole name first, then names
 // starting with the words, then names holding them.
+// ixNamePins are the posts with a file named as typed, when what was typed reads as
+// a file name (a dot, an underscore, a dash or a digit): the whole name, the name
+// without its extension, or, with no space in it, the start of one. In "both" they
+// went among everything that only looks alike, at the lowest weight, and seemed
+// not found. A plain word that happens to be a file name ranks as before.
+func ixNamePins(m *ixModel, q string) []int32 {
+	needle := strings.ToLower(strings.TrimSpace(strings.ReplaceAll(q, `"`, "")))
+	if len(needle) < 3 || strings.IndexFunc(needle, func(r rune) bool {
+		return r == '.' || r == '_' || r == '-' || (r >= '0' && r <= '9')
+	}) < 0 {
+		return nil
+	}
+	nameLike := !strings.Contains(needle, " ")
+	seen := map[int32]bool{}
+	var out []int32
+	for i := range m.Items {
+		it := &m.Items[i]
+		low := strings.ToLower(it.Name)
+		if low == "" {
+			continue
+		}
+		exact := low == needle || strings.TrimSuffix(low, path.Ext(low)) == needle
+		if !exact && !(nameLike && strings.HasPrefix(low, needle)) {
+			continue
+		}
+		if p := it.Post; p >= 0 && int(p) < len(m.Posts) && !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+			if len(out) >= 200 {
+				break
+			}
+		}
+	}
+	return out
+}
+
 func ixNameList(m *ixModel, q string) *ixList {
 	l := newIxList(ixWhyName, 0.3)
 	needle := strings.ToLower(strings.TrimSpace(strings.ReplaceAll(q, `"`, "")))

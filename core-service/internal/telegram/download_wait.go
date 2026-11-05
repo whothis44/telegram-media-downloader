@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 )
 
@@ -27,12 +28,32 @@ type downloadRankKey struct{}
 type downloadRank struct {
 	key   int64
 	yield func() bool
+	room  func() bool
 }
 
 // ErrDownloadYield is returned by a transfer still waiting for its file slot
 // when better queued work exists. No bytes have moved: the queue takes the row
 // back without counting an attempt.
 var ErrDownloadYield = errors.New("download gave way to a higher-priority file")
+
+// ErrDownloadMakeRoom is ErrDownloadYield from a file over DownloadLargeFile
+// waiting for its slot while small-file slots are free and smaller files wait in
+// the queue: the worker should take one of those instead.
+var ErrDownloadMakeRoom = fmt.Errorf("%w, so that smaller files can use their free slots", ErrDownloadYield)
+
+// DownloadLargeFile is where the slots of large files begin (see downloadFiles).
+const DownloadLargeFile = downloadLargeFile
+
+// WithDownloadRoom adds to the transfer's rank: room, asked now and then while a
+// large file waits for its slot and small-file slots are free, says whether
+// smaller files wait in the queue. True gives the wait up with ErrDownloadMakeRoom.
+// Without it, every worker could be parked on large files waiting for their two
+// slots while the small-file slots stayed empty.
+func WithDownloadRoom(ctx context.Context, room func() bool) context.Context {
+	r := downloadRankOf(ctx)
+	r.room = room
+	return context.WithValue(ctx, downloadRankKey{}, r)
+}
 
 // WithDownloadRank orders this transfer's waits for file and part slots: lower
 // goes first. yield, optional, is asked now and then while the transfer waits

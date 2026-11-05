@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.18-ix.12.2] — 2026-11-05
+
+### Changed
+- **Small files use their free slots.** Files over 20 MB have two download slots per Telegram server, small files five. Workers could all be held by large files waiting for those two slots while the small-file slots stayed empty and small files waited in the queue. A large file still waiting for its slot now gives its place up when small-file slots are free and smaller files wait, and that worker takes the best of them; the large file keeps its place in the queue, and nothing counts as an attempt. Under Telegram's speed limit the bytes per hour stay about the same: more files finish, and the ranked big files share the speed.
+- **Ranked groups keep full quality.** "Save a lower quality of very large videos first" judged by size alone, as if the ranking were not there, and could have saved a ranked group's video in a lower quality and sent its original behind everything else. It now leaves files a ranked group needs alone.
+
+### Fixed
+- **Queue: finished rows that saved no file of their own open the saved one** (the same Telegram file saved for another message, or an exact re-upload of a saved file). They could not be clicked before, with no reason shown.
+- **Queue: Done and Failed list by when files finished**, not when they were queued (with the ranking, files no longer finish in queue order).
+- **Archive browser: a search that reads as a file name comes first** (with a dot, an underscore, a dash or a digit in it): files named that way, or starting so, go before everything that only looks alike. A plain word ranks as before.
+
+### Service worker
+- `VERSION = 'v34184'`
+
 ## [3.4.18-ix.12.1] — 2026-11-05
 
 ### Fixed

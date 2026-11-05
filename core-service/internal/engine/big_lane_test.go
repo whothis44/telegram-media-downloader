@@ -234,3 +234,41 @@ func TestClaimFindingNothingIsCheap(t *testing.T) {
 		t.Fatalf("claimed %+v, %v", w, err)
 	}
 }
+
+// After a large file made room, the worker takes the best smaller file in the
+// claim order, and SmallerWaiting says when there is one.
+func TestClaimSmallerTakesTheBestSmallerFile(t *testing.T) {
+	withLane(t, 0)
+	s := testStore(t)
+	ctx := context.Background()
+	const mb = int64(1) << 20
+	addOldRow(t, s, 1, 300*mb, "history", 0)
+	addOldRow(t, s, 2, 25*mb, "history", 0)
+	addOldRow(t, s, 3, 5*mb, "history", 0)
+	addOldRow(t, s, 4, 2*mb, "history", 0)
+	if _, err := s.writer.Exec(`UPDATE tgdl_work SET sched_order=CASE message_id WHEN 1 THEN 8 WHEN 2 THEN 9 WHEN 3 THEN 300 WHEN 4 THEN 200 END`); err != nil {
+		t.Fatal(err)
+	}
+	waiting, err := s.SmallerWaiting(ctx, []string{"one"}, time.Now(), true, 20*mb)
+	if err != nil || !waiting {
+		t.Fatalf("waiting %v %v", waiting, err)
+	}
+	w, err := s.ClaimSmaller(ctx, []string{"one"}, time.Now(), true, 20*mb)
+	if err != nil || w == nil || w.MessageID != 4 {
+		t.Fatalf("%+v %v, want message 4 (the better of the two small ones)", w, err)
+	}
+	w, _ = s.ClaimSmaller(ctx, []string{"one"}, time.Now(), true, 20*mb)
+	if w == nil || w.MessageID != 3 {
+		t.Fatalf("%+v, want message 3", w)
+	}
+	if waiting, _ := s.SmallerWaiting(ctx, []string{"one"}, time.Now(), true, 20*mb); waiting {
+		t.Fatal("nothing smaller is left")
+	}
+	if w, _ := s.ClaimSmaller(ctx, []string{"one"}, time.Now(), true, 20*mb); w != nil {
+		t.Fatalf("claimed %+v", w)
+	}
+	// The ordinary claim still goes by rank.
+	if w, _ := s.Claim(ctx, []string{"one"}, time.Now(), true); w == nil || w.MessageID != 1 {
+		t.Fatalf("%+v, want message 1", w)
+	}
+}

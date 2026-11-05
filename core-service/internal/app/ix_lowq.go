@@ -116,6 +116,13 @@ func (a *App) ixLowqPick(ctx context.Context, work *engine.Work, message *tg.Mes
 	if !a.ixLoadSettings(ctx).LowqFirst {
 		return message, nil
 	}
+	// A file a ranked group needs comes early in the order it goes in, and its
+	// original would go after everything else: never for those. (ixLowqShort
+	// judges by size alone, as if the ranking were not there.)
+	var order int64
+	if a.db.Reader.QueryRowContext(ctx, `SELECT sched_order FROM tgdl_work WHERE id=?`, work.ID).Scan(&order) == nil && order < engine.UnrankedOrder {
+		return message, nil
+	}
 	orig, alts, ok := telegram.AltQualities(message)
 	if !ok || len(alts) == 0 || orig.Size < ixLowqMinSize {
 		return message, nil

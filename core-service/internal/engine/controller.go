@@ -1042,6 +1042,7 @@ func (c *Controller) worker(run *running, index int) {
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
 	poll, woken := workerIdlePoll, false
+	smaller := false // the last file made room for a smaller one: take one
 	for run.ctx.Err() == nil {
 		if index >= int(run.target.Load()) {
 			// Parked by the scaler: claim nothing until the target grows.
@@ -1054,11 +1055,19 @@ func (c *Controller) worker(run *running, index int) {
 		}
 		var work *Work
 		var err error
-		if c.draining.Load() {
+		switch {
+		case c.draining.Load():
 			work, err = c.work.ClaimExpiring(run.ctx, run.unthrottled(), time.Now(), !run.observing.Load())
-		} else {
+		case smaller:
+			// The large file before gave its place up for a smaller one.
+			work, err = c.work.ClaimSmaller(run.ctx, run.unthrottled(), time.Now(), !run.observing.Load(), telegram.DownloadLargeFile)
+			if err == nil && work == nil {
+				work, err = c.work.Claim(run.ctx, run.unthrottled(), time.Now(), !run.observing.Load())
+			}
+		default:
 			work, err = c.work.Claim(run.ctx, run.unthrottled(), time.Now(), !run.observing.Load())
 		}
+		smaller = false
 		if err != nil {
 			if run.ctx.Err() == nil {
 				run.cancel(fmt.Errorf("claim work: %w", err))
@@ -1159,6 +1168,13 @@ func (c *Controller) worker(run *running, index int) {
 				better, err := c.work.Outranked(ctx, run.unthrottled(), time.Now(), key, manual)
 				return err == nil && better
 			})
+			rankedCtx = telegram.WithDownloadRoom(rankedCtx, func() bool {
+				if c.draining.Load() {
+					return false
+				}
+				waiting, err := c.work.SmallerWaiting(ctx, run.unthrottled(), time.Now(), manual, telegram.DownloadLargeFile)
+				return err == nil && waiting
+			})
 			err = c.sink(rankedCtx, work, message, trackedTransport{MediaDownloader: run.accounts[work.AccountID], stats: progress, total: &c.received, bandwidth: &c.bandwidth, budget: budget})
 		}
 		if err != nil && attemptCtx.Err() != nil {
@@ -1166,6 +1182,7 @@ func (c *Controller) worker(run *running, index int) {
 		}
 		budget.stop()
 		wasCancelled := ctx.Err() != nil
+		smaller = errors.Is(err, telegram.ErrDownloadMakeRoom)
 		if errors.Is(err, telegram.ErrDownloadYield) {
 			// Back to the queue as it was: no bytes moved, no attempt spent.
 			err, wasCancelled = nil, true

@@ -241,3 +241,51 @@ func TestPartWaitCancelledLeavesNothingBehind(t *testing.T) {
 		t.Fatalf("waiting=%d ranks=%v left behind", d.waiting, d.ranks)
 	}
 }
+
+// A large file parked on its slot makes room when small-file slots are free and
+// smaller files wait; not when those slots are taken, or when nothing smaller waits.
+func TestLargeFileWaitMakesRoomForSmallFiles(t *testing.T) {
+	old := downloadYieldEvery
+	downloadYieldEvery = 5 * time.Millisecond
+	defer func() { downloadYieldEvery = old }()
+	f := newDownloadFiles()
+	f.large, f.small = 1, 2
+	ctx := context.Background()
+	hold, _ := f.acquire(ctx, 1, downloadLargeFile)
+	defer hold()
+
+	_, err := f.acquire(WithDownloadRoom(WithDownloadRank(ctx, 5, nil), func() bool { return true }), 1, downloadLargeFile)
+	if !errors.Is(err, ErrDownloadMakeRoom) || !errors.Is(err, ErrDownloadYield) {
+		t.Fatalf("err=%v, want it to make room (a kind of giving way)", err)
+	}
+
+	// Nothing smaller waits: it keeps waiting.
+	waitCtx, cancel := context.WithTimeout(ctx, 60*time.Millisecond)
+	defer cancel()
+	if _, err := f.acquire(WithDownloadRoom(WithDownloadRank(waitCtx, 5, nil), func() bool { return false }), 1, downloadLargeFile); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err=%v, want it still waiting", err)
+	}
+
+	// The small-file slots are taken: room would help nobody.
+	s1, _ := f.acquire(ctx, 1, 1<<20)
+	s2, _ := f.acquire(ctx, 1, 1<<20)
+	defer s1()
+	defer s2()
+	asked := false
+	waitCtx2, cancel2 := context.WithTimeout(ctx, 60*time.Millisecond)
+	defer cancel2()
+	if _, err := f.acquire(WithDownloadRoom(WithDownloadRank(waitCtx2, 5, nil), func() bool { asked = true; return true }), 1, downloadLargeFile); !errors.Is(err, context.DeadlineExceeded) || asked {
+		t.Fatalf("err=%v asked=%v, want it still waiting without asking", err, asked)
+	}
+
+	// A small file never makes room.
+	f2 := newDownloadFiles()
+	f2.small = 1
+	h, _ := f2.acquire(ctx, 1, 1<<20)
+	defer h()
+	waitCtx3, cancel3 := context.WithTimeout(ctx, 60*time.Millisecond)
+	defer cancel3()
+	if _, err := f2.acquire(WithDownloadRoom(WithDownloadRank(waitCtx3, 5, nil), func() bool { return true }), 1, 1<<20); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err=%v, a small file made room", err)
+	}
+}

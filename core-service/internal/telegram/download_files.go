@@ -74,7 +74,7 @@ func (f *downloadFiles) acquire(ctx context.Context, dc int, size int64) (func()
 		}
 	}()
 	var ask <-chan time.Time
-	if rank.yield != nil {
+	if rank.yield != nil || rank.room != nil {
 		tick := time.NewTicker(downloadYieldEvery)
 		defer tick.Stop()
 		ask = tick.C
@@ -125,11 +125,27 @@ func (f *downloadFiles) acquire(ctx context.Context, dc int, size int64) (func()
 			resume()
 		case <-ask:
 			resume()
-			if rank.yield() {
+			if rank.yield != nil && rank.yield() {
 				return nil, ErrDownloadYield
+			}
+			if key.large && rank.room != nil && f.smallFree(dc) && rank.room() {
+				return nil, ErrDownloadMakeRoom
 			}
 		}
 	}
+}
+
+// smallFree says whether a small file of dc would get a slot at once: fewer
+// running and waiting than there are slots.
+func (f *downloadFiles) smallFree(dc int) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := downloadFileKey{dc: dc}
+	n := f.active[key]
+	for _, c := range f.waiting[key] {
+		n += c
+	}
+	return n < f.small
 }
 
 func (f *downloadFiles) fillStats(s *PaceStats) {

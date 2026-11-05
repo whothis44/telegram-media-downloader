@@ -879,7 +879,11 @@ function getFilteredSorted() {
             case 'filename':
                 return j.fileName || '';
             default:
-                return j.addedAt || 0;
+                // Finished rows by when they finished: files no longer finish in
+                // the order they were queued (the group ranking decides).
+                return view.filter === 'done' || view.filter === 'failed'
+                    ? j.finishedAt || j.addedAt || 0
+                    : j.addedAt || 0;
         }
     };
     out.sort((a, b) => {

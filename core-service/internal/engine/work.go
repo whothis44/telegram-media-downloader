@@ -273,6 +273,43 @@ func (s *WorkStore) Claim(ctx context.Context, accounts []string, now time.Time,
 	return s.claim(ctx, now, pick, pickArgs)
 }
 
+// smallerWhere is the claimable rows under below bytes, with their arguments.
+func smallerWhere(accounts []string, now time.Time, manualOnly bool, below int64) (string, []any) {
+	marks := strings.TrimSuffix(strings.Repeat("?,", len(accounts)), ",")
+	args := make([]any, 0, len(accounts)+2)
+	for _, id := range accounts {
+		args = append(args, id)
+	}
+	args = append(args, now.UnixMilli(), below)
+	where := `status='pending' AND paused=0 AND +account_id IN (` + marks + `) AND retry_at<=? AND file_size<?` + claimFree
+	if manualOnly {
+		where += ` AND origin<>'live'`
+	}
+	return where + ` AND (SELECT paused FROM tgdl_queue_state WHERE id=1)=0`, args
+}
+
+// ClaimSmaller claims the best row under below bytes, in the claim order. A
+// worker takes it after its large file gave up waiting for a slot to make room
+// (telegram.ErrDownloadMakeRoom).
+func (s *WorkStore) ClaimSmaller(ctx context.Context, accounts []string, now time.Time, manualOnly bool, below int64) (*Work, error) {
+	if len(accounts) == 0 {
+		return nil, nil
+	}
+	where, args := smallerWhere(accounts, now, manualOnly, below)
+	return s.claim(ctx, now, `SELECT id FROM tgdl_work WHERE `+where+` ORDER BY `+claimOrderSQL+` LIMIT 1`, args)
+}
+
+// SmallerWaiting says whether a row under below bytes could be claimed now.
+func (s *WorkStore) SmallerWaiting(ctx context.Context, accounts []string, now time.Time, manualOnly bool, below int64) (bool, error) {
+	if len(accounts) == 0 {
+		return false, nil
+	}
+	where, args := smallerWhere(accounts, now, manualOnly, below)
+	var n int
+	err := s.reader.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tgdl_work WHERE `+where+`)`, args...).Scan(&n)
+	return n > 0, err
+}
+
 // ClaimExpiring claims only self-destructing media: what may vanish goes on even
 // while an update waits for the downloads to finish.
 func (s *WorkStore) ClaimExpiring(ctx context.Context, accounts []string, now time.Time, manualOnly bool) (*Work, error) {
