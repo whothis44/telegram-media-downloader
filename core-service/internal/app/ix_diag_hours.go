@@ -104,6 +104,13 @@ func (a *App) ixDiagHours(ctx context.Context, now time.Time) []string {
 					}
 					r.pace.DCPremium[dc] += n
 				}
+				ixAddCounts(&r.pace.DCSamples, h.DCSamples)
+				ixAddCounts(&r.pace.DCInflight, h.DCInflight)
+				ixAddCounts(&r.pace.DCWaiting, h.DCWaiting)
+				ixAddCounts(&r.pace.DCWindow, h.DCWindow)
+				ixAddCounts(&r.pace.DCLarge, h.DCLarge)
+				ixAddCounts(&r.pace.DCLargeWaiting, h.DCLargeWaiting)
+				ixAddCounts(&r.pace.DCLargeLimit, h.DCLargeLimit)
 				r.pace.Waits += h.Waits
 				r.pace.Premium += h.Premium
 				r.pace.Seconds = max(r.pace.Seconds, h.Seconds)
@@ -147,6 +154,9 @@ func (a *App) ixDiagHours(ctx context.Context, now time.Time) []string {
 			if len(r.pace.DCBytes) > 0 || len(r.pace.DCPremium) > 0 {
 				line += " | per server: " + ixDCList(r.pace.DCBytes, r.pace.DCPremium)
 			}
+			if len(r.pace.DCSamples) > 0 {
+				line += " | parts per server, on average: " + ixDCLoad(r.pace)
+			}
 			if r.pace.Premium > 0 {
 				limited++
 				limitedBytes += r.pace.Bytes
@@ -185,6 +195,39 @@ func (a *App) ixDiagHours(ctx context.Context, now time.Time) []string {
 		head = append(head, fmt.Sprintf("  speed-limited hours: %d, %d MB an hour in all; per server, MB an hour: %s", limited, limitedBytes/int64(limited)>>20, ixDCList(per, nil)))
 	}
 	return append(head, out...)
+}
+
+func ixAddCounts(dst *map[int]int, src map[int]int) {
+	for k, v := range src {
+		if *dst == nil {
+			*dst = map[int]int{}
+		}
+		(*dst)[k] += v
+	}
+}
+
+// ixDCLoad is "DC4 1.2 in flight of 2.0 allowed, 3.1 waiting", by server: far
+// fewer in flight than allowed means too few parts are asked for; as many as
+// allowed with more waiting means the window holds them back.
+func ixDCLoad(h telegram.PaceHour) string {
+	dcs := make([]int, 0, len(h.DCSamples))
+	for dc := range h.DCSamples {
+		dcs = append(dcs, dc)
+	}
+	sort.Ints(dcs)
+	parts := make([]string, 0, len(dcs))
+	for _, dc := range dcs {
+		n := float64(h.DCSamples[dc])
+		if n == 0 {
+			continue
+		}
+		x := fmt.Sprintf("DC%d %.1f in flight of %.1f allowed, %.1f waiting", dc, float64(h.DCInflight[dc])/n, float64(h.DCWindow[dc])/n, float64(h.DCWaiting[dc])/n)
+		if h.DCLargeLimit[dc] > 0 {
+			x += fmt.Sprintf(" (large files %.1f of %.0f, %.1f waiting for one)", float64(h.DCLarge[dc])/n, float64(h.DCLargeLimit[dc])/n, float64(h.DCLargeWaiting[dc])/n)
+		}
+		parts = append(parts, x)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // ixDCList is "DC1 820 MB (3 limit waits), DC4 10 MB", by server number.

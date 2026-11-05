@@ -1,6 +1,10 @@
 package app
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/botnick/telegram-media-downloader/core-service/internal/telegram"
+)
 
 // ix.12.3: the report's per-server figures, by server number.
 func TestIxDCList(t *testing.T) {
@@ -14,7 +18,7 @@ func TestIxDCList(t *testing.T) {
 }
 
 // A lesser copy of a file still queued is held with no saved look-alike
-// (like_key ''). It is held all the same: a probable copy in the coverage, not
+// (like_key ”). It is held all the same: a probable copy in the coverage, not
 // a file still needed; and the group is not complete until it comes (ix.12.3).
 func TestIxLesserCopyOfAQueuedFileIsHeld(t *testing.T) {
 	a, ctx := ix8App(t, map[string]any{})
@@ -49,5 +53,14 @@ func TestIxLesserCopyOfAQueuedFileIsHeld(t *testing.T) {
 	box.mu.Unlock()
 	if togo, _ := a.ixFilesToGo(); togo[g].ToGo != 1 || togo[g].Held != 0 {
 		t.Fatalf("files to go %+v", togo[g])
+	}
+}
+
+// Parts in flight, waiting and allowed per server, as averages of the samples.
+func TestIxDCLoad(t *testing.T) {
+	h := telegram.PaceHour{DCSamples: map[int]int{4: 10, 2: 4}, DCInflight: map[int]int{4: 12, 2: 2}, DCWindow: map[int]int{4: 20, 2: 4}, DCWaiting: map[int]int{4: 31},
+		DCLarge: map[int]int{4: 20}, DCLargeWaiting: map[int]int{4: 53}, DCLargeLimit: map[int]int{4: 20}}
+	if got, want := ixDCLoad(h), "DC2 0.5 in flight of 1.0 allowed, 0.0 waiting, DC4 1.2 in flight of 2.0 allowed, 3.1 waiting (large files 2.0 of 2, 5.3 waiting for one)"; got != want {
+		t.Fatalf("%q, want %q", got, want)
 	}
 }

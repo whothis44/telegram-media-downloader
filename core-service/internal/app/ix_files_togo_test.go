@@ -17,7 +17,7 @@ func TestIxFilesToGoPerGroup(t *testing.T) {
 			{Group: "-1001", Status: "missing", Post: 0},
 			{Group: "-1001", Status: "missing", Post: 0},
 			{Group: "-1001", Status: "held", Like: "h:saved", Post: 0},
-			{Group: "-1001", Status: "held", Post: 0}, // a lesser copy of a file only queued: still to come
+			{Group: "-1001", Status: "held", Post: 0},    // a lesser copy of a file only queued: still to come
 			{Group: "-1001", Status: "missing", Post: 1}, // deleted on Telegram
 			{Group: "-1002", Status: "subst", Post: 2},
 			{Group: "-1002", Status: "ok", Post: 2},

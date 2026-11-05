@@ -513,6 +513,9 @@ func TestPacerKeepsAnHourByHourRecord(t *testing.T) {
 	if h.DCBytes[4] != h.Bytes || len(h.DCBytes) != 1 || h.DCPremium[4] != 1 {
 		t.Fatalf("per server: %v %v", h.DCBytes, h.DCPremium)
 	}
+	if h.DCSamples[4] == 0 || h.DCWindow[4] < h.DCSamples[4] {
+		t.Fatalf("per server load: samples %v windows %v", h.DCSamples, h.DCWindow)
+	}
 	// Kept across a restart.
 	p.mu.Lock()
 	p.saveHoursLocked()

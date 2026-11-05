@@ -30,6 +30,19 @@ type PaceHour struct {
 	// to tell whether the limit is per server (ix.12.3).
 	DCBytes   map[int]int64 `json:"dcBytes,omitempty"`
 	DCPremium map[int]int   `json:"dcPremium,omitempty"`
+	// Per server, sampled every interval it was in use: parts in flight,
+	// requests waiting for room, and the window, summed (DCSamples of them).
+	// Their averages say whether the window, or too few parts asked for, is
+	// what holds downloads back.
+	DCSamples  map[int]int `json:"dcSamples,omitempty"`
+	DCInflight map[int]int `json:"dcInflight,omitempty"`
+	DCWaiting  map[int]int `json:"dcWaiting,omitempty"`
+	DCWindow   map[int]int `json:"dcWindow,omitempty"`
+	// Large-file slots (files of 20 MB or more), sampled likewise: in use,
+	// files waiting for one, and how many Telegram's configuration allows.
+	DCLarge        map[int]int `json:"dcLarge,omitempty"`
+	DCLargeWaiting map[int]int `json:"dcLargeWaiting,omitempty"`
+	DCLargeLimit   map[int]int `json:"dcLargeLimit,omitempty"`
 
 	took    time.Duration
 	answers int
@@ -71,6 +84,22 @@ func (p *downloadPacer) recordHourLocked(now time.Time, secs float64) {
 		h.answers += d.answers
 		if d.bytes > 0 || d.inflight > 0 || d.waited {
 			h.winSum += d.window
+			if h.DCSamples == nil {
+				h.DCSamples, h.DCInflight, h.DCWaiting, h.DCWindow = map[int]int{}, map[int]int{}, map[int]int{}, map[int]int{}
+			}
+			h.DCSamples[d.dc]++
+			h.DCInflight[d.dc] += d.inflight
+			h.DCWaiting[d.dc] += d.waiting
+			h.DCWindow[d.dc] += d.window
+			if p.slots != nil {
+				large, waiting, limit := p.slots(d.dc)
+				if h.DCLarge == nil {
+					h.DCLarge, h.DCLargeWaiting, h.DCLargeLimit = map[int]int{}, map[int]int{}, map[int]int{}
+				}
+				h.DCLarge[d.dc] += large
+				h.DCLargeWaiting[d.dc] += waiting
+				h.DCLargeLimit[d.dc] += limit
+			}
 		}
 		full = full || d.waited
 	}
@@ -168,7 +197,10 @@ func (p *downloadPacer) hoursNewestFirst() []PaceHour {
 	out := make([]PaceHour, 0, len(p.hours))
 	for i := len(p.hours) - 1; i >= 0; i-- {
 		h := p.hours[i]
-		h.DCBytes, h.DCPremium = maps.Clone(h.DCBytes), maps.Clone(h.DCPremium) // the live hour's maps change under the lock
+		// The live hour's maps change under the lock.
+		h.DCBytes, h.DCPremium = maps.Clone(h.DCBytes), maps.Clone(h.DCPremium)
+		h.DCSamples, h.DCInflight, h.DCWaiting, h.DCWindow = maps.Clone(h.DCSamples), maps.Clone(h.DCInflight), maps.Clone(h.DCWaiting), maps.Clone(h.DCWindow)
+		h.DCLarge, h.DCLargeWaiting, h.DCLargeLimit = maps.Clone(h.DCLarge), maps.Clone(h.DCLargeWaiting), maps.Clone(h.DCLargeLimit)
 		out = append(out, h)
 	}
 	return out
