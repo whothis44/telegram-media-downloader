@@ -125,13 +125,15 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 	line("recognition services: auto start %s", on(s.MLAutoStart))
 	line("\n[account]")
 	acct := a.ixAccount()
-	line("frozen %v · deactivated %v · flood wait %v · last error %s", acct.Frozen, acct.Deactivated, acct.FloodWait, r.clean(acct.LastError))
+	// Two different things (ix.12.3 says which is which): Telegram's own freeze
+	// dates for the account, and whether recent errors were refusals because of it.
 	fz := a.ixFreeze(ctx)
 	if fz.Until > 0 {
-		line("freeze: since %s, deletion %s (%d days left)", time.Unix(fz.Since, 0).UTC().Format("2006-01-02"), time.Unix(fz.Until, 0).UTC().Format("2006-01-02"), int(time.Unix(fz.Until, 0).Sub(now).Hours()/24))
+		line("freeze: Telegram reports the account frozen since %s, deletion %s (%d days left)", time.Unix(fz.Since, 0).UTC().Format("2006-01-02"), time.Unix(fz.Until, 0).UTC().Format("2006-01-02"), int(time.Unix(fz.Until, 0).Sub(now).Hours()/24))
 	} else {
 		line("freeze: none reported (checked %s)%s", ixAgo(fz.CheckedAt, now), map[bool]string{true: " · last check failed: " + r.clean(fz.Error), false: ""}[fz.Error != ""])
 	}
+	line("recent errors: refused as frozen %v · deactivated %v · flood wait %v · last error %s (a frozen account can still read, so this stays false while nothing is refused)", acct.Frozen, acct.Deactivated, acct.FloodWait, r.clean(acct.LastError))
 	line("hold: %s", r.clean(a.ixHold(ctx)))
 	line("\n[restarts]")
 	for _, l := range a.ixRestartsDiag(now) {
