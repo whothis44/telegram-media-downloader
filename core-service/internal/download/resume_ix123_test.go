@@ -286,6 +286,9 @@ func TestStagedRecoverKeepsWhatIsWanted(t *testing.T) {
 		t.Fatal("the attempt should have failed")
 	}
 	_, path, stageDir := stageProgress(t, db)
+	if stageDir == "" || path == "" {
+		t.Fatal("no progress was kept in the staging folder")
+	}
 	part := stagedPart(stageDir, path)
 	// A partial file with no record, as a crash before any checkpoint leaves.
 	stray := filepath.Join(filepath.Dir(part), partName("other_1_00.mp4"))
