@@ -156,15 +156,32 @@ func (m *ixModel) jitem(ii int32) ixJItem {
 	}
 	if c := int(it.Cluster); c >= 0 && c < len(m.Clusters) {
 		j.Copies = len(m.Clusters[c].Items)
-		if it.Status == "held" {
-			if canon := m.Clusters[c].Canon; canon >= 0 && canon != ii && m.Items[canon].Key != "" {
-				like := m.jitem(canon)
+		// Held or not downloaded: the saved copy it is (or most likely is), so
+		// the browser can open it instead.
+		if it.Status == "held" || it.Status == "missing" {
+			if saved := m.savedCopy(int32(c), ii); saved >= 0 {
+				like := m.jitem(saved)
 				like.Like = nil
 				j.Like = &like
 			}
 		}
 	}
 	return j
+}
+
+// savedCopy: a downloaded file of duplicate set c other than ii, the set's
+// best copy when that one is saved; -1 when none is saved.
+func (m *ixModel) savedCopy(c, ii int32) int32 {
+	cl := &m.Clusters[c]
+	if canon := cl.Canon; canon >= 0 && canon != ii && m.Items[canon].Key != "" {
+		return canon
+	}
+	for _, x := range cl.Items {
+		if x != ii && m.Items[x].Key != "" {
+			return x
+		}
+	}
+	return -1
 }
 
 func (m *ixModel) jpost(pi int32) ixJPost {
@@ -242,12 +259,14 @@ func (a *App) handleIxBrowseInfo(w http.ResponseWriter, r *http.Request) {
 	building, lastErr := box.building, box.err
 	box.mu.Unlock()
 	type group struct {
-		ID       string `json:"id"`
-		Name     string `json:"name"`
-		Category string `json:"category"`
-		Posts    int    `json:"posts"`
-		Items    int    `json:"items"`
+		ID       string     `json:"id"`
+		Name     string     `json:"name"`
+		Category string     `json:"category"`
+		Posts    int        `json:"posts"`
+		Items    int        `json:"items"`
+		Topics   []ixJTopic `json:"topics,omitempty"` // forum groups only
 	}
+	topics := a.ixBrowseTopics(ctx, m)
 	counts := map[string]*group{}
 	for _, id := range m.Groups {
 		counts[id] = &group{ID: id, Name: m.GroupName[id], Category: m.GroupCat[id]}
@@ -264,6 +283,7 @@ func (a *App) handleIxBrowseInfo(w http.ResponseWriter, r *http.Request) {
 	groups := []*group{}
 	cats := map[string]bool{}
 	for _, g := range counts {
+		g.Topics = topics[g.ID]
 		groups = append(groups, g)
 		cats[g.Category] = true
 	}
@@ -305,6 +325,7 @@ func (a *App) handleIxBrowseInfo(w http.ResponseWriter, r *http.Request) {
 type ixFeedQuery struct {
 	View       string
 	Group      string
+	Topic      int // with Group: a forum topic (1 = General)
 	Category   string
 	Type       string
 	Sort       string
@@ -332,6 +353,10 @@ func ixParseFeed(r *http.Request) ixFeedQuery {
 			f.Person = append(f.Person, id)
 		}
 	}
+	// A forum topic means something within one chat only.
+	if f.Group != "" {
+		f.Topic, _ = strconv.Atoi(q.Get("topic"))
+	}
 	f.From, _ = strconv.ParseInt(q.Get("from"), 10, 64)
 	f.To, _ = strconv.ParseInt(q.Get("to"), 10, 64)
 	f.Cursor, _ = strconv.Atoi(q.Get("cursor"))
@@ -351,6 +376,11 @@ func (m *ixModel) postMatches(pi int32, f ixFeedQuery, hits map[int32]bool) bool
 		return false
 	}
 	if f.Category != "" && m.GroupCat[p.Group] != f.Category {
+		return false
+	}
+	// A forum topic: 1 is General, which also holds messages with no topic
+	// mark. A file whose message was never captured has no known topic.
+	if f.Topic > 0 && (p.Orphan || ixPostTopic(p) != f.Topic) {
 		return false
 	}
 	if f.From > 0 && p.Date < f.From || f.To > 0 && p.Date > f.To {
