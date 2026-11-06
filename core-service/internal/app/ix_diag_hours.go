@@ -105,6 +105,7 @@ func (a *App) ixDiagHours(ctx context.Context, now time.Time) []string {
 					r.pace.DCPremium[dc] += n
 				}
 				ixAddCounts(&r.pace.DCPremiumSecs, h.DCPremiumSecs)
+				ixAddCounts(&r.pace.DCWaits, h.DCWaits)
 				ixAddCounts(&r.pace.DCPremiumSame, h.DCPremiumSame)
 				ixAddCounts(&r.pace.DCSamples, h.DCSamples)
 				ixAddCounts(&r.pace.DCInflight, h.DCInflight)
@@ -166,6 +167,9 @@ func (a *App) ixDiagHours(ctx context.Context, now time.Time) []string {
 			}
 			if w := ixDCWaits(r.pace); w != "" {
 				line += " | speed-limit waits per server: " + w
+			}
+			if w := ixDCCounts(r.pace.DCWaits); w != "" {
+				line += " | plain Telegram waits per server: " + w
 			}
 			if r.pace.TriesUp+r.pace.TriesDown > 0 {
 				line += " | " + ixTriesLine(r.pace)
@@ -295,6 +299,22 @@ func ixDCWaits(h telegram.PaceHour) string {
 		parts[i] = fmt.Sprintf("DC%d %d, %.1f s asked on average, %d for the same file as the wait before", dc, n, float64(h.DCPremiumSecs[dc])/float64(n), h.DCPremiumSame[dc])
 	}
 	return strings.Join(parts, "; ")
+}
+
+// ixDCCounts is "DC1 3, DC4 1" for counts per server.
+func ixDCCounts(m map[int]int) string {
+	var dcs []int
+	for dc, n := range m {
+		if n > 0 {
+			dcs = append(dcs, dc)
+		}
+	}
+	sort.Ints(dcs)
+	parts := make([]string, len(dcs))
+	for i, dc := range dcs {
+		parts[i] = fmt.Sprintf("DC%d %d", dc, m[dc])
+	}
+	return strings.Join(parts, ", ")
 }
 
 func ixKindList(m map[string]int) string {

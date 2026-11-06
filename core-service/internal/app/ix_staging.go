@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -107,6 +108,32 @@ func (a *App) ixStagedLost(ctx context.Context, item download.Item) error {
 }
 
 func (a *App) ixRunStaging(ctx context.Context) { a.library.RunStaging(ctx) }
+
+// ixStagePlace decides where a download goes (ix.12.5). A file with progress
+// kept goes on where its bytes are: in the staging folder (it waits for room
+// as before) or in the library. A new file goes to the staging folder when
+// it has room, and straight to the library when it is full, rather than
+// wait: the moves to the library (each copied, synced and read back over
+// the network) can be slower than Telegram, and waiting held every download
+// to their pace (3 hours on 2026-11-06, with the library reachable).
+func (a *App) ixStagePlace(ctx context.Context, work *engine.Work, size int64, transport telegram.MediaDownloader) (context.Context, error) {
+	if a.library == nil {
+		return ctx, nil
+	}
+	var stageDir sql.NullString
+	err := a.db.Reader.QueryRowContext(ctx, `SELECT stage_dir FROM tgdl_part_progress WHERE group_id=? AND message_id=? AND offset>0 ORDER BY updated_at DESC LIMIT 1`, work.GroupID, work.MessageID).Scan(&stageDir)
+	switch {
+	case err == nil && stageDir.String == "":
+		return download.WithoutStaging(ctx), nil // its bytes are in the library
+	case err == nil:
+		return ctx, a.ixWaitStageRoom(ctx, size, transport) // its bytes are staged
+	}
+	if a.library.StageRoom(ctx, size) {
+		return ctx, nil
+	}
+	a.library.StageBypass()
+	return download.WithoutStaging(ctx), nil
+}
 
 // ixWaitStageRoom waits for room in the staging folder before a download;
 // the time waited does not count against the download's time limit.
@@ -250,6 +277,9 @@ func (a *App) ixTransferDiag(ctx context.Context, clean func(string) string) []s
 	if st.Full {
 		line += fmt.Sprintf(" · downloads waiting for room since %s", ixAgo(st.FullSince, time.Now()))
 	}
+	if st.Bypassed > 0 {
+		line += fmt.Sprintf(" · %d downloads went straight to the library since start because staging was full (last %s)", st.Bypassed, ixAgo(st.BypassedAt, time.Now()))
+	}
 	out = append(out, line)
 	for _, e := range st.Errors {
 		out = append(out, "  "+clean(e))
@@ -270,7 +300,7 @@ func ixStagingAlerts(st ixStagingStatus, now time.Time) []ixAlert {
 	gb := func(b int64) string { return strconv.FormatFloat(float64(b)/1e9, 'f', 1, 64) + " GB" }
 	if st.Full && st.FullSince > 0 && now.Sub(time.UnixMilli(st.FullSince)) >= ixStageFullAfter {
 		out = append(out, ixAlert{Key: "staging:full", Title: "Downloads are waiting for room in the staging folder",
-			Message: fmt.Sprintf("Files waiting to be copied to the downloads folder take the space allowed for staging (%d GB): %d file(s), %s. Downloads have waited since %s. Usually the downloads folder (the NAS) cannot be reached: check it. Raising the staging space in Settings, or freeing space on the staging disk, lets downloads go on.",
+			Message: fmt.Sprintf("Files waiting to be copied to the downloads folder take the space allowed for staging (%d GB): %d file(s), %s. Downloads have waited since %s. New files go straight to the downloads folder meanwhile; these are files whose progress is kept in the staging folder. Usually the downloads folder (the NAS) cannot be reached, or copies to it are slower than downloads: check it. Raising the staging space in Settings, or freeing space on the staging disk, lets downloads go on.",
 				st.CapGB, st.Waiting, gb(st.Bytes), time.UnixMilli(st.FullSince).Format("2006-01-02 15:04"))})
 	}
 	if st.Failing > 0 && st.FailingSince > 0 && now.Sub(time.UnixMilli(st.FailingSince)) >= ixStageFailingAfter {

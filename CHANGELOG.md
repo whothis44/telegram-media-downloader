@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.18-ix.12.6] — 2026-11-06
+
+### Fixed
+- **A full staging folder no longer holds downloads back.** Each staged file is copied to the library, synced and read back over the network; on one archive that ran at about 2 MB/s while Telegram, with its limit off, brought up to 8 MB/s. The staging folder filled, and from then on every download waited for room: for three hours, with the library reachable, at the copies' pace. Now a new download goes straight to the library while staging has no room, as before staging existed. A file whose progress is kept stays where its bytes are (staging or library), so nothing starts over. The report counts the downloads sent straight on.
+- **The privacy-safe report showed parts of file names.** A path whose file name had characters outside letters and digits (other scripts, $, &, emoji, commas) was hidden only in part, and message numbers under six digits were shown. Paths are now hidden from their start to their last extension, whatever the characters, and every message number is.
+
+### Changed
+- **At least 2 parts in flight per server at all times** (ix.12.4: only while the speed limit was on), as Telegram's own apps keep 2 MiB per server. In unlimited hours tries judged by bytes, and the cuts for plain FLOOD_WAITs (30 to 50 an hour), had held two servers at one part for hours. Fewer only within 10 minutes of a cut on that server; a try of fewer parts no longer goes below 2.
+- Diagnostics: plain Telegram waits per server, hour by hour.
+
 ## [3.4.18-ix.12.5] — 2026-11-06
 
 Copies: the held-copy design stays (probable copies wait at the back, so that when not everything can be saved the files most likely to be new come first); it now acts on evidence it used to ignore.

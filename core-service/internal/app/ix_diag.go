@@ -31,8 +31,15 @@ var (
 	// ": " (how Windows errors go on), a quote, or the end: folder names
 	// may hold spaces.
 	ixReWinPath = regexp.MustCompile(`(?i)(?:\b[A-Z]:[\\/]|\\\\)[^"'<>|\r\n]*?(?:: |["'<>|\r\n]|$)`)
-	ixReUnix    = regexp.MustCompile(`(?:^|[\s"'(=])((?:[\w.\-()\[\] ]+/)+[\w.\-()\[\] ]*\.[A-Za-z0-9]{1,5})`)
-	ixReFile    = regexp.MustCompile(`[\w\-() ]+\.(?i:jpe?g|png|gif|webp|mp4|mkv|mov|avi|webm|mp3|ogg|oga|m4a|pdf|zip|rar|7z|docx?|xlsx?|txt|apk|exe|heic|tgs)\b`)
+	// A relative path: a token with a slash, to the last extension on the
+	// line, whatever its characters (names in any script, with $, &, emoji,
+	// dots or spaces): hiding too much is safe, too little is not (ix.12.5).
+	ixReUnix = regexp.MustCompile(`(?:^|[\s"'(=])([^\s"'<>|]*/[^"'<>|\r\n]*\.[A-Za-z0-9]{1,5})(?:[\s"'),;]|$)`)
+	// A file name alone: from the last ": ", quote, slash or bracket before
+	// a media extension, spaces included.
+	ixReFile = regexp.MustCompile(`[^"'<>|/:\r\n]*?[^\s"'<>|/:]\.(?i:jpe?g|png|gif|webp|mp4|mkv|mov|avi|webm|mp3|ogg|oga|m4a|pdf|zip|rar|7z|docx?|xlsx?|txt|apk|exe|heic|tgs)\b`)
+	// A message number: every one, not only long ones.
+	ixReMsgNum  = regexp.MustCompile(`#\d+`)
 	ixReAt      = regexp.MustCompile(`@[A-Za-z][A-Za-z0-9_]{3,}`)
 	ixReEmailD  = regexp.MustCompile(`[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}`)
 	ixReLongNum = regexp.MustCompile(`\b\d{6,}\b`)
@@ -68,13 +75,23 @@ func (r *ixRedactor) clean(s string) string {
 		return "<path>" + end
 	})
 	s = ixReUnix.ReplaceAllStringFunc(s, func(m string) string {
-		lead := ""
+		lead, tail := "", ""
 		if len(m) > 0 && strings.ContainsRune(" \"'(=", rune(m[0])) {
 			lead = m[:1]
 		}
-		return lead + "<path>"
+		if n := len(m); n > 0 && strings.ContainsRune(" \"'),;\t\r\n", rune(m[n-1])) {
+			tail = m[n-1:]
+		}
+		return lead + "<path>" + tail
 	})
-	s = ixReFile.ReplaceAllString(s, "<file>")
+	s = ixReFile.ReplaceAllStringFunc(s, func(m string) string {
+		// Keep the space before the name, so words before it stay apart.
+		if t := strings.TrimLeft(m, " "); len(t) < len(m) {
+			return m[:len(m)-len(t)] + "<file>"
+		}
+		return "<file>"
+	})
+	s = ixReMsgNum.ReplaceAllString(s, "#<n>")
 	s = ixReGroupID.ReplaceAllStringFunc(s, r.group)
 	s = ixReAt.ReplaceAllString(s, "<user>")
 	s = ixReHex.ReplaceAllString(s, "<hash>")

@@ -3,6 +3,9 @@ package app
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/botnick/telegram-media-downloader/core-service/internal/download"
+	"github.com/botnick/telegram-media-downloader/core-service/internal/engine"
 )
 
 // ix.12.5: evidence the hold rules did not use. A held video whose sampled
@@ -133,5 +136,34 @@ func mustExec(t *testing.T, a *App, q string, args ...any) {
 	t.Helper()
 	if _, err := a.db.Writer.Exec(q, args...); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A file with progress kept goes on where its bytes are, so nothing is
+// downloaded twice; a new file goes to the staging folder while it has room.
+func TestIxStagePlaceKeepsAFileWhereItsBytesAre(t *testing.T) {
+	a, ctx := ixTestApp(t)
+	s := a.ixLoadSettings(ctx)
+	s.StageDir = t.TempDir()
+	if err := a.ixSaveSettings(ctx, s); err != nil {
+		t.Fatal(err)
+	}
+	place := func(group string, msg int64) bool {
+		c, err := a.ixStagePlace(ctx, &engine.Work{GroupID: group, MessageID: msg}, 1<<20, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return download.StagingSkipped(c)
+	}
+	mustExec(t, a, `INSERT INTO tgdl_part_progress(group_id,message_id,identity,path,size,offset,sha256,updated_at,stage_dir) VALUES('-1001',1,'d:1','a.mp4',100,50,'',1,'')`)
+	mustExec(t, a, `INSERT INTO tgdl_part_progress(group_id,message_id,identity,path,size,offset,sha256,updated_at,stage_dir) VALUES('-1001',2,'d:2','b.mp4',100,50,'',1,?)`, s.StageDir)
+	if !place("-1001", 1) {
+		t.Fatal("a file with its bytes in the library was sent to the staging folder")
+	}
+	if place("-1001", 2) {
+		t.Fatal("a file with its bytes staged was sent to the library")
+	}
+	if place("-1001", 3) {
+		t.Fatal("a new file skipped a staging folder with room")
 	}
 }

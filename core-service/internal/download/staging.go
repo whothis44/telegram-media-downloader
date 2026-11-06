@@ -76,13 +76,17 @@ CREATE TABLE IF NOT EXISTS tgdl_stage_followers ( -- other messages with the sam
 );`
 
 type stageState struct {
-	known     atomic.Bool // the journal exists, so files may be waiting
-	mu        sync.Mutex
-	reserved  int64 // staged downloads in progress
-	waiters   int   // downloads waiting for room now
-	fullSince int64 // when they started waiting (Unix ms), 0: none waits
-	signal    chan struct{}
-	moving    sync.Mutex // one mover at a time
+	known    atomic.Bool // the journal exists, so files may be waiting
+	mu       sync.Mutex
+	reserved int64 // staged downloads in progress
+	waiters  int   // downloads waiting for room now
+	// Downloads sent straight to the library because staging was full
+	// (ix.12.5), and when the last one went.
+	bypassed   int
+	bypassedAt int64
+	fullSince  int64 // when they started waiting (Unix ms), 0: none waits
+	signal     chan struct{}
+	moving     sync.Mutex // one mover at a time
 }
 
 // stageFreeReserve is the free space the staging disk keeps when downloads
@@ -115,7 +119,7 @@ type stageDoubt struct{ msg string }
 func (e stageDoubt) Error() string { return e.msg }
 
 func (l *Library) stagingFor(ctx context.Context, item Item) Staging {
-	if l.Staging == nil || item.NoStage {
+	if l.Staging == nil || item.NoStage || ctx.Value(noStageKey{}) != nil {
 		return Staging{}
 	}
 	st := l.Staging(ctx)
@@ -201,6 +205,38 @@ func (l *Library) stageWaiting(delta int) {
 	case l.stage.fullSince == 0:
 		l.stage.fullSince = time.Now().UnixMilli()
 	}
+}
+
+type noStageKey struct{}
+
+// WithoutStaging has the download go straight to the library, staging on or
+// not (ix.12.5: when the staging folder is full).
+func WithoutStaging(ctx context.Context) context.Context {
+	return context.WithValue(ctx, noStageKey{}, true)
+}
+
+// StagingSkipped says whether ctx sends downloads straight to the library.
+func StagingSkipped(ctx context.Context) bool { return ctx.Value(noStageKey{}) != nil }
+
+// StageRoom says whether a download of size bytes may go to the staging
+// folder now: staging is off (true: nothing to wait for), or the staged
+// files leave room (the rules of WaitStageRoom).
+func (l *Library) StageRoom(ctx context.Context, size int64) bool {
+	st := l.stagingFor(ctx, Item{})
+	if st.Dir == "" {
+		return true
+	}
+	used := l.stageUsed(ctx)
+	return used == 0 || used+size <= st.Cap || stageRoomOnDisk(st, size)
+}
+
+// StageBypass records a download sent straight to the library because the
+// staging folder was full (StagingStatus: Bypassed, BypassedAt).
+func (l *Library) StageBypass() {
+	l.stage.mu.Lock()
+	defer l.stage.mu.Unlock()
+	l.stage.bypassed++
+	l.stage.bypassedAt = time.Now().UnixMilli()
 }
 
 // WaitStageRoom waits, when staging is on and the staged files already take
@@ -1179,6 +1215,8 @@ type StagingStatus struct {
 	Stuck        int      `json:"stuck"` // need a person; their local files are kept
 	StuckBytes   int64    `json:"stuckBytes,omitempty"`
 	Full         bool     `json:"full"`                // downloads are waiting for room in the staging folder
+	Bypassed     int      `json:"bypassed"`            // downloads sent straight to the library since start: staging was full (ix.12.5)
+	BypassedAt   int64    `json:"bypassedAt"`          // the last of them (unix ms)
 	FullSince    int64    `json:"fullSince,omitempty"` // since when (Unix ms)
 	Errors       []string `json:"errors,omitempty"`
 }
@@ -1187,6 +1225,7 @@ func (l *Library) StagingStatus(ctx context.Context) StagingStatus {
 	st := StagingStatus{}
 	l.stage.mu.Lock()
 	st.Full, st.FullSince = l.stage.waiters > 0, l.stage.fullSince
+	st.Bypassed, st.BypassedAt = l.stage.bypassed, l.stage.bypassedAt
 	l.stage.mu.Unlock()
 	if !l.stage.known.Load() {
 		return st

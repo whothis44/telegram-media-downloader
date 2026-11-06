@@ -75,7 +75,7 @@ const (
 	paceInterval     = 10 * time.Second
 	paceStart        = 2   // conservative starting point for regular accounts
 	paceMin          = 1   // never fewer
-	paceLimitedFloor = 2   // while the speed limit is on: TDLib's 2 MiB per server without Premium, in 1 MiB parts
+	paceLimitedFloor = 2   // TDLib's 2 MiB per server without Premium, in 1 MiB parts: the fewest, except just after Telegram asked to wait
 	paceMax          = 8   // local regular-account ceiling, not a claimed Telegram quota
 	paceGainShare    = 0.5 // a try is kept when it brings at least half the speed it could (step/window)
 	paceCut          = 0.6
@@ -416,13 +416,6 @@ func (p *downloadPacer) tick() {
 			if d.trial != 0 {
 				d.window, d.trial = d.trialFrom, 0
 			}
-			if d.premium > 0 && d.window < paceLimitedFloor && (d.lastCut.IsZero() || now.Sub(d.lastCut) >= paceCeiling) {
-				// Telegram's own apps keep 2 MiB of parts in flight per
-				// server without Premium (TDLib's FileDownloadManager):
-				// not fewer while the speed limit is on, unless a plain
-				// FLOOD_WAIT came lately (ix.12.4).
-				d.window = paceLimitedFloor
-			}
 			d.steady, d.steadyLat = nil, nil
 			if until := now.Add(paceFloodHold); until.After(d.holdUntil) {
 				d.holdUntil = until
@@ -483,7 +476,7 @@ func (p *downloadPacer) tick() {
 			}
 			step := 0
 			switch {
-			case d.nextDown && d.window > paceMin:
+			case d.nextDown && d.window > paceLimitedFloor:
 				step = -1
 			case now.Before(d.ceilingUntil) && d.window+1 >= d.ceiling:
 				d.state = "just below Telegram's limit"
@@ -512,6 +505,16 @@ func (p *downloadPacer) tick() {
 					d.state = "trying fewer"
 				}
 			}
+		}
+		if d.trial == 0 && d.window < paceLimitedFloor && (d.lastCut.IsZero() || now.Sub(d.lastCut) >= paceCeiling) {
+			// Telegram's own apps keep 2 MiB of parts in flight per server
+			// without Premium (TDLib's FileDownloadManager), whatever the
+			// speed: not fewer here either, unless Telegram asked this server
+			// to wait lately (a cut for a plain FLOOD_WAIT, or slow answers).
+			// Below it, tries judged by bytes ratcheted servers down to one
+			// part for hours in unlimited hours (ix.12.5; ix.12.4 kept it only
+			// under the speed limit).
+			d.window = paceLimitedFloor
 		}
 		if d.window != before {
 			changed = true

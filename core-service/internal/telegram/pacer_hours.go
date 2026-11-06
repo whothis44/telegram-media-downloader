@@ -36,6 +36,8 @@ type PaceHour struct {
 	// when several files are downloading).
 	DCPremiumSecs map[int]int `json:"dcPremiumSecs,omitempty"`
 	DCPremiumSame map[int]int `json:"dcPremiumSame,omitempty"`
+	// DCWaits: plain FLOOD_WAITs on file parts, per server (ix.12.5).
+	DCWaits map[int]int `json:"dcWaits,omitempty"`
 	// Per server, sampled every interval it was in use: parts in flight,
 	// requests waiting for room, and the window, summed (DCSamples of them).
 	// Their averages say whether the window, or too few parts asked for, is
@@ -160,6 +162,10 @@ func (p *downloadPacer) hourWaitLocked(now time.Time, dc int, premium bool, aske
 		}
 	} else {
 		h.Waits++
+		if h.DCWaits == nil {
+			h.DCWaits = map[int]int{}
+		}
+		h.DCWaits[dc]++
 	}
 }
 
@@ -228,6 +234,7 @@ func (p *downloadPacer) hoursNewestFirst() []PaceHour {
 		// The live hour's maps change under the lock.
 		h.DCBytes, h.DCPremium = maps.Clone(h.DCBytes), maps.Clone(h.DCPremium)
 		h.DCPremiumSecs, h.DCPremiumSame = maps.Clone(h.DCPremiumSecs), maps.Clone(h.DCPremiumSame)
+		h.DCWaits = maps.Clone(h.DCWaits)
 		h.DCSamples, h.DCInflight, h.DCWaiting, h.DCWindow = maps.Clone(h.DCSamples), maps.Clone(h.DCInflight), maps.Clone(h.DCWaiting), maps.Clone(h.DCWindow)
 		h.DCLarge, h.DCLargeWaiting, h.DCLargeLimit = maps.Clone(h.DCLarge), maps.Clone(h.DCLargeWaiting), maps.Clone(h.DCLargeLimit)
 		out = append(out, h)

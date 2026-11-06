@@ -181,3 +181,56 @@ func TestHourRecordsAskedSecondsAndSameFile(t *testing.T) {
 		t.Fatalf("hour: %+v", h)
 	}
 }
+
+// ix.12.5: 2 parts per server at all times, not only under the speed limit;
+// fewer only within paceCeiling of a cut for Telegram's waits, and a try of
+// fewer parts never goes below 2.
+func TestTwoPartsPerServerAtAllTimes(t *testing.T) {
+	p := newDownloadPacer("")
+	clock := time.Unix(1800000000, 0)
+	p.now = func() time.Time { return clock }
+	d := p.dcLocked(2)
+	d.window = 1 // as a window learned before, kept in pace.json
+	p.release(2, 1<<20)
+	clock = clock.Add(paceInterval)
+	p.tick()
+	if d.window != paceLimitedFloor {
+		t.Fatalf("unlimited hour, window %d", d.window)
+	}
+
+	e := p.dcLocked(4)
+	e.window, e.lastCut = 1, clock.Add(-time.Minute)
+	clock = clock.Add(paceInterval)
+	p.tick()
+	if e.window != 1 {
+		t.Fatalf("raised within the wait's ceiling: %d", e.window)
+	}
+	clock = clock.Add(paceCeiling)
+	p.tick()
+	if e.window != paceLimitedFloor {
+		t.Fatalf("not raised after the ceiling: %d", e.window)
+	}
+
+	f := p.dcLocked(5)
+	f.window, f.nextDown = 2, true
+	f.steady = []float64{100, 100, 100}
+	f.waited = true
+	clock = clock.Add(paceInterval)
+	p.tick()
+	if f.trial < 0 || f.window < paceLimitedFloor {
+		t.Fatalf("tried fewer than 2: window %d trial %d", f.window, f.trial)
+	}
+}
+
+func TestHourRecordsPlainWaitsPerServer(t *testing.T) {
+	p := newDownloadPacer("")
+	clock := time.Unix(1800000000, 0)
+	p.now = func() time.Time { return clock }
+	p.flood(2, false)
+	p.flood(2, false)
+	p.flood(4, false)
+	h := p.hoursNewestFirst()[0]
+	if h.Waits != 3 || h.DCWaits[2] != 2 || h.DCWaits[4] != 1 {
+		t.Fatalf("hour %+v", h)
+	}
+}
