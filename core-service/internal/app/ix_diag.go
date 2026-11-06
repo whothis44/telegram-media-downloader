@@ -304,6 +304,7 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 	line("  ahead of held copies and set-aside files: %d files / %d MB · finishes %s at that speed", dl.AheadFiles, dl.AheadBytes>>20, dl.AheadFinishes)
 	a.ixSlotDiag(ctx, line, now)
 	fx := a.ixFixityStatus(ctx)
+	line("%s", ixLibReadsDiag())
 	line("integrity: %d files, %d checked this cycle, %d changed, %d missing, %d size differs, last %s", fx.Files, fx.Checked, fx.Changed, fx.Missing, fx.SizeOff, ixAgo(fx.LastCheck, now))
 	box := a.ixModelBox()
 	box.mu.Lock()

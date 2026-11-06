@@ -153,3 +153,14 @@ func TestIx127HourLineByServer(t *testing.T) {
 		t.Fatalf("got  %s\nwant %s", got, want)
 	}
 }
+
+// ix.12.7: library reads by the background checks, by hour.
+func TestIx127LibraryReadsByHour(t *testing.T) {
+	ixNoteLibRead(ixReadIntegrity, 3e6)
+	ixNoteLibRead(ixReadIntegrity, 2e6)
+	ixNoteLibRead(ixReadVideoIdx, 7e6)
+	s := ixLibReadsDiag()
+	if !strings.Contains(s, "integrity checks 2 files 5 MB") || !strings.Contains(s, "video fingerprints 1 files 7 MB") {
+		t.Fatalf("line: %s", s)
+	}
+}
