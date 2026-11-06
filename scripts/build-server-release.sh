@@ -29,7 +29,11 @@ for target in ${TGDL_RELEASE_TARGETS:-linux/amd64 linux/arm64 linux/arm linux/38
     archive="tgdl-server-v$version-$target_os-$target_arch.tar.gz"
     CGO_ENABLED=0 GOOS=$target_os GOARCH=$target_arch GOARM=7 \
         "$GO" -C "$MODULE" build -trimpath -ldflags '-s -w' -o "$STAGE/$executable" ./cmd/tgdl-server
-    tar -czf "$STAGE/$archive" -C "$STAGE" "$executable" -C "$PROJECT_DIR" LICENSE
+    extras=LICENSE
+    # The Windows updater replaces itself with the copy in the release (ix.12.7).
+    [ "$target_os" != windows ] || extras="LICENSE ix-update.ps1"
+    # shellcheck disable=SC2086 # extras is a list of file names
+    tar -czf "$STAGE/$archive" -C "$STAGE" "$executable" -C "$PROJECT_DIR" $extras
     mv "$STAGE/$archive" "$DIST/$archive"
     (cd "$DIST" && sha256sum "$archive") >> "$STAGE/SHA256SUMS"
     rm "$STAGE/$executable"

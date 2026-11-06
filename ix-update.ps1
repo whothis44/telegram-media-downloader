@@ -5,6 +5,10 @@
 # release (a local fix, say) stays. Each download is checked against the
 # release's SHA256SUMS before it is installed; the previous program is kept as
 # tgdl-server.exe.previous.
+# From ix.12.7 a release's Windows archive also carries this script: once the
+# new program is installed, the script replaces itself with that copy (checked
+# by the same SHA256SUMS, and only if it parses), keeping the old one as
+# ix-update.ps1.previous. It runs at start, before the app, so nothing is in use.
 $ErrorActionPreference = 'Stop'
 $Api = if ($env:TGDL_RELEASE_API) { $env:TGDL_RELEASE_API } else { 'https://api.github.com' }
 $Web = if ($env:TGDL_RELEASE_WEB) { $env:TGDL_RELEASE_WEB } else { 'https://github.com' }
@@ -97,6 +101,24 @@ try {
     if (Test-Path -LiteralPath $Bin -PathType Leaf) { Copy-Item -Force -LiteralPath $Bin -Destination "$Bin.previous" }
     Move-Item -Force -LiteralPath (Join-Path $tmp 'tgdl-server.exe') -Destination $Bin
     Write-Host "Installed tgdl-server $want."
+    # This script, from the same checked archive (older releases have none).
+    $self = $PSCommandPath
+    $newSelf = Join-Path $tmp 'ix-update.ps1'
+    try { & $tar -xzf (Join-Path $tmp $archive) -C $tmp ix-update.ps1 2>$null } catch {}
+    if ($self -and (Test-Path -LiteralPath $newSelf -PathType Leaf)) {
+        try {
+            $parseErrors = $null
+            [void][Management.Automation.Language.Parser]::ParseFile($newSelf, [ref]$null, [ref]$parseErrors)
+            if ($parseErrors) { throw 'it does not parse' }
+            if ((Get-FileHash -Algorithm SHA256 -LiteralPath $newSelf).Hash -ne (Get-FileHash -Algorithm SHA256 -LiteralPath $self).Hash) {
+                Copy-Item -Force -LiteralPath $self -Destination "$self.previous"
+                Copy-Item -Force -LiteralPath $newSelf -Destination $self
+                Write-Host "Updated ix-update.ps1 from release $want."
+            }
+        } catch {
+            Write-Warning "Kept this ix-update.ps1: the one in release $want was not used ($($_.Exception.Message))."
+        }
+    }
 } catch {
     Write-Warning "$($_.Exception.Message) Keeping version $have."
 } finally {
