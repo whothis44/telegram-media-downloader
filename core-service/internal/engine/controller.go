@@ -793,6 +793,10 @@ func (c *Controller) start(request, parent context.Context, accounts []AccountCo
 	}
 	go func() {
 		if <-startWorkers {
+			// The files a worker could take know their server before the
+			// first claim, or the first claims would go in rank order alone
+			// and could all land on one server (ix.12.4).
+			c.fillClaimableServers(ctx)
 			wg.Add(run.workers)
 			for i := 0; i < run.workers; i++ {
 				go func() { defer wg.Done(); c.worker(run, i) }()
@@ -1293,6 +1297,21 @@ func (r *running) fullServers(work *WorkStore) []int {
 	}
 	return full
 }
+
+// fillClaimableServers records the servers of the rows workers could take
+// now, before they start: about a second for a few thousand rows; at most
+// fillClaimableFor, after which the background fill carries on.
+func (c *Controller) fillClaimableServers(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(ctx, fillClaimableFor)
+	defer cancel()
+	for ctx.Err() == nil {
+		if n, err := c.work.FillServers(ctx, 500, true); err != nil || n == 0 {
+			return
+		}
+	}
+}
+
+var fillClaimableFor = 30 * time.Second
 
 // fillServers records the servers of rows queued before ix.12.4, in the
 // background, a batch at a time.

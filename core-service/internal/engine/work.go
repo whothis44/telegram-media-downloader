@@ -342,9 +342,14 @@ func (s *WorkStore) ClaimSmallerAvoiding(ctx context.Context, accounts []string,
 
 // FillServers records the server of queued rows written before ix.12.4
 // (dc 0), a batch at a time, from their stored messages; rows whose message
-// says none get -1 so they are not read again. It returns the rows done.
-func (s *WorkStore) FillServers(ctx context.Context, batch int) (int, error) {
-	rows, err := s.reader.QueryContext(ctx, `SELECT id, body FROM tgdl_work WHERE dc=0 AND status IN ('pending','processing') AND length(body)>0 LIMIT ?`, batch)
+// says none get -1 so they are not read again. claimable: only rows a worker
+// could take now (not paused). It returns the rows done.
+func (s *WorkStore) FillServers(ctx context.Context, batch int, claimable ...bool) (int, error) {
+	only := ""
+	if len(claimable) > 0 && claimable[0] {
+		only = " AND paused=0"
+	}
+	rows, err := s.reader.QueryContext(ctx, `SELECT id, body FROM tgdl_work WHERE dc=0 AND status IN ('pending','processing') AND length(body)>0`+only+` LIMIT ?`, batch)
 	if err != nil {
 		return 0, err
 	}

@@ -133,3 +133,33 @@ func TestFillServersReadsOldRows(t *testing.T) {
 		t.Fatalf("%+v %v, want the row of no known server", w, err)
 	}
 }
+
+// Before workers start, only the rows they could take are read: paused rows
+// (held copies, files set aside) wait for the background fill.
+func TestFillServersCanTakeClaimableRowsFirst(t *testing.T) {
+	withLane(t, 0)
+	s := testStore(t)
+	ctx := context.Background()
+	for i, paused := range []int{0, 1} {
+		var buf bin.Buffer
+		if err := serverMessage(i+1, 4, 1<<20).Encode(&buf); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.writer.Exec(`INSERT INTO tgdl_work(account_id,group_id,group_name,message_id,version,identity,media_type,file_name,file_size,body,status,paused,origin,created_at,updated_at)
+			VALUES('one','-1001','G',?,1,?,'video','f.mp4',1048576,?,'pending',?,'history',1,1)`, i+1, "id"+string(rune('a'+i)), buf.Buf, paused); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n, err := s.FillServers(ctx, 500, true); err != nil || n != 1 {
+		t.Fatalf("claimable fill: %d %v", n, err)
+	}
+	if serverOf(t, s, 1) != 4 || serverOf(t, s, 2) != 0 {
+		t.Fatalf("servers %d %d", serverOf(t, s, 1), serverOf(t, s, 2))
+	}
+	if n, _ := s.FillServers(ctx, 500, true); n != 0 {
+		t.Fatal("claimable rows read twice")
+	}
+	if n, _ := s.FillServers(ctx, 500); n != 1 || serverOf(t, s, 2) != 4 {
+		t.Fatal("the background fill did not take the paused row")
+	}
+}
