@@ -7,6 +7,22 @@
 # tgdl-server.exe.previous.
 $ErrorActionPreference = 'Stop'
 $Api = if ($env:TGDL_RELEASE_API) { $env:TGDL_RELEASE_API } else { 'https://api.github.com' }
+$Web = if ($env:TGDL_RELEASE_WEB) { $env:TGDL_RELEASE_WEB } else { 'https://github.com' }
+
+# The latest release's tag from the release page, which redirects to it:
+# GitHub's API allows 60 requests an hour per address without an account, and
+# that allowance is shared with everything else on the network (ix.12.7).
+function Get-LatestTag([string]$repo) {
+    $req = [Net.HttpWebRequest]::Create("$Web/$repo/releases/latest")
+    $req.Method = 'HEAD'
+    $req.AllowAutoRedirect = $false
+    $req.UserAgent = 'tgdl-ix-update'
+    $req.Timeout = 15000
+    $resp = $req.GetResponse()
+    try { $loc = [string]$resp.Headers['Location'] } finally { $resp.Close() }
+    if ($loc -match '/releases/tag/([^/?#]+)$') { return [Uri]::UnescapeDataString($Matches[1]) }
+    throw 'the release page named no release'
+}
 
 # Whether version $a is newer than $b: their numbers, in order (3.4.18-ix.11 is
 # newer than 3.4.18-ix.10.2; a local suffix such as -fix does not count).
@@ -24,13 +40,21 @@ function Test-Newer([string]$a, [string]$b) {
 $Repo = if ($env:TGDL_RELEASE_REPO) { $env:TGDL_RELEASE_REPO } else { 'whothis44/telegram-media-downloader' }
 $Bin = Join-Path $PSScriptRoot 'core-service\tgdl-server.exe'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$assets = $null
 try {
     $rel = Invoke-RestMethod -UseBasicParsing -Headers @{ 'User-Agent' = 'tgdl-ix-update' } "$Api/repos/$Repo/releases/latest"
+    $tag = [string]$rel.tag_name
+    $assets = $rel.assets
 } catch {
-    Write-Warning "Could not check for an update ($($_.Exception.Message)). Starting the installed version."
-    exit 0
+    $apiError = $_.Exception.Message
+    try {
+        $tag = Get-LatestTag $Repo
+    } catch {
+        Write-Warning "Could not check for an update ($apiError; the release page: $($_.Exception.Message)). Starting the installed version."
+        exit 0
+    }
 }
-$want = ([string]$rel.tag_name).TrimStart('v')
+$want = $tag.TrimStart('v')
 $have = ''
 if (Test-Path -LiteralPath $Bin -PathType Leaf) {
     try { $have = ((& $Bin version) -split '\s+')[1] } catch { $have = '' }
@@ -42,18 +66,25 @@ if ($have -and -not (Test-Newer $want $have)) {
 }
 $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'amd64' }
 $archive = "tgdl-server-v$want-windows-$arch.tar.gz"
-$asset = $rel.assets | Where-Object { $_.name -eq $archive } | Select-Object -First 1
-$sums = $rel.assets | Where-Object { $_.name -eq 'SHA256SUMS' } | Select-Object -First 1
-if (-not $asset -or -not $sums) {
-    Write-Warning "Release $want has no $archive. Keeping version $have."
-    exit 0
+if ($assets) {
+    $assetUrl = ($assets | Where-Object { $_.name -eq $archive } | Select-Object -First 1).browser_download_url
+    $sumsUrl = ($assets | Where-Object { $_.name -eq 'SHA256SUMS' } | Select-Object -First 1).browser_download_url
+    if (-not $assetUrl -or -not $sumsUrl) {
+        Write-Warning "Release $want has no $archive. Keeping version $have."
+        exit 0
+    }
+} else {
+    # Found through the release page: the files are at their usual addresses
+    # (a missing one fails the download below, and nothing is installed).
+    $assetUrl = "$Web/$Repo/releases/download/$tag/$archive"
+    $sumsUrl = "$Web/$Repo/releases/download/$tag/SHA256SUMS"
 }
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ([IO.Path]::GetRandomFileName())
 New-Item -ItemType Directory -Path $tmp | Out-Null
 try {
     Write-Host "Updating tgdl-server $have -> $want ..."
-    Invoke-WebRequest -UseBasicParsing -Uri $asset.browser_download_url -OutFile (Join-Path $tmp $archive)
-    Invoke-WebRequest -UseBasicParsing -Uri $sums.browser_download_url -OutFile (Join-Path $tmp 'SHA256SUMS')
+    Invoke-WebRequest -UseBasicParsing -Uri $assetUrl -OutFile (Join-Path $tmp $archive)
+    Invoke-WebRequest -UseBasicParsing -Uri $sumsUrl -OutFile (Join-Path $tmp 'SHA256SUMS')
     $line = Get-Content (Join-Path $tmp 'SHA256SUMS') | Where-Object { ($_ -split '\s+')[1] -in @($archive, "*$archive") } | Select-Object -First 1
     $expected = if ($line) { ($line -split '\s+')[0].ToLower() } else { '' }
     $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $tmp $archive)).Hash.ToLower()
