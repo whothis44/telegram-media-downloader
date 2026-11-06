@@ -637,15 +637,19 @@ func TestFTPAutomaticEncryptedMirrorResumesAfterRestart(t *testing.T) {
 func TestFTPLowRateDoesNotExpireNetworkDeadlines(t *testing.T) {
 	f := newFixtureFTP(t, "control")
 	p := f.provider()
-	p.timeout = 100 * time.Millisecond
+	// The network timeout well above what the fixture server needs to answer
+	// on a busy machine (100 ms flaked in CI, ix.12.6), and the paced upload
+	// more than six times as long: a deadline that counted pacing would
+	// expire many times over.
+	p.timeout = 400 * time.Millisecond
 	ctx := withUploadPacer(context.Background(), newUploadPacer(30))
 	start := time.Now()
-	result, err := p.Upload(ctx, "slow", strings.NewReader(strings.Repeat("x", 40)), 40, nil)
-	if err != nil || result.Bytes != 40 {
+	result, err := p.Upload(ctx, "slow", strings.NewReader(strings.Repeat("x", 75)), 75, nil)
+	if err != nil || result.Bytes != 75 {
 		t.Fatal("pacing mistaken for timeout", result, err)
 	}
-	if time.Since(start) < time.Second {
-		t.Fatal("pacing ignored")
+	if took := time.Since(start); took < 6*p.timeout {
+		t.Fatal("pacing ignored", took)
 	}
 }
 

@@ -438,7 +438,7 @@ func (i sharedInvoker) invokePart(ctx context.Context, input bin.Encoder, output
 		}
 		received := 0
 		err := i.guard.invokeFiles(ctx, i.pool, input, output, partHooks{
-			flood:    func(_ time.Duration, premium bool) { i.pacer.flood(i.dc, premium) },
+			flood:    func(d time.Duration, premium bool) { i.pacer.floodFor(i.dc, premium, d, partFileID(input)) },
 			answered: func(took time.Duration) { i.pacer.answered(i.dc, took) },
 			waited:   func(took time.Duration) { i.pacer.waited(i.dc, took) },
 			waiting:  func(on bool) { i.pacer.waitingOnTelegram(i.dc, on) },
@@ -457,6 +457,21 @@ func (i sharedInvoker) invokePart(ctx context.Context, input bin.Encoder, output
 }
 
 func (sharedInvoker) Close() error { return nil }
+
+// partFileID is the Telegram file a part request is for (0: not known).
+func partFileID(input bin.Encoder) int64 {
+	r, ok := input.(*tg.UploadGetFileRequest)
+	if !ok {
+		return 0
+	}
+	switch l := r.Location.(type) {
+	case *tg.InputDocumentFileLocation:
+		return l.ID
+	case *tg.InputPhotoFileLocation:
+		return l.ID
+	}
+	return 0
+}
 
 var (
 	connectionRetries    = 6
@@ -528,14 +543,20 @@ func downloadMedia(ctx context.Context, client downloadClient, a Attachment, w i
 		return err
 	}
 	defer pool.Close()
+	// Parts an earlier check of this file kept (ix.12.11, kept_parts.go). Not
+	// with per-chunk verification, whose reader is the library's.
+	var kept KeptParts
+	if !verify && a.Identity.Size > downloadPartSize {
+		kept = keptPartsFor(a.Identity)
+	}
 	if offset := downloadOffsetOf(ctx); offset > 0 {
 		if offset%downloadPartSize != 0 || offset >= a.Identity.Size {
 			return fmt.Errorf("invalid resume offset %d of %d", offset, a.Identity.Size)
 		}
-		return fetchParallelFrom(ctx, tg.NewClient(pool), a.Location, a.Identity.Size, offset, max(threads, 1), w)
+		return fetchParallelKept(ctx, tg.NewClient(pool), a.Location, a.Identity.Size, offset, max(threads, 1), kept, w)
 	}
-	if !verify && threads > 1 && a.Identity.Size > downloadPartSize {
-		return fetchParallel(ctx, tg.NewClient(pool), a.Location, a.Identity.Size, threads, w)
+	if !verify && (threads > 1 || kept != nil) && a.Identity.Size > downloadPartSize {
+		return fetchParallelKept(ctx, tg.NewClient(pool), a.Location, a.Identity.Size, 0, max(threads, 1), kept, w)
 	}
 	if !verify {
 		_, err = downloader.NewDownloader().WithPartSize(downloadPartSize).Download(tg.NewClient(pool), a.Location).Stream(ctx, w)

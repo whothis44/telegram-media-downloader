@@ -31,6 +31,12 @@ func (a *App) ingestTelegram(ctx context.Context, message *tg.Message, groupID, 
 	}
 	ttl := telegram.MessageTTL(message)
 	item := download.Item{GroupID: groupID, GroupName: groupName, MessageID: attachment.MessageID, Name: attachment.Name, Type: attachment.Type, Identity: attachment.Identity, Facts: attachment.Facts, TTLSeconds: ttl}
+	if engine.Origin(ctx) != "stories" {
+		// A forum topic's file goes to its topic's folder (ix_topic_dirs.go).
+		if item.Topic, err = a.ixTopicDir(ctx, groupID, telegram.MessageTopicID(message)); err != nil {
+			return download.Record{}, err
+		}
+	}
 	if engine.Origin(ctx) == "stories" {
 		item.MessageID, err = telegram.StoryKey(message.ID)
 		if err != nil {

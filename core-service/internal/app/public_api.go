@@ -57,7 +57,11 @@ type updateCheckCache struct {
 	mu        sync.Mutex
 	fetchedAt time.Time
 	data      map[string]any
+	failedAt  time.Time // the last check that could not reach GitHub
 }
+
+// updateCheckRetry: after a failed check, the next one waits this long.
+const updateCheckRetry = 2 * time.Minute
 
 var latestRelease updateCheckCache
 
@@ -143,14 +147,30 @@ func (a *App) handleAPIVersionCheck(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, out)
 	}
 	latestRelease.mu.Lock()
-	cached, at := latestRelease.data, latestRelease.fetchedAt
+	cached, at, failed := latestRelease.data, latestRelease.fetchedAt, latestRelease.failedAt
 	latestRelease.mu.Unlock()
-	if r.URL.Query().Get("force") != "1" && cached != nil && time.Since(at) < updateCheckTTL && compareSemver(current, toString(cached["latest"])) < 0 {
+	// Every answer is kept for updateCheckTTL, "no update" too (ix.12.7):
+	// GitHub allows 60 unauthenticated requests an hour per address, shared
+	// with the launcher's own check (ix-update.ps1), and each dashboard
+	// request asked again while no update existed.
+	force := r.URL.Query().Get("force") == "1"
+	if !force && cached != nil && time.Since(at) < updateCheckTTL {
 		answer(cached, map[string]any{"cached": true})
+		return
+	}
+	if !force && time.Since(failed) < updateCheckRetry {
+		if cached != nil {
+			answer(cached, map[string]any{"cached": true, "stale": true})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"current": current, "latest": nil, "updateAvailable": false, "error": "unreachable"})
 		return
 	}
 	data, err := fetchLatestRelease(r.Context())
 	if err != nil {
+		latestRelease.mu.Lock()
+		latestRelease.failedAt = time.Now()
+		latestRelease.mu.Unlock()
 		if cached != nil {
 			answer(cached, map[string]any{"cached": true, "stale": true})
 			return

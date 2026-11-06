@@ -88,7 +88,7 @@ func (c *ixCached[T]) get(ttl time.Duration, load func() (T, bool)) T {
 type ixCacheBox struct {
 	queueLeft ixCached[map[string]ixGroupLeft]
 	bigFiles  ixCached[ixBigFiles]
-	apart     ixCached[[2]int]
+	apart     ixCached[[3]int]
 	coverBase ixCached[ixCoverBase]
 }
 

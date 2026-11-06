@@ -340,3 +340,33 @@ func TestStagingRecoveryFinishesAPublishedPartAndRemovesStrays(t *testing.T) {
 		t.Fatal("not moved")
 	}
 }
+
+// ix.12.5: with the staging folder full, a download sent without staging goes
+// straight to the library instead of waiting, and the bypass is counted.
+func TestFullStagingSendsNewDownloadsStraightToTheLibrary(t *testing.T) {
+	dir, stage := t.TempDir(), t.TempDir()
+	l, _, _ := stagedLibrary(t, dir, stage)
+	l.Staging = func(context.Context) Staging { return Staging{Dir: stage, Cap: 30} }
+	noFreeSpaceKnown(t)
+	var calls atomic.Int64
+	if _, err := l.Ingest(context.Background(), stagedItem(1, "1", 20), bytesClient(&calls, bytes.Repeat([]byte("a"), 20))); err != nil {
+		t.Fatal(err)
+	}
+	if !l.StageRoom(context.Background(), 5) || l.StageRoom(context.Background(), 20) {
+		t.Fatal("room: a 5-byte file fits, a 20-byte one does not")
+	}
+	l.StageBypass()
+	rec, err := l.Ingest(WithoutStaging(context.Background()), stagedItem(2, "2", 20), bytesClient(&calls, bytes.Repeat([]byte("b"), 20)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "downloads", filepath.FromSlash(rec.Path))); err != nil {
+		t.Fatalf("not in the library: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(stage, StageFolder, filepath.FromSlash(rec.Path))); !os.IsNotExist(err) {
+		t.Fatal("it went to the staging folder too")
+	}
+	if st := l.StagingStatus(context.Background()); st.Bypassed != 1 || st.BypassedAt == 0 || st.Full {
+		t.Fatalf("status %+v", st)
+	}
+}
