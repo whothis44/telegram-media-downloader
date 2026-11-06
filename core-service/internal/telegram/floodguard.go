@@ -58,7 +58,19 @@ type floodGuard struct {
 	partsAt, premiumAt []time.Time
 	// fallbacks counts the times the fallback was taken, with why.
 	fallbacks map[string]int
+	// periods: the last fallbacks taken, for the report (ix.12.7).
+	periods []FallbackPeriod
 }
+
+// FallbackPeriod is one stretch of the shared gate: when it began, when it
+// ends (or ended), and why.
+type FallbackPeriod struct {
+	Start time.Time `json:"start"`
+	End   time.Time `json:"end"`
+	Why   string    `json:"why"`
+}
+
+const fallbackPeriodsKept = 20
 
 // A FLOOD_PREMIUM_WAIT on a file part is waited out by that request alone
 // (ix.12.4), as Telegram's own apps do (TDLib's NetQueryDelayer delays the
@@ -99,6 +111,10 @@ func (g *floodGuard) fallBackLocked(now time.Time, why string) {
 		return
 	}
 	g.sharedUntil = now.Add(premiumFallbackFor)
+	g.periods = append(g.periods, FallbackPeriod{Start: now, End: g.sharedUntil, Why: why})
+	if len(g.periods) > fallbackPeriodsKept {
+		g.periods = append([]FallbackPeriod(nil), g.periods[len(g.periods)-fallbackPeriodsKept:]...)
+	}
 	if g.fallbacks == nil {
 		g.fallbacks = map[string]int{}
 	}
@@ -120,6 +136,13 @@ func (g *floodGuard) partPremium(now time.Time) {
 	if len(g.premiumAt) >= premiumRecentMin && float64(len(g.premiumAt)) > premiumRecentRatio*float64(max(1, len(g.partsAt))) {
 		g.fallBackLocked(now, FallbackRefused)
 	}
+}
+
+// FallbackPeriods are the last fallbacks to the shared gate, oldest first.
+func (g *floodGuard) FallbackPeriods() []FallbackPeriod {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]FallbackPeriod(nil), g.periods...)
 }
 
 // PremiumMode reports how speed-limit waits are taken now: per request, or

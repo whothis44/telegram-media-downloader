@@ -60,6 +60,15 @@ type PaceHour struct {
 	TriesDown     int  `json:"triesDown,omitempty"`
 	DropsKept     int  `json:"dropsKept,omitempty"`
 	ByAnswers     bool `json:"byAnswers,omitempty"`
+	// Per server (ix.12.7): the window's cuts for a plain FLOOD_WAIT and for
+	// slow answers, tries of a bigger and a smaller window, and the
+	// intervals it was in use at the 2-part floor or below it (of DCSamples).
+	DCCutsWait  map[int]int `json:"dcCutsWait,omitempty"`
+	DCCutsSlow  map[int]int `json:"dcCutsSlow,omitempty"`
+	DCTriesUp   map[int]int `json:"dcTriesUp,omitempty"`
+	DCTriesDown map[int]int `json:"dcTriesDown,omitempty"`
+	DCAtFloor   map[int]int `json:"dcAtFloor,omitempty"`
+	DCBelow     map[int]int `json:"dcBelowFloor,omitempty"`
 
 	took    time.Duration
 	answers int
@@ -90,6 +99,8 @@ func (p *downloadPacer) recordHourLocked(now time.Time, secs float64) {
 	full := false
 	h.ByAnswers = h.ByAnswers || paceByAnswers.Load()
 	for _, d := range p.dcs {
+		addDC(&h.DCTriesUp, d.dc, d.triesUp)
+		addDC(&h.DCTriesDown, d.dc, d.triesDown)
 		h.TriesUp += d.triesUp
 		h.ClimbsRefused += d.climbsRefused
 		h.TriesDown += d.triesDown
@@ -114,6 +125,12 @@ func (p *downloadPacer) recordHourLocked(now time.Time, secs float64) {
 			h.DCInflight[d.dc] += d.inflight
 			h.DCWaiting[d.dc] += d.waiting
 			h.DCWindow[d.dc] += d.window
+			switch {
+			case d.window < paceLimitedFloor:
+				addDC(&h.DCBelow, d.dc, 1)
+			case d.window == paceLimitedFloor:
+				addDC(&h.DCAtFloor, d.dc, 1)
+			}
 			if p.slots != nil {
 				large, waiting, limit := p.slots(d.dc)
 				if h.DCLarge == nil {
@@ -133,6 +150,22 @@ func (p *downloadPacer) recordHourLocked(now time.Time, secs float64) {
 	if h.ticks%30 == 0 { // every 5 minutes
 		p.saveHoursLocked()
 	}
+}
+
+// addDC adds n to a per-server count, making the map when needed.
+func addDC(m *map[int]int, dc, n int) {
+	if n == 0 {
+		return
+	}
+	if *m == nil {
+		*m = map[int]int{}
+	}
+	(*m)[dc] += n
+}
+
+// hourCountLocked adds one to a per-server count of the hour.
+func (p *downloadPacer) hourCountLocked(now time.Time, dc int, field func(*PaceHour) *map[int]int) {
+	addDC(field(p.hourLocked(now)), dc, 1)
 }
 
 func (h *PaceHour) derive() {
@@ -237,6 +270,9 @@ func (p *downloadPacer) hoursNewestFirst() []PaceHour {
 		h.DCWaits = maps.Clone(h.DCWaits)
 		h.DCSamples, h.DCInflight, h.DCWaiting, h.DCWindow = maps.Clone(h.DCSamples), maps.Clone(h.DCInflight), maps.Clone(h.DCWaiting), maps.Clone(h.DCWindow)
 		h.DCLarge, h.DCLargeWaiting, h.DCLargeLimit = maps.Clone(h.DCLarge), maps.Clone(h.DCLargeWaiting), maps.Clone(h.DCLargeLimit)
+		h.DCCutsWait, h.DCCutsSlow = maps.Clone(h.DCCutsWait), maps.Clone(h.DCCutsSlow)
+		h.DCTriesUp, h.DCTriesDown = maps.Clone(h.DCTriesUp), maps.Clone(h.DCTriesDown)
+		h.DCAtFloor, h.DCBelow = maps.Clone(h.DCAtFloor), maps.Clone(h.DCBelow)
 		out = append(out, h)
 	}
 	return out

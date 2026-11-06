@@ -162,9 +162,10 @@ type ixPace struct {
 	Floods10m  int        `json:"floods10m"`
 	DCs        []ixPaceDC `json:"dcs"`
 	// How speed-limit waits are taken (telegram.PaceStats, ix.12.4).
-	PremiumPerRequest bool           `json:"premiumPerRequest"`
-	PremiumShared     time.Time      `json:"premiumSharedUntil,omitempty"`
-	PremiumFallbacks  map[string]int `json:"premiumFallbacks,omitempty"`
+	PremiumPerRequest bool                      `json:"premiumPerRequest"`
+	PremiumShared     time.Time                 `json:"premiumSharedUntil,omitempty"`
+	PremiumFallbacks  map[string]int            `json:"premiumFallbacks,omitempty"`
+	FallbackPeriods   []telegram.FallbackPeriod `json:"fallbackPeriods,omitempty"`
 }
 
 type ixPaceDC struct {
@@ -198,6 +199,7 @@ func (a *App) ixPaceNow() ixPace {
 		if s.PremiumShared.After(p.PremiumShared) {
 			p.PremiumShared = s.PremiumShared
 		}
+		p.FallbackPeriods = append(p.FallbackPeriods, s.FallbackPeriods...)
 		for why, n := range s.PremiumFallbacks {
 			if p.PremiumFallbacks == nil {
 				p.PremiumFallbacks = map[string]int{}

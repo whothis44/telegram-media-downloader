@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/botnick/telegram-media-downloader/core-service/internal/telegram"
 )
 
 // ix.12.7: a file not downloaded whose duplicate set has a saved copy points
@@ -138,5 +140,16 @@ func TestIx127ProcessLine(t *testing.T) {
 	}
 	if s, ok := ixProcNow(); !ok || s.cpu <= 0 {
 		t.Fatalf("no CPU time: %+v %v", s, ok)
+	}
+}
+
+// ix.12.7: the hour line's per-server part.
+func TestIx127HourLineByServer(t *testing.T) {
+	h := telegram.PaceHour{DCCutsWait: map[int]int{4: 2}, DCCutsSlow: map[int]int{4: 1}, DCTriesUp: map[int]int{2: 3},
+		DCSamples: map[int]int{2: 10, 4: 10}, DCAtFloor: map[int]int{2: 5}, DCBelow: map[int]int{4: 4}}
+	got := ixDCServerLine(h, map[int]int{2: 7, 5: 1})
+	want := "DC2 7 files, tries up 3 down 0, at the 2-part floor 50%, below it 0%; DC4 0 files, cuts 3 (wait 2, slow 1), at the 2-part floor 0%, below it 40%; DC5 1 files"
+	if got != want {
+		t.Fatalf("got  %s\nwant %s", got, want)
 	}
 }

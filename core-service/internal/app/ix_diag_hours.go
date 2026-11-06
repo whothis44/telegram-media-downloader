@@ -37,13 +37,14 @@ func ixErrKind(e string) string {
 }
 
 type ixHourRow struct {
-	files  int
-	bytes  int64
-	errs   map[string]int
-	pace   telegram.PaceHour
-	paced  bool
-	accts  int
-	winSum float64
+	dcFiles map[int]int // files finished, per server (ix.12.7)
+	files   int
+	bytes   int64
+	errs    map[string]int
+	pace    telegram.PaceHour
+	paced   bool
+	accts   int
+	winSum  float64
 }
 
 // ixDiagHours lists the last 24 hours, newest first, and a summary.
@@ -67,6 +68,17 @@ func (a *App) ixDiagHours(ctx context.Context, now time.Time) []string {
 			if q.Scan(&start, &n, &b) == nil {
 				r := row(start)
 				r.files, r.bytes = n, b
+			}
+		}
+		q.Close()
+	}
+	if q, err := a.db.Reader.QueryContext(ctx, `SELECT w.updated_at/3600000*3600, w.dc, COUNT(*) FROM tgdl_work w
+		WHERE w.status='completed' AND w.updated_at>=? AND w.dc>0 AND NOT `+ixSkippedBefore+` GROUP BY 1,2`, from.UnixMilli()); err == nil {
+		for q.Next() {
+			var start int64
+			var dc, n int
+			if q.Scan(&start, &dc, &n) == nil {
+				addDCCount(&row(start).dcFiles, dc, n)
 			}
 		}
 		q.Close()
@@ -114,6 +126,12 @@ func (a *App) ixDiagHours(ctx context.Context, now time.Time) []string {
 				ixAddCounts(&r.pace.DCLarge, h.DCLarge)
 				ixAddCounts(&r.pace.DCLargeWaiting, h.DCLargeWaiting)
 				ixAddCounts(&r.pace.DCLargeLimit, h.DCLargeLimit)
+				ixAddCounts(&r.pace.DCCutsWait, h.DCCutsWait)
+				ixAddCounts(&r.pace.DCCutsSlow, h.DCCutsSlow)
+				ixAddCounts(&r.pace.DCTriesUp, h.DCTriesUp)
+				ixAddCounts(&r.pace.DCTriesDown, h.DCTriesDown)
+				ixAddCounts(&r.pace.DCAtFloor, h.DCAtFloor)
+				ixAddCounts(&r.pace.DCBelow, h.DCBelow)
 				r.pace.Waits += h.Waits
 				r.pace.Premium += h.Premium
 				r.pace.Seconds = max(r.pace.Seconds, h.Seconds)
@@ -174,6 +192,9 @@ func (a *App) ixDiagHours(ctx context.Context, now time.Time) []string {
 			if r.pace.TriesUp+r.pace.TriesDown > 0 {
 				line += " | " + ixTriesLine(r.pace)
 			}
+			if s := ixDCServerLine(r.pace, r.dcFiles); s != "" {
+				line += " | by server: " + s
+			}
 			if r.pace.Premium > 0 {
 				limited++
 				limitedBytes += r.pace.Bytes
@@ -212,6 +233,45 @@ func (a *App) ixDiagHours(ctx context.Context, now time.Time) []string {
 		head = append(head, fmt.Sprintf("  speed-limited hours: %d, %d MB an hour in all; per server, MB an hour: %s", limited, limitedBytes/int64(limited)>>20, ixDCList(per, nil)))
 	}
 	return append(head, out...)
+}
+
+func addDCCount(m *map[int]int, dc, n int) {
+	if *m == nil {
+		*m = map[int]int{}
+	}
+	(*m)[dc] += n
+}
+
+// ixDCServerLine is each server's hour (ix.12.7): files finished, the
+// window's cuts (for a plain wait, for slow answers), tries up and down, and
+// the share of the intervals in use it spent at the 2-part floor or below.
+func ixDCServerLine(h telegram.PaceHour, files map[int]int) string {
+	seen := map[int]bool{}
+	for _, m := range []map[int]int{files, h.DCCutsWait, h.DCCutsSlow, h.DCTriesUp, h.DCTriesDown, h.DCSamples} {
+		for dc := range m {
+			seen[dc] = true
+		}
+	}
+	dcs := make([]int, 0, len(seen))
+	for dc := range seen {
+		dcs = append(dcs, dc)
+	}
+	sort.Ints(dcs)
+	var parts []string
+	for _, dc := range dcs {
+		x := fmt.Sprintf("DC%d %d files", dc, files[dc])
+		if c := h.DCCutsWait[dc] + h.DCCutsSlow[dc]; c > 0 {
+			x += fmt.Sprintf(", cuts %d (wait %d, slow %d)", c, h.DCCutsWait[dc], h.DCCutsSlow[dc])
+		}
+		if h.DCTriesUp[dc]+h.DCTriesDown[dc] > 0 {
+			x += fmt.Sprintf(", tries up %d down %d", h.DCTriesUp[dc], h.DCTriesDown[dc])
+		}
+		if n := h.DCSamples[dc]; n > 0 {
+			x += fmt.Sprintf(", at the 2-part floor %d%%, below it %d%%", 100*h.DCAtFloor[dc]/n, 100*h.DCBelow[dc]/n)
+		}
+		parts = append(parts, x)
+	}
+	return strings.Join(parts, "; ")
 }
 
 func ixAddCounts(dst *map[int]int, src map[int]int) {

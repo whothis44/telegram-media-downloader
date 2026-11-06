@@ -200,6 +200,14 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 			fb = "none"
 		}
 		line("speed-limit waits: %s · back to every file waiting, since start: %s", mode, fb)
+		if ps := d.Pace.FallbackPeriods; len(ps) > 0 {
+			sort.Slice(ps, func(i, j int) bool { return ps[i].Start.Before(ps[j].Start) })
+			var parts []string
+			for _, x := range ps[max(0, len(ps)-8):] {
+				parts = append(parts, fmt.Sprintf("%s–%s (%s)", x.Start.In(ixTZ).Format("15:04"), x.End.In(ixTZ).Format("15:04"), x.Why))
+			}
+			line("  every file waiting, the last times: %s", strings.Join(parts, " · "))
+		}
 	}
 	for _, dc := range d.Pace.DCs {
 		line("  DC%d: window %d, in flight %d, waiting %d, %.2f MB/s over 5 min (now %.2f), %.1f s a part, waits last hour %d (speed limit %d) · %s", dc.DC, dc.Window, dc.InFlight, dc.Waiting, mb(dc.Speed5m), mb(dc.Speed), dc.PartSecs, dc.Floods1h, dc.Premium1h, dc.State)

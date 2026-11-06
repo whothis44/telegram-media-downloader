@@ -400,6 +400,7 @@ func (p *downloadPacer) tick() {
 			d.holdUntil, d.lastCut = now.Add(paceFloodHold), now
 			d.state = "slowed: Telegram asked to wait"
 			d.checkAt = time.Time{}
+			p.hourCountLocked(now, d.dc, func(h *PaceHour) *map[int]int { return &h.DCCutsWait })
 			d.cutsAt = append(trimTimes(d.cutsAt, now.Add(-time.Hour)), now)
 			if len(d.cutsAt) >= paceFallbackCuts {
 				// Flooding: back to the cautious judging, under this window.
@@ -449,6 +450,7 @@ func (p *downloadPacer) tick() {
 			d.nextDown, d.steady, d.steadyLat = false, nil, nil
 			d.holdUntil, d.lastCut = now.Add(paceFloodHold), now
 			d.state = "slowed: Telegram answers slowly"
+			p.hourCountLocked(now, d.dc, func(h *PaceHour) *map[int]int { return &h.DCCutsSlow })
 		case d.trial != 0:
 			d.trialSpeeds = append(d.trialSpeeds, d.speed)
 			d.trialTook += d.took
@@ -703,13 +705,14 @@ type PaceStats struct {
 	// How speed-limit waits are taken (ix.12.4): each by its own request, or
 	// by every file at once until SharedUntil (the fallback), and the
 	// fallbacks taken since start, by why.
-	PremiumPerRequest bool           `json:"premiumPerRequest"`
-	PremiumShared     time.Time      `json:"premiumSharedUntil,omitempty"`
-	PremiumFallbacks  map[string]int `json:"premiumFallbacks,omitempty"`
-	Floods10m         int            `json:"floods10m"`
-	FloodsHour        [24]int        `json:"floodsByHour"` // [0] is the current hour
-	Hours             []PaceHour     `json:"hours"`        // the last 48 hours, newest first
-	DCs               []DCPace       `json:"dcs"`
+	PremiumPerRequest bool             `json:"premiumPerRequest"`
+	PremiumShared     time.Time        `json:"premiumSharedUntil,omitempty"`
+	PremiumFallbacks  map[string]int   `json:"premiumFallbacks,omitempty"`
+	FallbackPeriods   []FallbackPeriod `json:"fallbackPeriods,omitempty"` // the last ones (ix.12.7)
+	Floods10m         int              `json:"floods10m"`
+	FloodsHour        [24]int          `json:"floodsByHour"` // [0] is the current hour
+	Hours             []PaceHour       `json:"hours"`        // the last 48 hours, newest first
+	DCs               []DCPace         `json:"dcs"`
 }
 
 func (p *downloadPacer) stats() PaceStats {
