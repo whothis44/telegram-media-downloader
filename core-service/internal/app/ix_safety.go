@@ -63,6 +63,10 @@ type ixSettings struct {
 	// DownloadPacing lets the download pacer set how many file parts are in
 	// flight (ix.9); off goes back to how ix.8 downloaded.
 	DownloadPacing bool `json:"downloadPacing"`
+	// PaceByAnswers judges the pacer's tries by how fast Telegram answers
+	// (ix.12.3); off unless set. Off, the report still says where it would
+	// have decided otherwise.
+	PaceByAnswers bool `json:"paceByAnswers"`
 	// Big videos and the NAS (ix_lowq.go, ix_staging.go).
 	LowqFirst  bool   `json:"lowqFirst"`  // save a lower quality of very large videos first when time is short
 	LowqKeep   bool   `json:"lowqKeep"`   // keep that lower quality after the original arrives
@@ -90,6 +94,9 @@ type ixSettings struct {
 	// not downloaded (ix_previews_all.go): auto (while a deletion date is
 	// set), on, off.
 	PreviewsAll string `json:"previewsAll"`
+	// AutoUpdate starts the update's drain by itself when a newer release is
+	// out (ix_update.go). It needs a launcher that says it loops; off unless set.
+	AutoUpdate bool `json:"autoUpdate"`
 }
 
 // public is the settings as the dashboard may see them.
@@ -311,7 +318,7 @@ func ixParseSettings(body map[string]any, s ixSettings) (ixSettings, error) {
 		s.AutoRetry = v
 	}
 	for key, dst := range map[string]*bool{"fixityEnabled": &s.FixityEnabled, "substExact": &s.SubstExact, "holdLikely": &s.HoldLikely, "holdForever": &s.HoldForever,
-		"mlFaces": &s.MLFaces, "mlText": &s.MLText, "mlDupes": &s.MLDupes, "downloadPacing": &s.DownloadPacing, "mlAutoStart": &s.MLAutoStart} {
+		"mlFaces": &s.MLFaces, "mlText": &s.MLText, "mlDupes": &s.MLDupes, "downloadPacing": &s.DownloadPacing, "mlAutoStart": &s.MLAutoStart, "autoUpdate": &s.AutoUpdate, "paceByAnswers": &s.PaceByAnswers} {
 		if v, ok := body[key].(bool); ok {
 			*dst = v
 		}

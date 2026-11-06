@@ -23,6 +23,32 @@ type dialogPhotoCache struct {
 	flights map[string]*dialogPhotoFlight
 	closed  bool
 	wg      sync.WaitGroup
+	// said: when each reason a photo could not be had was last printed. The
+	// browser asks for every group's photo on each page, so the same reason
+	// came once per group per page (ix.12.4): now once an hour, with a count.
+	said   map[string]time.Time
+	unsaid map[string]int
+}
+
+// dialogPhotoSayEvery is how often one reason a profile photo is
+// unavailable is printed.
+var dialogPhotoSayEvery = time.Hour
+
+// sayUnavailable tells whether to print why a photo is unavailable now, and
+// how many times the same was not printed since.
+func (c *dialogPhotoCache) sayUnavailable(why string, now time.Time) (bool, int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.said == nil {
+		c.said, c.unsaid = map[string]time.Time{}, map[string]int{}
+	}
+	if last, ok := c.said[why]; ok && now.Sub(last) < dialogPhotoSayEvery {
+		c.unsaid[why]++
+		return false, 0
+	}
+	n := c.unsaid[why]
+	c.said[why], c.unsaid[why] = now, 0
+	return true, n
 }
 
 func (a *App) closeDialogPhotos() {

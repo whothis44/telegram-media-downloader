@@ -160,7 +160,9 @@ let maxSpeedConfig = null;
 // View state — survives across navigations to the same page.
 const view = {
     filter: 'current', // default: downloading + queued + paused
-    sort: 'addedAt', // 'addedAt' | 'size' | 'progress' | 'group' | 'filename'
+    // 'download' (the order files download in: downloading first, then what
+    // comes next) | 'addedAt' | 'size' | 'progress' | 'group' | 'filename'
+    sort: 'download',
     sortDir: 'desc',
     search: '',
     scrollTop: 0,
@@ -247,6 +249,9 @@ function bumpStatus(status, delta) {
 function upsert(entry) {
     if (!entry || !entry.key) return;
     const prev = store.get(entry.key);
+    // When it started downloading, for the download order: newest at the top
+    // of the downloading rows, so the others stay where they are.
+    if (entry.status === 'active' && !entry.startedAt && prev?.status !== 'active') entry.startedAt = Date.now();
     if (prev) {
         if (prev.status !== entry.status) {
             bumpStatus(prev.status, -1);
@@ -564,7 +569,9 @@ async function loadSnapshot() {
         maxSpeedConfig = snap.maxSpeed ?? null;
         holdCounts.archive = Number.isFinite(snap.archiveHeldCount) ? snap.archiveHeldCount : null;
         holdCounts.person = Number.isFinite(snap.personPausedCount) ? snap.personPausedCount : null;
-        for (const j of snap.active || []) upsert({ ...j });
+        // The snapshot lists the downloading rows newest first.
+        const booted = Date.now();
+        (snap.active || []).forEach((j, i) => upsert({ ...j, startedAt: booted - i }));
         for (const j of snap.queued || []) upsert({ ...j });
         for (const j of snap.recent || []) upsert({ ...j });
         view.booted = true;
@@ -867,6 +874,12 @@ function getFilteredSorted() {
         }
         out.push(job);
     }
+    if (view.sort === 'download') {
+        out.sort(downloadOrder);
+        _filteredCache = out;
+        _filteredCacheTag = tag;
+        return out;
+    }
     const dir = view.sortDir === 'asc' ? 1 : -1;
     const get = (j) => {
         switch (view.sort) {
@@ -895,6 +908,31 @@ function getFilteredSorted() {
     _filteredCache = out;
     _filteredCacheTag = tag;
     return out;
+}
+
+// The order files download in: downloading (newest started first), then the
+// queue in the server's claim order (snapshot `order`; rows heard of since go
+// after, oldest first), then paused or set-aside rows, then finished ones
+// (newest first). A row moves only when it starts or finishes.
+function downloadOrder(a, b) {
+    const band = (j) =>
+        j.status === 'active' ? 0 : j.status === 'queued' ? 1 : j.status === 'paused' ? 2 : 3;
+    const d = band(a) - band(b);
+    if (d) return d;
+    switch (band(a)) {
+        case 0:
+            // Started in the same instant: the later queued first, as before.
+            return (b.startedAt || 0) - (a.startedAt || 0) || (b.addedAt || 0) - (a.addedAt || 0);
+        case 1:
+        case 2: {
+            const ao = Number.isFinite(a.order) ? a.order : Infinity;
+            const bo = Number.isFinite(b.order) ? b.order : Infinity;
+            if (ao !== bo) return ao < bo ? -1 : 1;
+            return (a.addedAt || 0) - (b.addedAt || 0);
+        }
+        default:
+            return (b.finishedAt || b.addedAt || 0) - (a.finishedAt || a.addedAt || 0);
+    }
 }
 
 function invalidateFilterCache() {
@@ -944,7 +982,19 @@ function _chipCounts() {
     };
 }
 
+// Done and Failed list "Added time" by when files finished (ix.12.2): say so.
+// The option's own text is the i18n key's, so it is set here, after it.
+function syncSortLabel() {
+    const opt = document.querySelector('#queue-sort option[value="addedAt"]');
+    if (!opt) return;
+    const finished = view.filter === 'done' || view.filter === 'failed';
+    opt.textContent = finished
+        ? i18nT('queue.sort.finished', 'Finished time')
+        : i18nT('queue.sort.added', 'Added time');
+}
+
 function renderChips() {
+    syncSortLabel();
     const host = document.getElementById('queue-chips');
     if (!host) return;
     const lang = i18nT('queue.chip.all', 'All');
@@ -1785,7 +1835,15 @@ function renderRow(j) {
     // Paused: resume, cancel. Failed: retry, dismiss. Done: dismiss.
     const actions = [];
     if (j.status === 'active' || j.status === 'queued') {
-        actions.push(actionBtn('pause', 'ri-pause-line', i18nT('queue.action.pause', 'Pause')));
+        // A file of 8 MB or more that is downloading stops right after its next
+        // checkpoint (at most 30 s away) and carries on from there when resumed;
+        // a smaller one finishes first.
+        const atCheckpoint = j.status === 'active' && (j.fileSize || 0) >= 8 * 1024 * 1024;
+        actions.push(
+            atCheckpoint
+                ? actionBtn('pause', 'ri-pause-line', i18nT('queue.action.pause_checkpoint', 'Pause at the next checkpoint (nothing downloaded is lost)'))
+                : actionBtn('pause', 'ri-pause-line', i18nT('queue.action.pause', 'Pause')),
+        );
         actions.push(
             actionBtn(
                 'cancel',
@@ -2345,7 +2403,7 @@ function wireOnce() {
         }, 120);
     });
     document.getElementById('queue-sort')?.addEventListener('change', (e) => {
-        view.sort = e.target.value || 'addedAt';
+        view.sort = e.target.value || 'download';
         invalidateFilterCache();
         renderRows();
         const vp = document.getElementById('queue-viewport');
