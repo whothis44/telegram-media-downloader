@@ -99,7 +99,8 @@ jobs:
   ui:
     name: Browser regression checks
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Installing Chromium's system packages took 9.5 minutes from a slow mirror (2026-11-06).
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
