@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ix.12.7: a file not downloaded whose duplicate set has a saved copy points
@@ -119,5 +120,23 @@ func TestIx127DownloadStateSaysWhichWaits(t *testing.T) {
 	ixDlDecide(&st)
 	if st.Verdict != ixDlDownloading || st.Waits != "" {
 		t.Fatalf("no waits: %s %q", st.Verdict, st.Waits)
+	}
+}
+
+// ix.12.7: the [process] lines measure this process: CPU and bytes.
+func TestIx127ProcessLine(t *testing.T) {
+	ixProcRecord()
+	buf := make([]byte, 1<<20)
+	for i := 0; i < 20; i++ { // some CPU
+		for j := range buf {
+			buf[j] = byte(i + j)
+		}
+	}
+	lines := strings.Join(ixProcessDiag(time.Now()), "\n")
+	if !strings.Contains(lines, "CPU") || !strings.Contains(lines, "read") || strings.Contains(lines, "no samples yet") {
+		t.Fatalf("process lines: %s", lines)
+	}
+	if s, ok := ixProcNow(); !ok || s.cpu <= 0 {
+		t.Fatalf("no CPU time: %+v %v", s, ok)
 	}
 }

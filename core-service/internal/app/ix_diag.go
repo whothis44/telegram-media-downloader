@@ -156,6 +156,10 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 	for _, l := range a.ixRestartsDiag(now) {
 		line("%s", l)
 	}
+	line("\n[process]")
+	for _, l := range ixProcessDiag(now) {
+		line("%s", l)
+	}
 	line("\n[memory]")
 	for _, l := range ixMemoryDiag() {
 		line("%s", l)
