@@ -146,6 +146,9 @@ func (a *App) ixStart() {
 		{"staging", a.ixRunStaging},
 		{"previews", a.ixRunPreviewsAll},
 		{"group priorities", a.ixRunSched},
+		{"updates", a.ixRunUpdates},
+		{"process sampler", a.ixRunProcess}, // the report's [process] line
+		{"report file", a.ixRunReportFile},  // data/ixreports (ix.12.8)
 	} {
 		a.ixBackground(task.name, task.run)
 	}

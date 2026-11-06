@@ -16,7 +16,8 @@ func TestIxFilesToGoPerGroup(t *testing.T) {
 			{Group: "-1001", Status: "ok", Post: 0},
 			{Group: "-1001", Status: "missing", Post: 0},
 			{Group: "-1001", Status: "missing", Post: 0},
-			{Group: "-1001", Status: "held", Post: 0},
+			{Group: "-1001", Status: "held", Like: "h:saved", Post: 0},
+			{Group: "-1001", Status: "held", Post: 0},    // a lesser copy of a file only queued: still to come
 			{Group: "-1001", Status: "missing", Post: 1}, // deleted on Telegram
 			{Group: "-1002", Status: "subst", Post: 2},
 			{Group: "-1002", Status: "ok", Post: 2},
@@ -30,7 +31,7 @@ func TestIxFilesToGoPerGroup(t *testing.T) {
 	if !ok {
 		t.Fatal("not known with an index")
 	}
-	if g := got["-1001"]; g.ToGo != 2 || g.Held != 1 {
+	if g := got["-1001"]; g.ToGo != 3 || g.Held != 1 {
 		t.Fatalf("-1001: %+v", g)
 	}
 	if g := got["-1002"]; g.ToGo != 0 || g.Held != 0 {

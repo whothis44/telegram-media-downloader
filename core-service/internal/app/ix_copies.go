@@ -88,7 +88,10 @@ func ixEnsureCopiesSchema(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	// Checks made before the reasons were recorded are tried again.
-	return ixAddColumns(ctx, db, "ix_copy_sample", [][2]string{{"reason", "TEXT NOT NULL DEFAULT ''"}, {"final", "INTEGER NOT NULL DEFAULT 0"}})
+	// frames, dur_ms (ix.12.10): the sampled frames of a check and the video's
+	// length, to compare again when more saved videos have fingerprints.
+	return ixAddColumns(ctx, db, "ix_copy_sample", [][2]string{{"reason", "TEXT NOT NULL DEFAULT ''"}, {"final", "INTEGER NOT NULL DEFAULT 0"},
+		{"frames", "BLOB"}, {"dur_ms", "INTEGER NOT NULL DEFAULT 0"}})
 }
 
 // ixParseCopySettings reads the copy settings sent by the dashboard.
@@ -582,7 +585,7 @@ func (a *App) ixCopiesDiag(ctx context.Context) []string {
 	c := a.ixCopiesMeasure(ctx)
 	mb := func(n int64) int64 { return n >> 20 }
 	q, k := c.Queue, c.Known
-	out := []string{fmt.Sprintf("  queue: %d files / %d MB · same Telegram file as one saved or queued %d / %d MB · held %d / %d MB (copies of saved %d, lesser copies of queued %d, by recognition %d, confirmed %d / %d MB)",
+	out := []string{fmt.Sprintf("  queue: %d files / %d MB · same Telegram file as one saved or queued %d / %d MB · held %d / %d MB (copies of saved %d, lesser copies of queued %d, by recognition %d, matched by sampled frames %d / %d MB)",
 		q.All.Files, mb(q.All.Bytes), q.Same.Files, mb(q.Same.Bytes), q.Held.Files, mb(q.Held.Bytes), q.VsSaved.Files, q.VsQueued.Files, q.Recog.Files, q.Confirmed.Files, mb(q.Confirmed.Bytes))}
 	if k.Measured {
 		out = append(out, fmt.Sprintf("  seen in messages, not downloaded: %d files / %d MB · same Telegram file as another %d / %d MB · held %d / %d MB · probable copies by the video checks %d / %d MB",
@@ -595,8 +598,9 @@ func (a *App) ixCopiesDiag(ctx context.Context) []string {
 	if s.Failed > 0 {
 		failed = fmt.Sprintf(" (%s; %d to try again later)", s.failedText(), s.Retry)
 	}
-	out = append(out, fmt.Sprintf("  big videos sampled: checked %d big videos using %d MB instead of %.1f GB (%d more took the answer for the same file); %d confirmed copies; %d could not be checked%s · previews kept %d · likeness threshold %.3f",
+	out = append(out, fmt.Sprintf("  big videos sampled: checked %d big videos using %d MB instead of %.1f GB (%d more took the answer for the same file); %d matched by sampled frames; %d could not be checked%s · previews kept %d · likeness threshold %.3f",
 		s.Checked, s.PartsMB, float64(s.SizeBytes)/(1<<30), s.Reused, s.Confirmed, s.Failed, failed, c.Previews, c.Threshold))
+	out = append(out, a.ixSampleRateDiag(ctx))
 	out = append(out, a.ixPreviewAllDiag(ctx))
 	return out
 }
