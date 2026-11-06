@@ -272,6 +272,7 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 	line("deadline order %s (active %v) · queued %d files / %d MB · speed %.1f MB/h (day), %.1f MB/h (3 h), %.1f MB/h (hour) · estimate at %s speed (%.1f MB/h%s) · finishes %s · set aside by band %v · groups not fully read %d",
 		dl.Mode, dl.Active, dl.LeftFiles, dl.LeftBytes>>20, dl.Rate24h*3600/1e6, dl.Rate3h*3600/1e6, dl.Rate1h*3600/1e6,
 		map[string]string{"day": "the day's", "3h": "the last 3 h"}[dl.RateUsed], dl.Rate*3600/1e6, limit, dl.Finishes, dl.Deferred, dl.Unscanned)
+	line("  ahead of held copies and set-aside files: %d files / %d MB · finishes %s at that speed", dl.AheadFiles, dl.AheadBytes>>20, dl.AheadFinishes)
 	fx := a.ixFixityStatus(ctx)
 	line("integrity: %d files, %d checked this cycle, %d changed, %d missing, %d size differs, last %s", fx.Files, fx.Checked, fx.Changed, fx.Missing, fx.SizeOff, ixAgo(fx.LastCheck, now))
 	box := a.ixModelBox()

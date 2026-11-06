@@ -75,6 +75,7 @@ MOVED = [
     ('substExact', 'data-set', 'duplicates'),
     ('holdLikely', 'data-set', 'duplicates'),
     ('holdForever', 'data-set', 'duplicates'),
+    ('sampleBig', 'data-set', 'duplicates'),
     ('skipConfirmed', 'data-set', 'duplicates'),
     ('copyThumbs', 'data-set', 'duplicates'),
     ('previewsAll', 'data-set-select', 'duplicates'),
@@ -127,6 +128,7 @@ with sync_playwright() as p:
     assert save_in('settings', 'autoRetry', 'data-set', lambda e: e.uncheck())['autoRetry'] is False
     assert save_in('duplicates', 'holdLikely', 'data-set', lambda e: e.uncheck())['holdLikely'] is False
     assert save_in('duplicates', 'skipConfirmed', 'data-set', lambda e: e.uncheck())['skipConfirmed'] is False
+    assert save_in('duplicates', 'sampleBig', 'data-set', lambda e: e.uncheck())['sampleBig'] is False
     assert save_in('overview', 'fixityEnabled', 'data-set', lambda e: e.uncheck())['fixityEnabled'] is False
 
     # A change not saved yet survives the redraws (Overview and Rescan redraw every few seconds).

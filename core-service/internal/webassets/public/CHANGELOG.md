@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.18-ix.12.5] — 2026-11-06
+
+Copies: the held-copy design stays (probable copies wait at the back, so that when not everything can be saved the files most likely to be new come first); it now acts on evidence it used to ignore.
+
+### Changed
+- **A held video whose sampled frames match no saved video goes back to its place.** Big videos are held at the back on look-alike evidence (as long, as large, the same preview as a saved video). When the frames sampled across one match none of the saved video's (at most 2 of 8), that evidence is outweighed and it downloads in its normal place. On one archive: 90 videos, 82 GB, 52 of them from ranked groups. A partial match (3 or 4 of 8: part of the footage is the same) stays at the back, now as a partial match: it counts as still needed, not as a probable copy, and "…until I release them" does not keep it. A check that failed or timed out changes nothing.
+- **Holds with no record of why go back to their place.** Holds made by versions before reasons were kept (474 files, 35 GB on one archive) are forgotten; the checks see them as new files, and hold them again, with a reason, only if they find a look-alike.
+- **One sampled check in three goes to a held video** (ranked groups first, then the largest); the others go to the queue in download order, where a match spares a download at once. The number of checks is the same.
+- **Two switches:** "Hold probable copies at the back" and "Check big videos by sampling" (before, holding switched sampling too). A setting saved before follows holding until it is changed. With holding off, sampled matches are counted and nothing moves.
+- Wording: a sampled match reads "matched by sampled frames" (it is probable, not proven) instead of "confirmed".
+
+### Added
+- Diagnostics and the finish estimate: the files ahead of held copies and set-aside files, and whether they finish before the deadline at the speed used.
+
 ## [3.4.18-ix.12.4] — 2026-11-05
 
 ### Changed

@@ -44,15 +44,18 @@ type ixSettings struct {
 	SubstExact    bool   `json:"substExact"`    // same-size re-uploads: check bytes on Telegram instead of downloading
 	HoldLikely    bool   `json:"holdLikely"`    // probable copies wait until nothing else is queued
 	HoldForever   bool   `json:"holdForever"`   // ...and are never released automatically
-	MLURL         string `json:"mlUrl"`         // image recognition (Immich machine learning); empty: off
-	MLModel       string `json:"mlModel"`       // its model; empty: ixMLDefaultModel
-	MLFaces       bool   `json:"mlFaces"`       // find faces and group them into people (off unless turned on)
-	MLTextModel   string `json:"mlTextModel"`   // text-reading model (by script); empty: ixOCRDefaultModel
-	MLText        bool   `json:"mlText"`        // read text in pictures
-	MLDupes       bool   `json:"mlDupes"`       // near-identical pictures by recognition go to review
-	MLThings      string `json:"mlThings"`      // subjects to tag, one per line; empty: ixDefaultThings
-	STTURL        string `json:"sttUrl"`        // speech to text (an OpenAI-compatible Whisper server); empty: off
-	STTModel      string `json:"sttModel"`      // its model; empty: ixSTTDefaultModel
+	// SampleBig: big queued videos are checked by sampled frames (ix.12.5;
+	// before, holdLikely switched this too). Unset: as holdLikely.
+	SampleBig   *bool  `json:"sampleBig,omitempty"`
+	MLURL       string `json:"mlUrl"`       // image recognition (Immich machine learning); empty: off
+	MLModel     string `json:"mlModel"`     // its model; empty: ixMLDefaultModel
+	MLFaces     bool   `json:"mlFaces"`     // find faces and group them into people (off unless turned on)
+	MLTextModel string `json:"mlTextModel"` // text-reading model (by script); empty: ixOCRDefaultModel
+	MLText      bool   `json:"mlText"`      // read text in pictures
+	MLDupes     bool   `json:"mlDupes"`     // near-identical pictures by recognition go to review
+	MLThings    string `json:"mlThings"`    // subjects to tag, one per line; empty: ixDefaultThings
+	STTURL      string `json:"sttUrl"`      // speech to text (an OpenAI-compatible Whisper server); empty: off
+	STTModel    string `json:"sttModel"`    // its model; empty: ixSTTDefaultModel
 	// The Docker containers of the two services (see ix_docker.go), and
 	// whether the archive starts them when it starts.
 	MLContainer   string `json:"mlContainer"`
@@ -303,8 +306,19 @@ func (a *App) ixHold(ctx context.Context) string {
 	return ""
 }
 
+// SampleBigOn: big queued videos are checked by sampled frames.
+func (s ixSettings) SampleBigOn() bool {
+	if s.SampleBig != nil {
+		return *s.SampleBig
+	}
+	return s.HoldLikely
+}
+
 func ixParseSettings(body map[string]any, s ixSettings) (ixSettings, error) {
 	s = ixParseBackupSettings(body, s)
+	if v, ok := body["sampleBig"].(bool); ok {
+		s.SampleBig = &v
+	}
 	if v, ok := body["exportEnabled"].(bool); ok {
 		s.ExportEnabled = v
 	}
