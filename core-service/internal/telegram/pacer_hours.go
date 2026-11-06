@@ -43,6 +43,15 @@ type PaceHour struct {
 	DCLarge        map[int]int `json:"dcLarge,omitempty"`
 	DCLargeWaiting map[int]int `json:"dcLargeWaiting,omitempty"`
 	DCLargeLimit   map[int]int `json:"dcLargeLimit,omitempty"`
+	// Tries of a bigger or smaller window with answer times known, and where
+	// judging by answer time would have decided otherwise than by bytes: a
+	// climb bytes refused (speed perhaps missed), a drop bytes kept (the
+	// window perhaps drifting down). ByAnswers: the hour was judged by answer time.
+	TriesUp       int  `json:"triesUp,omitempty"`
+	ClimbsRefused int  `json:"climbsRefused,omitempty"`
+	TriesDown     int  `json:"triesDown,omitempty"`
+	DropsKept     int  `json:"dropsKept,omitempty"`
+	ByAnswers     bool `json:"byAnswers,omitempty"`
 
 	took    time.Duration
 	answers int
@@ -71,7 +80,13 @@ func (p *downloadPacer) recordHourLocked(now time.Time, secs float64) {
 	h.Seconds += int(secs)
 	h.ticks++
 	full := false
+	h.ByAnswers = h.ByAnswers || paceByAnswers.Load()
 	for _, d := range p.dcs {
+		h.TriesUp += d.triesUp
+		h.ClimbsRefused += d.climbsRefused
+		h.TriesDown += d.triesDown
+		h.DropsKept += d.dropsKept
+		d.triesUp, d.climbsRefused, d.triesDown, d.dropsKept = 0, 0, 0, 0
 		h.Bytes += d.bytes
 		if d.bytes > 0 {
 			if h.DCBytes == nil {

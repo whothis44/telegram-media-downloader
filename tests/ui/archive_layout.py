@@ -71,6 +71,7 @@ MOVED = [
     ('stageDir', 'data-set-text', 'settings'),
     ('stageCapGb', 'data-set-text', 'settings'),
     ('autoUpdate', 'data-set', 'settings'),
+    ('paceByAnswers', 'data-set', 'settings'),
     ('substExact', 'data-set', 'duplicates'),
     ('holdLikely', 'data-set', 'duplicates'),
     ('holdForever', 'data-set', 'duplicates'),

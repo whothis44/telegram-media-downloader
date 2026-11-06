@@ -117,6 +117,11 @@ func (a *App) ixDiagHours(ctx context.Context, now time.Time) []string {
 				r.winSum += h.Window
 				// Seconds per part and the full share: the slowest account's.
 				r.pace.PartSecs = max(r.pace.PartSecs, h.PartSecs)
+				r.pace.TriesUp += h.TriesUp
+				r.pace.ClimbsRefused += h.ClimbsRefused
+				r.pace.TriesDown += h.TriesDown
+				r.pace.DropsKept += h.DropsKept
+				r.pace.ByAnswers = r.pace.ByAnswers || h.ByAnswers
 				r.pace.FullShare = max(r.pace.FullShare, h.FullShare)
 			}
 		}
@@ -156,6 +161,9 @@ func (a *App) ixDiagHours(ctx context.Context, now time.Time) []string {
 			}
 			if len(r.pace.DCSamples) > 0 {
 				line += " | parts per server, on average: " + ixDCLoad(r.pace)
+			}
+			if r.pace.TriesUp+r.pace.TriesDown > 0 {
+				line += " | " + ixTriesLine(r.pace)
 			}
 			if r.pace.Premium > 0 {
 				limited++
@@ -204,6 +212,17 @@ func ixAddCounts(dst *map[int]int, src map[int]int) {
 		}
 		(*dst)[k] += v
 	}
+}
+
+// ixTriesLine says how the pacer's tries were judged, and where judging by
+// answer time would have decided otherwise than by bytes: the evidence for
+// switching it on (Settings → Downloads) or leaving it off.
+func ixTriesLine(h telegram.PaceHour) string {
+	by := "bytes"
+	if h.ByAnswers {
+		by = "answer time"
+	}
+	return fmt.Sprintf("tries judged by %s: %d bigger (answer time would have kept %d that bytes refused), %d smaller (bytes kept %d that answer time would have refused)", by, h.TriesUp, h.ClimbsRefused, h.TriesDown, h.DropsKept)
 }
 
 // ixDCLoad is "DC4 1.2 in flight of 2.0 allowed, 3.1 waiting", by server: far

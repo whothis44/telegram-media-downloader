@@ -43,6 +43,11 @@ import (
 //     that noise, tries of fewer parts were kept and windows drifted down to
 //     one part on most datacenters, where unlimited hours brought a third of
 //     what they had;
+//   - judging by answer time is off unless switched on (SetPaceByAnswers):
+//     off, every try is judged by bytes as before, and the hour-by-hour record
+//     counts where answer time would have decided otherwise (a climb bytes
+//     refused, a drop bytes kept), so that the numbers decide whether to
+//     switch it on;
 //   - judging by answer time has fallbacks, per datacenter, because a pacer
 //     that climbs too readily floods Telegram. Two cuts for Telegram's waits
 //     within an hour send it back to judging by bytes for two hours, under
@@ -92,6 +97,16 @@ const (
 
 var pacingOff atomic.Bool
 
+// paceByAnswers: tries are judged by answer time (off: by bytes, as before
+// ix.12.3; the record still counts where the two disagree).
+var paceByAnswers atomic.Bool
+
+// SetPaceByAnswers switches judging tries by answer time on or off.
+func SetPaceByAnswers(on bool) { paceByAnswers.Store(on) }
+
+// PaceByAnswers reports whether tries are judged by answer time.
+func PaceByAnswers() bool { return paceByAnswers.Load() }
+
 // SetPacing switches the download pacer on or off for every account.
 func SetPacing(on bool) { pacingOff.Store(!on) }
 
@@ -123,24 +138,27 @@ type dcPace struct {
 	trialTook    time.Duration
 	trialAns     int
 	// Fallbacks (see the notes at the top).
-	bytesUntil   time.Time   // judged by bytes until then
-	cutsAt       []time.Time // cuts for Telegram's waits, the last hour
-	checkAt      time.Time   // when to check a climb answer time kept (zero: none)
-	checkFrom    int         // the window the climb began at
-	checkBase    float64     // the speed before it
-	trial        int         // the step being tried (negative: fewer parts), 0 when none
-	trialFrom    int
-	trialBase    float64
-	trialLeft    int
-	trialSpeeds  []float64
-	trialFull    bool
-	nextDown     bool // the last bigger window brought nothing: try a smaller one next
-	holdUntil    time.Time
-	lastCut      time.Time
-	ceiling      int // the window a flood happened at
-	ceilingUntil time.Time
-	fullAt       time.Time // the last interval downloads waited for room
-	state        string
+	bytesUntil time.Time   // judged by bytes until then
+	cutsAt     []time.Time // cuts for Telegram's waits, the last hour
+	checkAt    time.Time   // when to check a climb answer time kept (zero: none)
+	checkFrom  int         // the window the climb began at
+	checkBase  float64     // the speed before it
+	// Since the last hour record: tries judged with answer times known, and
+	// where answer time would have decided otherwise than bytes.
+	triesUp, climbsRefused, triesDown, dropsKept int
+	trial                                        int // the step being tried (negative: fewer parts), 0 when none
+	trialFrom                                    int
+	trialBase                                    float64
+	trialLeft                                    int
+	trialSpeeds                                  []float64
+	trialFull                                    bool
+	nextDown                                     bool // the last bigger window brought nothing: try a smaller one next
+	holdUntil                                    time.Time
+	lastCut                                      time.Time
+	ceiling                                      int // the window a flood happened at
+	ceilingUntil                                 time.Time
+	fullAt                                       time.Time // the last interval downloads waited for room
+	state                                        string
 
 	speed       float64   // bytes a second, last interval
 	history     []float64 // last intervals' speeds
@@ -177,9 +195,7 @@ func newDownloadPacer(path string) *downloadPacer {
 			if json.Unmarshal(data, &kept) == nil {
 				for k, v := range kept {
 					if dc, err := strconv.Atoi(k); err == nil && v >= paceMin {
-						// Not below the start: windows had drifted to one part
-						// by the noise described at the top (ix.12.3).
-						p.saved[dc] = min(max(v, paceStart), paceMax)
+						p.saved[dc] = min(v, paceMax)
 					}
 				}
 			}
@@ -194,6 +210,11 @@ func (p *downloadPacer) dcLocked(dc int) *dcPace {
 		w := paceStart
 		if v, ok := p.saved[dc]; ok {
 			w = v
+			if paceByAnswers.Load() {
+				// Not below the start: windows had drifted to one part by the
+				// noise described at the top (ix.12.3).
+				w = max(w, paceStart)
+			}
 		}
 		d = &dcPace{dc: dc, window: w, wake: make(chan struct{}), state: "learning"}
 		p.dcs[dc] = d
@@ -509,11 +530,35 @@ func (d *dcPace) judgeTrial(now time.Time) {
 	}
 	// By answer time when enough parts were answered: parts a second are the
 	// parts in flight over the time each takes (see the notes at the top).
-	bytesChange, byAnswers := change, false
-	if d.trialBaseLat > 0 && d.trialAns >= paceLatAnswers && !now.Before(d.bytesUntil) {
+	bytesChange, answersChange, haveAnswers := change, 0.0, false
+	if d.trialBaseLat > 0 && d.trialAns >= paceLatAnswers {
 		if lat := d.trialTook.Seconds() / float64(d.trialAns); lat > 0 {
-			change = float64(from+step)/float64(max(1, from))*d.trialBaseLat/lat - 1
-			byAnswers = true
+			answersChange, haveAnswers = float64(from+step)/float64(max(1, from))*d.trialBaseLat/lat-1, true
+		}
+	}
+	byAnswers := haveAnswers && paceByAnswers.Load() && !now.Before(d.bytesUntil)
+	if byAnswers {
+		change = answersChange
+	}
+	if d.trialFull && haveAnswers {
+		// What each way would decide, for the record (whichever is in use).
+		keep := func(c float64) bool {
+			if step > 0 {
+				return c >= paceGainShare*could
+			}
+			return -c < paceGainShare*could
+		}
+		byBytes, byTime := keep(bytesChange), keep(answersChange)
+		if step > 0 {
+			d.triesUp++
+			if byTime && !byBytes {
+				d.climbsRefused++
+			}
+		} else {
+			d.triesDown++
+			if byBytes && !byTime {
+				d.dropsKept++
+			}
 		}
 	}
 	switch {

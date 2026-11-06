@@ -64,3 +64,13 @@ func TestIxDCLoad(t *testing.T) {
 		t.Fatalf("%q, want %q", got, want)
 	}
 }
+
+func TestIxTriesLine(t *testing.T) {
+	got := ixTriesLine(telegram.PaceHour{TriesUp: 9, ClimbsRefused: 4, TriesDown: 3, DropsKept: 2})
+	if want := "tries judged by bytes: 9 bigger (answer time would have kept 4 that bytes refused), 3 smaller (bytes kept 2 that answer time would have refused)"; got != want {
+		t.Fatalf("%q", got)
+	}
+	if ixDefaultSettings().PaceByAnswers {
+		t.Fatal("on by default")
+	}
+}
