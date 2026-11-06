@@ -451,6 +451,7 @@ type ixSampleResult struct {
 	Offset  float64 // seconds to add to the queued video's time
 	Parts   int
 	Samples int
+	Frames  []ixSampledFrame // confirmed, nomatch: the sampled frames, kept to compare again (ix.12.10)
 }
 
 // ixSampleDecided says whether more frames could not change the answer: already a
@@ -587,13 +588,14 @@ func (a *App) ixSampleCheck(ctx context.Context, r ixCopyReader, msg *tg.Message
 			best, bestOf = hit, c.key
 		}
 		if hit >= need {
+			res.Frames = samples
 			res.Result, res.Of, res.Offset = "confirmed", c.key, off
 			res.Note = fmt.Sprintf("%d of %d sampled frames match at %+.0f s", hit, len(samples), off)
 			return res
 		}
 	}
 	res.Result, res.Note = "nomatch", fmt.Sprintf("at most %d of %d sampled frames match a saved video", best, len(samples))
-	res.Best, res.Of = best, bestOf
+	res.Best, res.Of, res.Frames = best, bestOf, samples
 	return res
 }
 
@@ -962,6 +964,13 @@ func (a *App) ixSampleRecord(ctx context.Context, j ixSampleJob, f ixCopyFacts, 
 		j.work, f.Ident, j.size, res.Result, res.Note, res.Of, res.Offset, res.Parts, res.Samples, ixNowMs(), res.Why, final); err != nil {
 		return err
 	}
+	if len(res.Frames) > 0 {
+		// Kept so a "no match" can be compared again, here, when more saved
+		// videos have their fingerprints (ix_sample_recheck.go).
+		if _, err := a.db.Writer.ExecContext(ctx, `UPDATE ix_copy_sample SET frames=?, dur_ms=? WHERE work_id=?`, ixPackSampled(res.Frames), f.Dur, j.work); err != nil {
+			return err
+		}
+	}
 	how := res.Result
 	if how == "confirmed" {
 		how = "matched by sampled frames" // probable, not proven
@@ -980,7 +989,9 @@ func (a *App) ixSampleRecord(ctx context.Context, j ixSampleJob, f ixCopyFacts, 
 	if j.held {
 		switch {
 		case res.Result == "confirmed":
-			_, err := a.db.Writer.ExecContext(ctx, `UPDATE ix_copy_hold SET confirm='confirmed', confirm_note=?, checked_at=? WHERE work_id=?`, res.Note, ixNowMs(), j.work)
+			// A partial match found to be a copy after all (compared again,
+			// ix.12.10) is a probable copy now, not a partial match.
+			_, err := a.db.Writer.ExecContext(ctx, `UPDATE ix_copy_hold SET confirm='confirmed', how=CASE WHEN how='sampled-partial' THEN 'sampled' ELSE how END, confirm_note=?, checked_at=? WHERE work_id=?`, res.Note, ixNowMs(), j.work)
 			return err
 		case res.Result == "nomatch" && res.Best >= ixSamplePartialHit:
 			// Partly the same footage: it stays at the back, but as a

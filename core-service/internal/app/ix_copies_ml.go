@@ -346,6 +346,9 @@ func init() {
 		if err := a.ixSampleRound(ctx, false); err != nil && ctx.Err() == nil {
 			a.ixLog("checking big videos: %v", err)
 		}
+		if err := a.ixSampleRecheck(ctx); err != nil && ctx.Err() == nil { // ix_sample_recheck.go
+			a.ixLog("comparing kept frames of big videos again: %v", err)
+		}
 	}
 	ixBeforeReleaseHook = func(a *App, ctx context.Context) {
 		if err := a.ixSampleRound(ctx, true); err != nil && ctx.Err() == nil {
