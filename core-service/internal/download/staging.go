@@ -76,13 +76,17 @@ CREATE TABLE IF NOT EXISTS tgdl_stage_followers ( -- other messages with the sam
 );`
 
 type stageState struct {
-	known     atomic.Bool // the journal exists, so files may be waiting
-	mu        sync.Mutex
-	reserved  int64 // staged downloads in progress
-	waiters   int   // downloads waiting for room now
-	fullSince int64 // when they started waiting (Unix ms), 0: none waits
-	signal    chan struct{}
-	moving    sync.Mutex // one mover at a time
+	known    atomic.Bool // the journal exists, so files may be waiting
+	mu       sync.Mutex
+	reserved int64 // staged downloads in progress
+	waiters  int   // downloads waiting for room now
+	// Downloads sent straight to the library because staging was full
+	// (ix.12.5), and when the last one went.
+	bypassed   int
+	bypassedAt int64
+	fullSince  int64 // when they started waiting (Unix ms), 0: none waits
+	signal     chan struct{}
+	moving     sync.Mutex // one mover at a time
 }
 
 // stageFreeReserve is the free space the staging disk keeps when downloads
@@ -115,7 +119,7 @@ type stageDoubt struct{ msg string }
 func (e stageDoubt) Error() string { return e.msg }
 
 func (l *Library) stagingFor(ctx context.Context, item Item) Staging {
-	if l.Staging == nil || item.NoStage {
+	if l.Staging == nil || item.NoStage || ctx.Value(noStageKey{}) != nil {
 		return Staging{}
 	}
 	st := l.Staging(ctx)
@@ -203,6 +207,38 @@ func (l *Library) stageWaiting(delta int) {
 	}
 }
 
+type noStageKey struct{}
+
+// WithoutStaging has the download go straight to the library, staging on or
+// not (ix.12.5: when the staging folder is full).
+func WithoutStaging(ctx context.Context) context.Context {
+	return context.WithValue(ctx, noStageKey{}, true)
+}
+
+// StagingSkipped says whether ctx sends downloads straight to the library.
+func StagingSkipped(ctx context.Context) bool { return ctx.Value(noStageKey{}) != nil }
+
+// StageRoom says whether a download of size bytes may go to the staging
+// folder now: staging is off (true: nothing to wait for), or the staged
+// files leave room (the rules of WaitStageRoom).
+func (l *Library) StageRoom(ctx context.Context, size int64) bool {
+	st := l.stagingFor(ctx, Item{})
+	if st.Dir == "" {
+		return true
+	}
+	used := l.stageUsed(ctx)
+	return used == 0 || used+size <= st.Cap || stageRoomOnDisk(st, size)
+}
+
+// StageBypass records a download sent straight to the library because the
+// staging folder was full (StagingStatus: Bypassed, BypassedAt).
+func (l *Library) StageBypass() {
+	l.stage.mu.Lock()
+	defer l.stage.mu.Unlock()
+	l.stage.bypassed++
+	l.stage.bypassedAt = time.Now().UnixMilli()
+}
+
 // WaitStageRoom waits, when staging is on and the staged files already take
 // the space allowed, until moves to the library make room for size bytes.
 // One file is always let through so a file larger than the cap still goes,
@@ -259,14 +295,24 @@ func (l *Library) ingestStaged(ctx context.Context, item Item, client Client, st
 	if err := l.ensureStageTable(ctx); err != nil {
 		return Record{}, err
 	}
-	dir, name, err := destinationName(item)
-	if err != nil {
-		return Record{}, err
-	}
-	relative := filepath.Join(dir, name)
 	stageRoot, err := stageRootFor(st.Dir)
 	if err != nil {
 		return Record{}, err
+	}
+	// A part kept by an earlier attempt in this folder goes on under its own
+	// name, as in the library (resume.go).
+	resuming := canResume(client, item.Identity.Size)
+	var progress partRow
+	if resuming {
+		progress = l.partLoad(ctx, item, stageRoot)
+	}
+	relative := filepath.FromSlash(progress.path)
+	if progress.path == "" {
+		dir, name, err := destinationName(item)
+		if err != nil {
+			return Record{}, err
+		}
+		relative = filepath.Join(dir, name)
 	}
 	release := l.reserveStage(item.Identity.Size)
 	defer release()
@@ -276,6 +322,9 @@ func (l *Library) ingestStaged(ctx context.Context, item Item, client Client, st
 	}
 	digest := sha256.New()
 	m := NewManager(hashClient{client, digest}, telegram.NewDedupIndex())
+	if resuming {
+		m.resume = l.partResumeFor(item, filepath.ToSlash(relative), stageRoot, progress, digest)
+	}
 	journaled := false
 	m.prepared = func() error {
 		// Written before the local file is published, so a restart finds it.
@@ -486,6 +535,18 @@ func (l *Library) moveStaged(ctx context.Context, mv stagedMove) error {
 			_, _ = l.writer.ExecContext(context.WithoutCancel(ctx), `DELETE FROM tgdl_stage_moves WHERE path=?`, mv.path)
 			l.stageSignal()
 			return nil
+		}
+		// Moved to the library by hand, at its own path (ix.12.6): the
+		// journal's size and SHA-256 say it is the same file.
+		if l.stagedInLibrary(ctx, mv) {
+			if record, err := l.register(ctx, item, l.stagedCandidate(mv), false); err == nil {
+				_, _ = l.writer.ExecContext(context.WithoutCancel(ctx), `DELETE FROM tgdl_stage_moves WHERE path=?`, mv.path)
+				if l.OnStaged != nil {
+					l.OnStaged(context.WithoutCancel(ctx), item, record)
+				}
+				l.stageSignal()
+				return nil
+			}
 		}
 		// Removed by someone or something else: its messages go back in the queue.
 		return l.stagedLost(ctx, mv, append([]Item{item}, d.followers...), append([]stageFate{d.fate}, d.fates...))
@@ -953,6 +1014,32 @@ func (l *Library) stageFollowers(ctx context.Context, path string) ([]Item, erro
 
 // stagedArrived reports whether mv's file is catalogued in the library
 // with its bytes.
+// stagedInLibrary: the library holds mv's file at mv's path with the
+// journal's size and SHA-256 (moved there by hand).
+func (l *Library) stagedInLibrary(ctx context.Context, mv stagedMove) bool {
+	f, info, err := l.open(mv.path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	if info.Size() != mv.size {
+		return false
+	}
+	sum, _, err := hashFile(ctx, f)
+	return err == nil && sum == mv.sum
+}
+
+// stagedCandidate is mv's file in the library, for register.
+func (l *Library) stagedCandidate(mv stagedMove) candidate {
+	c := candidate{path: mv.path, sha256: mv.sum}
+	if f, info, err := l.open(mv.path); err == nil {
+		c.info = info
+		c.fingerprint, _ = fileFingerprint(f, info)
+		f.Close()
+	}
+	return c
+}
+
 func (l *Library) stagedArrived(ctx context.Context, mv stagedMove) bool {
 	var n int
 	if l.reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM downloads WHERE file_path=? AND lower(file_hash)=?`, mv.path, mv.sum).Scan(&n) != nil || n == 0 {
@@ -973,7 +1060,9 @@ func (l *Library) stagedArrived(ctx context.Context, mv stagedMove) bool {
 // recoverStaging runs at start-up: a download stopped just before its local
 // file was published is finished from its .part when the bytes check out,
 // and leftover partial downloads in the staging folder are removed (the
-// download queue fetches those again, as for direct downloads).
+// download queue fetches those again, as for direct downloads), except those
+// with progress recorded (resume.go), which the next attempt checks and carries
+// on. partSweep has already removed the records nothing comes back for.
 func (l *Library) recoverStaging(ctx context.Context) error {
 	var exists int
 	if err := l.reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tgdl_stage_moves'`).Scan(&exists); err != nil {
@@ -1021,6 +1110,19 @@ func (l *Library) recoverStaging(ctx context.Context) error {
 				_ = os.Rename(part, local)
 			}
 		}
+	}
+	if kept, err := l.reader.QueryContext(ctx, `SELECT stage_dir, path FROM tgdl_part_progress WHERE stage_dir<>''`); err == nil {
+		for kept.Next() {
+			var dir, path string
+			if kept.Scan(&dir, &path) == nil && filepath.IsLocal(filepath.FromSlash(path)) {
+				local := filepath.Join(dir, filepath.FromSlash(path))
+				keep[filepath.Join(filepath.Dir(local), partName(filepath.Base(local)))] = true
+				roots[dir] = true
+			}
+		}
+		kept.Close()
+	} else {
+		return err // without the list, a kept part could be removed
 	}
 	if l.Staging != nil {
 		if st := l.stagingFor(ctx, Item{}); st.Dir != "" {
@@ -1151,6 +1253,8 @@ type StagingStatus struct {
 	Stuck        int      `json:"stuck"` // need a person; their local files are kept
 	StuckBytes   int64    `json:"stuckBytes,omitempty"`
 	Full         bool     `json:"full"`                // downloads are waiting for room in the staging folder
+	Bypassed     int      `json:"bypassed"`            // downloads sent straight to the library since start: staging was full (ix.12.5)
+	BypassedAt   int64    `json:"bypassedAt"`          // the last of them (unix ms)
 	FullSince    int64    `json:"fullSince,omitempty"` // since when (Unix ms)
 	Errors       []string `json:"errors,omitempty"`
 }
@@ -1159,6 +1263,7 @@ func (l *Library) StagingStatus(ctx context.Context) StagingStatus {
 	st := StagingStatus{}
 	l.stage.mu.Lock()
 	st.Full, st.FullSince = l.stage.waiters > 0, l.stage.fullSince
+	st.Bypassed, st.BypassedAt = l.stage.bypassed, l.stage.bypassedAt
 	l.stage.mu.Unlock()
 	if !l.stage.known.Load() {
 		return st

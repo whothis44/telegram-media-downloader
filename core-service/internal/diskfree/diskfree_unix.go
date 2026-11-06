@@ -13,3 +13,6 @@ func Free(dir string) (int64, bool) {
 	}
 	return int64(st.Bavail) * int64(st.Bsize), true
 }
+
+// Local is not listed here: a folder is typed instead.
+func Local() []Drive { return nil }

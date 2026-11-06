@@ -30,6 +30,7 @@ import (
 // ixApplyEngineSettings passes the archive settings the engine reads to it.
 func ixApplyEngineSettings(s ixSettings) {
 	telegram.SetPacing(s.DownloadPacing)
+	telegram.SetPaceByAnswers(s.PaceByAnswers)
 	engine.SetBigFileLane(s.BigAtOnce)
 }
 

@@ -387,7 +387,7 @@ func TestIxSamplingLeavesOutLowerQualityOriginals(t *testing.T) {
 	orig := ixTestQueue(t, a, ixTestVideo(2, 402, 400<<20, 900, 1280, 720, scene, 1700000100))
 	_, _ = a.db.Writer.Exec(`UPDATE tgdl_work SET paused=1 WHERE id=?`, orig)
 	ixTestLowq(t, a, orig)
-	jobs, err := a.ixSampleJobs(ctx, false, 10)
+	jobs, err := a.ixSampleJobs(ctx, ixSampleAll, 10)
 	if err != nil {
 		t.Fatal(err)
 	}

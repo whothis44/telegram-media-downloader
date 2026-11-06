@@ -17,3 +17,29 @@ func Free(dir string) (int64, bool) {
 	}
 	return int64(free), true
 }
+
+// Local lists this computer's fixed drives (not network shares, removable or
+// optical drives) with their free and total space, for picking a local folder.
+func Local() []Drive {
+	mask, err := windows.GetLogicalDrives()
+	if err != nil {
+		return nil
+	}
+	var out []Drive
+	for i := 0; i < 26; i++ {
+		if mask&(1<<i) == 0 {
+			continue
+		}
+		root := string(rune('A'+i)) + `:\`
+		p, err := windows.UTF16PtrFromString(root)
+		if err != nil || windows.GetDriveType(p) != windows.DRIVE_FIXED {
+			continue
+		}
+		var free, total, totalFree uint64
+		if windows.GetDiskFreeSpaceEx(p, &free, &total, &totalFree) != nil {
+			continue
+		}
+		out = append(out, Drive{Root: root, Free: int64(free), Total: int64(total)})
+	}
+	return out
+}

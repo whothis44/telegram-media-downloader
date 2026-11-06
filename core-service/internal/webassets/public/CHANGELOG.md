@@ -2,10 +2,88 @@
 
 All notable changes to this project are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.18-ix.12.6] — 2026-11-06
+
+### Fixed
+- **A full staging folder no longer holds downloads back.** Each staged file is copied to the library, synced and read back over the network; on one archive that ran at about 2 MB/s while Telegram, with its limit off, brought up to 8 MB/s. The staging folder filled, and from then on every download waited for room: for three hours, with the library reachable, at the copies' pace. Now a new download goes straight to the library while staging has no room, as before staging existed. A file whose progress is kept stays where its bytes are (staging or library), so nothing starts over. The report counts the downloads sent straight on.
+- **Files moved into the library by hand are adopted, not downloaded again.** A staged file moved by hand to its place in the library is catalogued by the staging mover (its size and SHA-256 from the staging record) instead of counted as lost and queued again. And before any download, an uncatalogued file already in the library under that message's own name and at its exact size is checked against the file on Telegram (Telegram's hashes, else sampled parts) and catalogued instead of downloaded. Each library folder is listed at most every 10 minutes for this.
+- **The privacy-safe report showed parts of file names.** A path whose file name had characters outside letters and digits (other scripts, $, &, emoji, commas) was hidden only in part, and message numbers under six digits were shown. Paths are now hidden from their start to their last extension, whatever the characters, and every message number is.
+
+### Changed
+- **At least 2 parts in flight per server at all times** (ix.12.4: only while the speed limit was on), as Telegram's own apps keep 2 MiB per server. In unlimited hours tries judged by bytes, and the cuts for plain FLOOD_WAITs (30 to 50 an hour), had held two servers at one part for hours. Fewer only within 10 minutes of a cut on that server; a try of fewer parts no longer goes below 2.
+- Diagnostics: plain Telegram waits per server, hour by hour.
+
+## [3.4.18-ix.12.5] — 2026-11-06
+
+Copies: the held-copy design stays (probable copies wait at the back, so that when not everything can be saved the files most likely to be new come first); it now acts on evidence it used to ignore.
+
+### Changed
+- **A held video whose sampled frames match no saved video goes back to its place.** Big videos are held at the back on look-alike evidence (as long, as large, the same preview as a saved video). When the frames sampled across one match none of the saved video's (at most 2 of 8), that evidence is outweighed and it downloads in its normal place. On one archive: 90 videos, 82 GB, 52 of them from ranked groups. A partial match (3 or 4 of 8: part of the footage is the same) stays at the back, now as a partial match: it counts as still needed, not as a probable copy, and "…until I release them" does not keep it. A check that failed or timed out changes nothing.
+- **Holds with no record of why go back to their place.** Holds made by versions before reasons were kept (474 files, 35 GB on one archive) are forgotten; the checks see them as new files, and hold them again, with a reason, only if they find a look-alike.
+- **One sampled check in three goes to a held video** (ranked groups first, then the largest); the others go to the queue in download order, where a match spares a download at once. The number of checks is the same.
+- **Two switches:** "Hold probable copies at the back" and "Check big videos by sampling" (before, holding switched sampling too). A setting saved before follows holding until it is changed. With holding off, sampled matches are counted and nothing moves.
+- Wording: a sampled match reads "matched by sampled frames" (it is probable, not proven) instead of "confirmed".
+
+### Added
+- Diagnostics and the finish estimate: the files ahead of held copies and set-aside files, and whether they finish before the deadline at the speed used.
+
+### Fixed
+- **Claims take turns when they leave out full servers.** At 12.4's first start the 25 workers claimed at the same moment, each counting the same free slots, and one server got 8 large files for its 2 slots; the others waited behind them until those finished.
+- CI: ffmpeg comes from a static build first (the package mirror timed whole jobs out), and a file-slot test that could leave its slot taken under the race detector gives it back.
+
+## [3.4.18-ix.12.4] — 2026-11-05
+
+### Changed
+- **A speed-limit wait holds only the request that got it.** Until now, each FLOOD_PREMIUM_WAIT (Telegram's speed limit for accounts without Premium) stopped every file on every server for the wait, and no file could start meanwhile. Under the limit that was most of the time, so one server ended up holding nearly every download while the others sat idle. Telegram's own apps (TDLib) wait out such a reply with that one request and let the others go on; so does this version. Fallbacks: a plain FLOOD_WAIT on a file part, or most file requests refused (40 or more speed-limit waits in 10 minutes and over two per part answered), goes back to every file waiting for each, for two hours.
+- **At least 2 parts in flight per server while the speed limit is on** (Telegram's own apps keep 2 MiB per server without Premium; parts here are 1 MiB). Windows had drifted to one part, and while the limit was on they could not change. Not raised within 10 minutes of a plain FLOOD_WAIT; larger windows are left as they are.
+- **No server holds more files than it has slots while another server has files queued.** Each queued file now records the server it is stored on (rows queued before are read once, in the background, from their stored messages). A worker takes the best file on a server with a free slot rather than waiting behind a full one. Within a server the order is the ranking, as before.
+
+### Added
+- Diagnostics: how speed-limit waits are taken now and the fallbacks taken since start; per server and hour, the seconds Telegram asked for on average and how many waits came for the same file as the wait before. These say whether the limit is per server, per file, or the account's, which no version could tell apart while one wait stopped every server.
+- Diagnostics: a `[memory]` section: heap in use, what the process reserved, goroutines, and the ten functions holding the most heap now (estimated from Go's sampled heap profile; function names and sizes only).
+- CI: the end-to-end checks run as separate jobs (process, media, browser), so a slow package mirror or a flaky check re-runs only its own job.
+
+### Fixed
+- The console printed "Telegram profile photo unavailable" once per group on every page that showed the groups; a reason is now printed once an hour, with how many times it came meanwhile.
+
+### Limits
+- Whether this brings more under the speed limit depends on how Telegram applies it, which it does not publish: if the limit is the account's, the speed stays about the same; the report's new figures say.
+
+## [3.4.18-ix.12.3] — 2026-11-05
+
+### Added
+- **Install updates automatically** (Settings → Downloads, off unless you turn it on). When a newer release is out, no new file starts, files of 8 MB or more stop right after their next checkpoint and carry on after the restart, smaller and nearly finished files finish, and the app restarts on the new version. It needs a launcher that starts the app again (`set TGDL_LAUNCHER_RESTARTS=1` in `start.bat`); without one it stays off and says so. Going back to downloading leaves that version alone, and if downloads in progress take longer than 20 minutes it goes back to downloading and tries again an hour later.
+- **Pause a downloading file at its next checkpoint.** Pausing a file of 8 MB or more that is moving bytes now stops it within about 30 seconds, losing nothing; resumed, it carries on from there. Smaller files finish first, as before.
+- **Staging folder picker:** this computer's drives with their free space, the app's data folder suggested, or another folder typed in, with a line saying what staging does.
+- **Ranked groups whose files nothing will queue** get a button in Priorities that adds them to the rescan (their rank stays; a paused rescan stays paused).
+- Diagnostics: megabytes and speed-limit waits per Telegram server, hour by hour, and for the speed-limited hours the total against each server's share.
+- **Diagnostics: what holds downloads back, per server and hour:** parts in flight against the parts allowed, requests waiting for room, and large-file slots in use and waited for. On one archive far fewer parts were in flight than allowed, so the window may not be what limits the fast hours; these figures say.
+- **Experimental, off unless switched on (Settings → Downloads):** the pacer can judge its tries by how fast Telegram answers each part rather than by bytes a second, which jump as files start and finish. Its windows had drifted to one part on most servers. It climbs more readily, so it falls back to the old way for two hours after two Telegram waits within an hour, or when a climb does not bring more bytes. Off, the report still counts, hour by hour, where it would have decided otherwise, so the numbers can say whether to switch it on.
+- **Keep the words of a crash** (`set TGDL_CRASH_CAPTURE=1` in `start.bat`): the window's error output also goes to `crashes/window.log` (bounded), and the runtime's own words of a crash ("fatal error: stack overflow") reach the run history, which before named only the functions. A panic's message is never kept. If anything stops it from working, the app runs as before.
+
+### Changed
+- **Resume from 8 MB, with a checkpoint every 8 MB or 30 seconds** (was 64 MB). A restart now costs a file at most 8 MB or 30 seconds of its progress. Measured on the NAS: a checkpoint's sync takes 6 to 8 ms, which did not slow writing at the speeds downloads reach.
+- **Downloads to the local staging folder keep their progress too.** Staging is safe to turn on now. A file started in one place (the library or the staging folder) starts over if staging is turned on or off, or its folder changes, while it downloads.
+- **The update's wait takes seconds to minutes, not hours:** large files stop at a checkpoint instead of finishing.
+- **One place for each Archive control.** Priorities holds every rule of order; Rescan says how rescans run and links its rank to Priorities; Copies & duplicates (was Duplicates) holds every copy figure and rule; Overview only reports; Settings → Downloads holds pacing, retries, staging and updates. The Account safety and Big videos cards are gone. Saved settings keep their keys, and a setting changed but not saved survives the page's refresh.
+- **Queue page: in download order.** The next 1,000 files come in the order they will download (the ranking first), and that is the default sort, so rows move only when one starts or finishes. "Added time" reads "Finished time" in Done and Failed.
+- Coverage: lesser copies of queued files count as probable copies, not as files still needed (3,878 of them on one archive).
+- Diagnostics: the 5-minute speeds come first (the 10-second figure counts whole 1 MiB parts, so servers looked alike); the account's freeze dates and errors refused as frozen are labelled apart.
+
+### Fixed
+- **Video frames from ffmpeg 7 on could carry the wrong time.** Each output's log lines ran into the others', so a frame's time could be a later frame's or none. Each output now writes its time to a file of its own. This was also why one archive test failed now and then.
+- The console's last-run line printed `·` as `Â·`, and a run that ended without a report in its first minute said "after 0s".
+
+### Limits
+- Only a crash or a power cut can still lose up to 8 MB or 30 seconds of a file's progress. Nothing here has been measured against live Telegram.
+
+### Service worker
+- `VERSION = 'v34185'`
+
 ## [3.4.18-ix.12.2] — 2026-11-05
 
 ### Changed
-- **Small files use their free slots.** Files over 20 MB have two download slots per Telegram server, small files five. Workers could all be held by large files waiting for those two slots while the small-file slots stayed empty and small files waited in the queue. A large file still waiting for its slot now gives its place up when small-file slots are free and smaller files wait, and that worker takes the best of them; the large file keeps its place in the queue, and nothing counts as an attempt. Under Telegram's speed limit the bytes per hour stay about the same: more files finish, and the ranked big files share the speed.
+- **Small files use their free slots.** Files over 20 MB have two download slots per Telegram server, small files five. Workers could all be held by large files waiting for those two slots while the small-file slots stayed empty and small files waited in the queue. A large file still waiting for its slot now gives its place up when small-file slots are free and smaller files wait, and that worker takes the best of them; the large file keeps its place in the queue, and nothing counts as an attempt. Under Telegram's speed limit the bytes per hour stay about the same: more files finish. The ranked big files keep their priority, and small files of lower-ranked groups get the parts they leave.
 - **Ranked groups keep full quality.** "Save a lower quality of very large videos first" judged by size alone, as if the ranking were not there, and could have saved a ranked group's video in a lower quality and sent its original behind everything else. It now leaves files a ranked group needs alone.
 
 ### Fixed

@@ -54,7 +54,12 @@ type ixGroupCoverage struct {
 	Left        int          `json:"left"`  // in the download queue, ready or downloading
 	Apart       int          `json:"apart"` // in the queue, set aside for now
 	Waiting     string       `json:"waiting"`
+	// NotQueued: files are missing and nothing will queue them until the group
+	// is in the rescan (the page offers to add it, ix.12.3).
+	NotQueued bool `json:"notQueued"`
 }
+
+const ixNotQueued = "files missing but not queued: add it to the rescan"
 
 type ixPrioritiesInfo struct {
 	Policy   string            `json:"policy"`
@@ -353,6 +358,7 @@ func (a *App) ixPrioritiesMeasure(ctx context.Context) ixPrioritiesInfo {
 	for i := range info.Groups {
 		c := &info.Groups[i]
 		c.Waiting = ixCoverageWaiting(c, queueState[c.GroupID], focus)
+		c.NotQueued = c.Waiting == ixNotQueued
 		if focus == "" && c.Place > 0 && (c.Left > 0 || c.Needed.Files > 0) {
 			focus = c.Name
 			info.Focus = focus
@@ -410,7 +416,7 @@ func ixCoverageWaiting(c *ixGroupCoverage, q ixQueueItem, focus string) string {
 	case c.Left == 0 && c.Apart > 0:
 		return "only files held back or set aside are queued"
 	case c.Left == 0:
-		return "files missing but not queued: add it to the rescan"
+		return ixNotQueued
 	case focus == "" && c.Place > 0:
 		return "going first"
 	case c.Place > 0:

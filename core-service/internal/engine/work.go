@@ -109,13 +109,13 @@ func enqueueWork(ctx context.Context, db queueWriter, accountID string, target T
 	now := time.Now().UnixMilli()
 	verifyExisting := len(repair) > 0 && repair[0] && origin != "live"
 	var id int64
-	err = db.QueryRowContext(ctx, `INSERT INTO tgdl_work(account_id,group_id,group_name,message_id,version,source_pts,identity,media_type,file_name,file_size,body,created_at,updated_at,origin,ttl_seconds,sched_order)
- VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,COALESCE((SELECT sched_base FROM tgdl_group_rank WHERE group_id=?),`+unrankedOrderSQL+`))
+	err = db.QueryRowContext(ctx, `INSERT INTO tgdl_work(account_id,group_id,group_name,message_id,version,source_pts,identity,media_type,file_name,file_size,body,created_at,updated_at,origin,ttl_seconds,sched_order,dc)
+ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,COALESCE((SELECT sched_base FROM tgdl_group_rank WHERE group_id=?),`+unrankedOrderSQL+`),?)
  ON CONFLICT(group_id,message_id) DO UPDATE SET
  account_id=excluded.account_id,group_name=excluded.group_name,version=excluded.version,
  source_pts=CASE WHEN excluded.version=tgdl_work.version AND excluded.identity=tgdl_work.identity AND (? OR excluded.account_id=tgdl_work.account_id)
  THEN MAX(tgdl_work.source_pts,excluded.source_pts) ELSE excluded.source_pts END,identity=excluded.identity,
- media_type=excluded.media_type,file_name=excluded.file_name,file_size=excluded.file_size,body=excluded.body,
+ media_type=excluded.media_type,file_name=excluded.file_name,file_size=excluded.file_size,body=excluded.body,dc=excluded.dc,
  ttl_seconds=MAX(tgdl_work.ttl_seconds,excluded.ttl_seconds),
  generation=tgdl_work.generation+1,attempts=0,retry_at=0,error=NULL,refresh_required=0,updated_at=excluded.updated_at,
  origin=CASE WHEN excluded.origin='url' THEN 'url' WHEN tgdl_work.origin<>'live' THEN tgdl_work.origin ELSE excluded.origin END,
@@ -126,7 +126,7 @@ func enqueueWork(ctx context.Context, db queueWriter, accountID string, target T
  AND ((tgdl_work.origin='live' AND tgdl_work.status='pending')
  OR (excluded.origin='url' AND tgdl_work.origin<>'url' AND tgdl_work.status IN ('pending','processing'))))
  OR (? AND excluded.version=tgdl_work.version AND excluded.identity=tgdl_work.identity AND tgdl_work.status IN ('completed','skipped','failed'))
- RETURNING id`, accountID, target.ID, target.Name, media.MessageID, version, sourcePTS, media.Identity.Key(), media.Type, media.Name, media.Identity.Size, buffer.Buf, now, now, origin, telegram.MessageTTL(message), target.ID, comparable, comparable, verifyExisting).Scan(&id)
+ RETURNING id`, accountID, target.ID, target.Name, media.MessageID, version, sourcePTS, media.Identity.Key(), media.Type, media.Name, media.Identity.Size, buffer.Buf, now, now, origin, telegram.MessageTTL(message), target.ID, max(media.DC, 0), comparable, comparable, verifyExisting).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		// A repeated identity can still carry a newer ordering watermark. Keep
 		// it without requeueing, otherwise an intermediate delayed edit could
@@ -230,12 +230,19 @@ const claimFree = ` AND (identity='' OR NOT EXISTS (SELECT 1 FROM tgdl_work acti
 // written +account_id so that a single account does not pick the index
 // on accounts (idx_tgdl_work_pending) and sort every pending row.
 func claimSelect(accounts []string, now time.Time, manualOnly bool) (string, []any) {
+	return claimSelectAvoiding(accounts, now, manualOnly, nil)
+}
+
+// claimSelectAvoiding is claimSelect leaving out rows of the servers and
+// sizes in full (ServerKey): their slots are all taken.
+func claimSelectAvoiding(accounts []string, now time.Time, manualOnly bool, full []int) (string, []any) {
 	marks := strings.TrimSuffix(strings.Repeat("?,", len(accounts)), ",")
+	avoid := avoidServersSQL(full)
 	base := func(args []any) (string, []any) {
 		for _, id := range accounts {
 			args = append(args, id)
 		}
-		where := `status='pending' AND paused=0 AND +account_id IN (` + marks + `) AND retry_at<=?` + claimFree
+		where := `status='pending' AND paused=0 AND +account_id IN (` + marks + `) AND retry_at<=?` + claimFree + avoid
 		if manualOnly {
 			where += ` AND origin<>'live'`
 		}
@@ -261,6 +268,130 @@ func claimSelect(accounts []string, now time.Time, manualOnly bool) (string, []a
 	 < CASE WHEN EXISTS (SELECT 1 FROM tgdl_work WHERE ` + exists + ` AND ` + bigRowSQL + `=0) THEN ? ELSE ? END
 	 THEN (SELECT ` + key + ` FROM tgdl_work WHERE ` + big + ` AND ` + bigRowSQL + `=1` + order + `) END`
 	return `SELECT MIN(k) % ` + strconv.FormatInt(claimKeyBase, 10) + ` FROM (SELECT (` + smallSQL + `) AS k UNION ALL SELECT ` + bigSQL + `) WHERE ` + open, args
+}
+
+// ServerKey names a server's file slots of one size: dc*2, plus 1 for files
+// of telegram.DownloadLargeFile or more.
+func ServerKey(dc int, large bool) int {
+	if large {
+		return dc*2 + 1
+	}
+	return dc * 2
+}
+
+const serverKeySQL = `(dc*2+(file_size>=20971520))`
+
+// avoidServersSQL is the claim condition leaving out the full servers.
+// Rows of a server not known yet (dc 0) are never left out. The keys are
+// numbers made here, not input.
+func avoidServersSQL(full []int) string {
+	if len(full) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(full))
+	for _, k := range full {
+		keys = append(keys, strconv.Itoa(k))
+	}
+	return ` AND ` + serverKeySQL + ` NOT IN (` + strings.Join(keys, ",") + `)`
+}
+
+// FullServers are the servers and sizes (ServerKey) whose files downloading
+// now fill their slots: small and large slots per server, as Telegram's
+// configuration gives them. Files on other servers are claimed instead of
+// waiting for one of those (ix.12.4).
+func (s *WorkStore) FullServers(ctx context.Context, small, large int) ([]int, error) {
+	if small <= 0 || large <= 0 {
+		return nil, nil
+	}
+	rows, err := s.reader.QueryContext(ctx, `SELECT dc, file_size>=20971520, COUNT(*) FROM tgdl_work WHERE status='processing' AND dc>0 GROUP BY 1,2`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var full []int
+	for rows.Next() {
+		var dc, n int
+		var big bool
+		if err := rows.Scan(&dc, &big, &n); err != nil {
+			return nil, err
+		}
+		if limit := map[bool]int{false: small, true: large}[big]; n >= limit {
+			full = append(full, ServerKey(dc, big))
+		}
+	}
+	return full, rows.Err()
+}
+
+// ClaimAvoiding is Claim leaving out the full servers (FullServers).
+func (s *WorkStore) ClaimAvoiding(ctx context.Context, accounts []string, now time.Time, manualOnly bool, full []int) (*Work, error) {
+	if len(accounts) == 0 {
+		return nil, nil
+	}
+	pick, pickArgs := claimSelectAvoiding(accounts, now, manualOnly, full)
+	return s.claim(ctx, now, pick, pickArgs)
+}
+
+// ClaimSmallerAvoiding is ClaimSmaller leaving out the full servers.
+func (s *WorkStore) ClaimSmallerAvoiding(ctx context.Context, accounts []string, now time.Time, manualOnly bool, below int64, full []int) (*Work, error) {
+	if len(accounts) == 0 {
+		return nil, nil
+	}
+	where, args := smallerWhere(accounts, now, manualOnly, below)
+	return s.claim(ctx, now, `SELECT id FROM tgdl_work WHERE `+where+avoidServersSQL(full)+` ORDER BY `+claimOrderSQL+` LIMIT 1`, args)
+}
+
+// FillServers records the server of queued rows written before ix.12.4
+// (dc 0), a batch at a time, from their stored messages; rows whose message
+// says none get -1 so they are not read again. claimable: only rows a worker
+// could take now (not paused). It returns the rows done.
+func (s *WorkStore) FillServers(ctx context.Context, batch int, claimable ...bool) (int, error) {
+	only := ""
+	if len(claimable) > 0 && claimable[0] {
+		only = " AND paused=0"
+	}
+	rows, err := s.reader.QueryContext(ctx, `SELECT id, body FROM tgdl_work WHERE dc=0 AND status IN ('pending','processing') AND length(body)>0`+only+` LIMIT ?`, batch)
+	if err != nil {
+		return 0, err
+	}
+	type row struct {
+		id int64
+		dc int
+	}
+	var found []row
+	for rows.Next() {
+		var id int64
+		var body []byte
+		if err := rows.Scan(&id, &body); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		dc := -1
+		var msg tg.Message
+		if msg.Decode(&bin.Buffer{Buf: body}) == nil {
+			if media, err := telegram.MessageAttachment(&msg); err == nil && media.DC > 0 {
+				dc = media.DC
+			}
+		}
+		found = append(found, row{id, dc})
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	if len(found) == 0 {
+		return 0, nil
+	}
+	tx, err := s.writer.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	for _, r := range found {
+		if _, err := tx.ExecContext(ctx, `UPDATE tgdl_work SET dc=? WHERE id=? AND dc=0`, r.dc, r.id); err != nil {
+			return 0, err
+		}
+	}
+	return len(found), tx.Commit()
 }
 
 // Claim changes pending -> processing in one SQLite statement. Only accounts
