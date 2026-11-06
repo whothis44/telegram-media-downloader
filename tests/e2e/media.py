@@ -1,11 +1,11 @@
 from pathlib import Path
-import os,json,socket,subprocess,time,http.cookiejar,urllib.request,urllib.error,sqlite3,hashlib,tempfile,io,zipfile
+import os,shutil,json,socket,subprocess,time,http.cookiejar,urllib.request,urllib.error,sqlite3,hashlib,tempfile,io,zipfile
 room=Path(__file__).resolve().parents[2]
 scratch=room/"tmp/e2e";scratch.mkdir(parents=True,exist_ok=True)
 with tempfile.TemporaryDirectory(prefix='media-e2e-',dir=scratch) as tmp:
  root=Path(tmp);data=root/'data';downloads=data/'downloads';downloads.mkdir(parents=True)
  fixture=downloads/'fixture ไทย.mp4'
- subprocess.run(['/usr/bin/ffmpeg','-hide_banner','-loglevel','error','-f','lavfi','-i','testsrc=size=320x240:rate=12','-t','3','-c:v','mpeg4','-threads','1',str(fixture)],check=True)
+ subprocess.run([shutil.which('ffmpeg') or '/usr/bin/ffmpeg','-hide_banner','-loglevel','error','-f','lavfi','-i','testsrc=size=320x240:rate=12','-t','3','-c:v','mpeg4','-threads','1',str(fixture)],check=True)
  expected=fixture.read_bytes()
  with socket.socket() as s:s.bind(('127.0.0.1',0));port=s.getsockname()[1]
  base=f'http://127.0.0.1:{port}';opener=urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
