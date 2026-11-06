@@ -135,6 +135,17 @@ func (f *downloadFiles) acquire(ctx context.Context, dc int, size int64) (func()
 	}
 }
 
+// FileSlots is how many files of each size a server downloads at once, from
+// Telegram's configuration (small: under 20 MB).
+func (c *GotdClient) FileSlots() (small, large int) {
+	if c == nil || c.files == nil {
+		return 0, 0
+	}
+	c.files.mu.Lock()
+	defer c.files.mu.Unlock()
+	return c.files.small, c.files.large
+}
+
 // usage is dc's large-file slots: in use, waited for, and how many there are.
 func (f *downloadFiles) usage(dc int) (large, waiting, limit int) {
 	f.mu.Lock()

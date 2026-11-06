@@ -784,6 +784,8 @@ func (c *Controller) start(request, parent context.Context, accounts []AccountCo
 	scaling := c.scaling
 	c.mu.Unlock()
 	run.target.Store(int32(workers))
+	wg.Add(1)
+	go func() { defer wg.Done(); c.fillServers(ctx) }()
 	if scaling.Max > workers {
 		scaling.Min = max(1, min(scaling.Min, workers))
 		scaling.Max = min(scaling.Max, 64)
@@ -1097,12 +1099,13 @@ func (c *Controller) worker(run *running, index int) {
 			work, err = c.work.ClaimExpiring(run.ctx, run.unthrottled(), time.Now(), !run.observing.Load())
 		case smaller:
 			// The large file before gave its place up for a smaller one.
-			work, err = c.work.ClaimSmaller(run.ctx, run.unthrottled(), time.Now(), !run.observing.Load(), telegram.DownloadLargeFile)
+			full := run.fullServers(c.work)
+			work, err = c.work.ClaimSmallerAvoiding(run.ctx, run.unthrottled(), time.Now(), !run.observing.Load(), telegram.DownloadLargeFile, full)
 			if err == nil && work == nil {
-				work, err = c.work.Claim(run.ctx, run.unthrottled(), time.Now(), !run.observing.Load())
+				work, err = c.work.ClaimAvoiding(run.ctx, run.unthrottled(), time.Now(), !run.observing.Load(), full)
 			}
 		default:
-			work, err = c.work.Claim(run.ctx, run.unthrottled(), time.Now(), !run.observing.Load())
+			work, err = c.work.ClaimAvoiding(run.ctx, run.unthrottled(), time.Now(), !run.observing.Load(), run.fullServers(c.work))
 		}
 		smaller = false
 		if err != nil {
@@ -1268,6 +1271,43 @@ func (c *Controller) worker(run *running, index int) {
 func attemptTimeout(size int64) time.Duration {
 	seconds := min(max(size, 0)/(16*1024), int64((24*time.Hour)/time.Second))
 	return min(2*time.Minute+time.Duration(seconds)*time.Second, 24*time.Hour)
+}
+
+// fullServers are the servers whose file slots the files downloading now
+// fill (WorkStore.FullServers), for a run of one account whose client knows
+// its slots; nil otherwise (claims then go in rank order alone, as before
+// ix.12.4). Their files are left in the queue for the next claim: a worker
+// takes a file on another server instead of waiting for a slot.
+func (r *running) fullServers(work *WorkStore) []int {
+	if len(r.ids) != 1 {
+		return nil
+	}
+	slots, ok := r.accounts[r.ids[0]].(interface{ FileSlots() (small, large int) })
+	if !ok {
+		return nil
+	}
+	small, large := slots.FileSlots()
+	full, err := work.FullServers(r.ctx, small, large)
+	if err != nil {
+		return nil
+	}
+	return full
+}
+
+// fillServers records the servers of rows queued before ix.12.4, in the
+// background, a batch at a time.
+func (c *Controller) fillServers(ctx context.Context) {
+	for ctx.Err() == nil {
+		n, err := c.work.FillServers(ctx, 500)
+		if err != nil || n == 0 {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
 }
 
 // speedLimitedOnly: every account waiting now waits only because of

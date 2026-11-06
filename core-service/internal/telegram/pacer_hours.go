@@ -30,6 +30,12 @@ type PaceHour struct {
 	// to tell whether the limit is per server (ix.12.3).
 	DCBytes   map[int]int64 `json:"dcBytes,omitempty"`
 	DCPremium map[int]int   `json:"dcPremium,omitempty"`
+	// Per server (ix.12.4): the seconds Telegram asked for in its speed-limit
+	// waits, summed, and the waits that came for the same file as that
+	// server's wait before (a limit per file would show as most of them
+	// when several files are downloading).
+	DCPremiumSecs map[int]int `json:"dcPremiumSecs,omitempty"`
+	DCPremiumSame map[int]int `json:"dcPremiumSame,omitempty"`
 	// Per server, sampled every interval it was in use: parts in flight,
 	// requests waiting for room, and the window, summed (DCSamples of them).
 	// Their averages say whether the window, or too few parts asked for, is
@@ -137,14 +143,21 @@ func (h *PaceHour) derive() {
 	}
 }
 
-func (p *downloadPacer) hourWaitLocked(now time.Time, dc int, premium bool) {
+func (p *downloadPacer) hourWaitLocked(now time.Time, dc int, premium bool, asked time.Duration, same bool) {
 	h := p.hourLocked(now)
 	if premium {
 		h.Premium++
 		if h.DCPremium == nil {
-			h.DCPremium = map[int]int{}
+			h.DCPremium, h.DCPremiumSecs, h.DCPremiumSame = map[int]int{}, map[int]int{}, map[int]int{}
+		}
+		if h.DCPremiumSecs == nil {
+			h.DCPremiumSecs, h.DCPremiumSame = map[int]int{}, map[int]int{}
 		}
 		h.DCPremium[dc]++
+		h.DCPremiumSecs[dc] += int(asked.Round(time.Second).Seconds())
+		if same {
+			h.DCPremiumSame[dc]++
+		}
 	} else {
 		h.Waits++
 	}
@@ -214,6 +227,7 @@ func (p *downloadPacer) hoursNewestFirst() []PaceHour {
 		h := p.hours[i]
 		// The live hour's maps change under the lock.
 		h.DCBytes, h.DCPremium = maps.Clone(h.DCBytes), maps.Clone(h.DCPremium)
+		h.DCPremiumSecs, h.DCPremiumSame = maps.Clone(h.DCPremiumSecs), maps.Clone(h.DCPremiumSame)
 		h.DCSamples, h.DCInflight, h.DCWaiting, h.DCWindow = maps.Clone(h.DCSamples), maps.Clone(h.DCInflight), maps.Clone(h.DCWaiting), maps.Clone(h.DCWindow)
 		h.DCLarge, h.DCLargeWaiting, h.DCLargeLimit = maps.Clone(h.DCLarge), maps.Clone(h.DCLargeWaiting), maps.Clone(h.DCLargeLimit)
 		out = append(out, h)

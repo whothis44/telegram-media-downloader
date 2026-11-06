@@ -104,6 +104,8 @@ func (a *App) ixDiagHours(ctx context.Context, now time.Time) []string {
 					}
 					r.pace.DCPremium[dc] += n
 				}
+				ixAddCounts(&r.pace.DCPremiumSecs, h.DCPremiumSecs)
+				ixAddCounts(&r.pace.DCPremiumSame, h.DCPremiumSame)
 				ixAddCounts(&r.pace.DCSamples, h.DCSamples)
 				ixAddCounts(&r.pace.DCInflight, h.DCInflight)
 				ixAddCounts(&r.pace.DCWaiting, h.DCWaiting)
@@ -161,6 +163,9 @@ func (a *App) ixDiagHours(ctx context.Context, now time.Time) []string {
 			}
 			if len(r.pace.DCSamples) > 0 {
 				line += " | parts per server, on average: " + ixDCLoad(r.pace)
+			}
+			if w := ixDCWaits(r.pace); w != "" {
+				line += " | speed-limit waits per server: " + w
 			}
 			if r.pace.TriesUp+r.pace.TriesDown > 0 {
 				line += " | " + ixTriesLine(r.pace)
@@ -271,6 +276,25 @@ func ixDCList(bytes map[int]int64, premium map[int]int) string {
 		}
 	}
 	return strings.Join(parts, ", ")
+}
+
+// ixDCWaits is each server's speed-limit waits of an hour: how long Telegram
+// asked for on average, and how many came for the same file as that server's
+// wait before (ix.12.4; hours recorded before have no asked seconds).
+func ixDCWaits(h telegram.PaceHour) string {
+	var dcs []int
+	for dc := range h.DCPremiumSecs {
+		if h.DCPremium[dc] > 0 {
+			dcs = append(dcs, dc)
+		}
+	}
+	sort.Ints(dcs)
+	parts := make([]string, len(dcs))
+	for i, dc := range dcs {
+		n := h.DCPremium[dc]
+		parts[i] = fmt.Sprintf("DC%d %d, %.1f s asked on average, %d for the same file as the wait before", dc, n, float64(h.DCPremiumSecs[dc])/float64(n), h.DCPremiumSame[dc])
+	}
+	return strings.Join(parts, "; ")
 }
 
 func ixKindList(m map[string]int) string {

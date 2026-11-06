@@ -246,6 +246,18 @@ func RunMigrations(ctx context.Context, db *sql.DB) (int, error) {
 			return 0, fmt.Errorf("add partial download staging folder: %w", err)
 		}
 	}
+	// dc: the Telegram server (datacenter) the queued file is stored on, so
+	// that no server holds more files than it has slots while another has
+	// work (ix.12.4); 0 until known (engine.WorkStore.FillServers).
+	var dcColumn int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('tgdl_work') WHERE name='dc'`).Scan(&dcColumn); err != nil {
+		return 0, fmt.Errorf("inspect queue schema: %w", err)
+	}
+	if dcColumn == 0 {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE tgdl_work ADD COLUMN dc INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return 0, fmt.Errorf("add queue server: %w", err)
+		}
+	}
 	// Descriptive Telegram media facts for likely-duplicate detection. Added
 	// columns only; existing rows simply keep NULLs.
 	for _, column := range []struct{ name, kind string }{

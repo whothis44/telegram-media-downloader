@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.18-ix.12.4] — 2026-11-05
+
+### Changed
+- **A speed-limit wait holds only the request that got it.** Until now, each FLOOD_PREMIUM_WAIT (Telegram's speed limit for accounts without Premium) stopped every file on every server for the wait, and no file could start meanwhile. Under the limit that was most of the time, so one server ended up holding nearly every download while the others sat idle. Telegram's own apps (TDLib) wait out such a reply with that one request and let the others go on; so does this version. Fallbacks: a plain FLOOD_WAIT on a file part, or most file requests refused (40 or more speed-limit waits in 10 minutes and over two per part answered), goes back to every file waiting for each, for two hours.
+- **At least 2 parts in flight per server while the speed limit is on** (Telegram's own apps keep 2 MiB per server without Premium; parts here are 1 MiB). Windows had drifted to one part, and while the limit was on they could not change. Not raised within 10 minutes of a plain FLOOD_WAIT; larger windows are left as they are.
+- **No server holds more files than it has slots while another server has files queued.** Each queued file now records the server it is stored on (rows queued before are read once, in the background, from their stored messages). A worker takes the best file on a server with a free slot rather than waiting behind a full one. Within a server the order is the ranking, as before.
+
+### Added
+- Diagnostics: how speed-limit waits are taken now and the fallbacks taken since start; per server and hour, the seconds Telegram asked for on average and how many waits came for the same file as the wait before. These say whether the limit is per server, per file, or the account's, which no version could tell apart while one wait stopped every server.
+- Diagnostics: a `[memory]` section: heap in use, what the process reserved, goroutines, and the ten functions holding the most heap now (estimated from Go's sampled heap profile; function names and sizes only).
+- CI: the end-to-end checks run as separate jobs (process, media, browser), so a slow package mirror or a flaky check re-runs only its own job.
+
+### Fixed
+- The console printed "Telegram profile photo unavailable" once per group on every page that showed the groups; a reason is now printed once an hour, with how many times it came meanwhile.
+
+### Limits
+- Whether this brings more under the speed limit depends on how Telegram applies it, which it does not publish: if the limit is the account's, the speed stays about the same; the report's new figures say.
+
 ## [3.4.18-ix.12.3] — 2026-11-05
 
 ### Added

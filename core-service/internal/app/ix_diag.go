@@ -139,6 +139,10 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 	for _, l := range a.ixRestartsDiag(now) {
 		line("%s", l)
 	}
+	line("\n[memory]")
+	for _, l := range ixMemoryDiag() {
+		line("%s", l)
+	}
 	line("")
 	line("%s", r.clean(a.ixGoneDiag(now)))
 	line("\n[rescan queue]")
@@ -165,6 +169,17 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 	// The 5-minute figure first: "now" counts whole 1 MiB parts of the last few
 	// seconds, so a few parts read as the same speed on every server.
 	line("speed %.2f MB/s over 5 min, %.2f MB/s now · parts in flight allowed %d · Telegram waits: %d in the last hour, %d in the last day · speed-limit waits (no Premium): %d in the last hour, %d in the last day", mb(d.Pace.Speed5m), mb(d.Pace.Speed), d.Pace.Window, d.Pace.Floods1h, d.Pace.Floods24h, d.Pace.Premium1h, d.Pace.Premium24h)
+	if !d.Pace.Off {
+		mode := "each holds only the request that got it (ix.12.4)"
+		if !d.Pace.PremiumPerRequest && !d.Pace.PremiumShared.IsZero() {
+			mode = "every file waits for each (as before ix.12.4) until " + d.Pace.PremiumShared.In(ixTZ).Format("15:04")
+		}
+		fb := ixKindList(d.Pace.PremiumFallbacks)
+		if fb == "" {
+			fb = "none"
+		}
+		line("speed-limit waits: %s · back to every file waiting, since start: %s", mode, fb)
+	}
 	for _, dc := range d.Pace.DCs {
 		line("  DC%d: window %d, in flight %d, waiting %d, %.2f MB/s over 5 min (now %.2f), %.1f s a part, waits last hour %d (speed limit %d) · %s", dc.DC, dc.Window, dc.InFlight, dc.Waiting, mb(dc.Speed5m), mb(dc.Speed), dc.PartSecs, dc.Floods1h, dc.Premium1h, dc.State)
 		line("    Telegram wait time since start: %.1f request-seconds (summed across requests, separate from network response time)", dc.GateWaitSecs)

@@ -52,6 +52,9 @@ func (c *GotdClient) DownloadPace() PaceStats {
 		return PaceStats{}
 	}
 	s := c.pacer.stats()
+	if c.guard != nil {
+		s.PremiumPerRequest, s.PremiumShared, s.PremiumFallbacks = c.guard.PremiumMode()
+	}
 	if c.files != nil {
 		c.files.fillStats(&s)
 	}

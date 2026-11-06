@@ -75,6 +75,7 @@ const (
 	paceInterval     = 10 * time.Second
 	paceStart        = 2   // conservative starting point for regular accounts
 	paceMin          = 1   // never fewer
+	paceLimitedFloor = 2   // while the speed limit is on: TDLib's 2 MiB per server without Premium, in 1 MiB parts
 	paceMax          = 8   // local regular-account ceiling, not a claimed Telegram quota
 	paceGainShare    = 0.5 // a try is kept when it brings at least half the speed it could (step/window)
 	paceCut          = 0.6
@@ -160,14 +161,15 @@ type dcPace struct {
 	fullAt                                       time.Time // the last interval downloads waited for room
 	state                                        string
 
-	speed       float64   // bytes a second, last interval
-	history     []float64 // last intervals' speeds
-	floodAt     []time.Time
-	premiumAt   []time.Time
-	lastUse     time.Time
-	gateWait    time.Duration // cumulative deliberate waits, summed across requests
-	gateWaiting int           // requests currently sleeping for Telegram
-	waitedGate  bool          // an interval containing a wait is not a throughput experiment
+	speed           float64   // bytes a second, last interval
+	history         []float64 // last intervals' speeds
+	floodAt         []time.Time
+	premiumAt       []time.Time
+	lastUse         time.Time
+	gateWait        time.Duration // cumulative deliberate waits, summed across requests
+	gateWaiting     int           // requests currently sleeping for Telegram
+	lastPremiumFile int64         // the file the last speed-limit wait came for
+	waitedGate      bool          // an interval containing a wait is not a throughput experiment
 }
 
 type downloadPacer struct {
@@ -325,12 +327,20 @@ func (p *downloadPacer) waitingOnTelegram(dc int, on bool) {
 // Premium after tens of gigabytes: fewer parts in flight would not avoid it
 // (the official apps do not cut for it either), so it does not cut the
 // window; it pauses the tries, whose speeds it would distort.
-func (p *downloadPacer) flood(dc int, premium bool) {
+func (p *downloadPacer) flood(dc int, premium bool) { p.floodFor(dc, premium, 0, 0) }
+
+// floodFor is flood with the wait Telegram asked for and the file (0: not
+// known) it came for, for the hour-by-hour record.
+func (p *downloadPacer) floodFor(dc int, premium bool, asked time.Duration, file int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := p.now()
 	d := p.dcLocked(dc)
-	p.hourWaitLocked(now, dc, premium)
+	same := file != 0 && file == d.lastPremiumFile
+	if premium {
+		d.lastPremiumFile = file
+	}
+	p.hourWaitLocked(now, dc, premium, asked, same)
 	if premium {
 		d.premium++
 		d.premiumAt = append(d.premiumAt, now)
@@ -405,6 +415,13 @@ func (p *downloadPacer) tick() {
 			// last stable window and wait before taking fresh measurements.
 			if d.trial != 0 {
 				d.window, d.trial = d.trialFrom, 0
+			}
+			if d.premium > 0 && d.window < paceLimitedFloor && (d.lastCut.IsZero() || now.Sub(d.lastCut) >= paceCeiling) {
+				// Telegram's own apps keep 2 MiB of parts in flight per
+				// server without Premium (TDLib's FileDownloadManager):
+				// not fewer while the speed limit is on, unless a plain
+				// FLOOD_WAIT came lately (ix.12.4).
+				d.window = paceLimitedFloor
 			}
 			d.steady, d.steadyLat = nil, nil
 			if until := now.Add(paceFloodHold); until.After(d.holdUntil) {
@@ -677,13 +694,19 @@ type PaceStats struct {
 	Floods1h  int     `json:"floods1h"`
 	Floods24h int     `json:"floods24h"`
 	// Premium waits: Telegram's speed limit for accounts without Premium.
-	Premium1h  int        `json:"premium1h"`
-	Premium24h int        `json:"premium24h"`
-	Premium10m int        `json:"premium10m"` // the last 10 minutes: is a limit what sets the pace now
-	Floods10m  int        `json:"floods10m"`
-	FloodsHour [24]int    `json:"floodsByHour"` // [0] is the current hour
-	Hours      []PaceHour `json:"hours"`        // the last 48 hours, newest first
-	DCs        []DCPace   `json:"dcs"`
+	Premium1h  int `json:"premium1h"`
+	Premium24h int `json:"premium24h"`
+	Premium10m int `json:"premium10m"` // the last 10 minutes: is a limit what sets the pace now
+	// How speed-limit waits are taken (ix.12.4): each by its own request, or
+	// by every file at once until SharedUntil (the fallback), and the
+	// fallbacks taken since start, by why.
+	PremiumPerRequest bool           `json:"premiumPerRequest"`
+	PremiumShared     time.Time      `json:"premiumSharedUntil,omitempty"`
+	PremiumFallbacks  map[string]int `json:"premiumFallbacks,omitempty"`
+	Floods10m         int            `json:"floods10m"`
+	FloodsHour        [24]int        `json:"floodsByHour"` // [0] is the current hour
+	Hours             []PaceHour     `json:"hours"`        // the last 48 hours, newest first
+	DCs               []DCPace       `json:"dcs"`
 }
 
 func (p *downloadPacer) stats() PaceStats {

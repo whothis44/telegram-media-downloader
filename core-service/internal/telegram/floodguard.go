@@ -49,6 +49,119 @@ type floodGuard struct {
 	untilSpeedOnly, filesSpeedOnly bool
 	// floods counts the FLOOD_WAITs Telegram has answered this account with.
 	floods atomic.Uint64
+	// sharedUntil: until then a FLOOD_PREMIUM_WAIT on a file part closes
+	// the files' gate for every server, as before ix.12.4 (the fallback).
+	// Otherwise only the request that got it waits (premiumPerRequest).
+	sharedUntil time.Time
+	// The last few minutes of file parts: answered, and speed-limit waits,
+	// for the fallback rule (premiumRecent).
+	partsAt, premiumAt []time.Time
+	// fallbacks counts the times the fallback was taken, with why.
+	fallbacks map[string]int
+}
+
+// A FLOOD_PREMIUM_WAIT on a file part is waited out by that request alone
+// (ix.12.4), as Telegram's own apps do (TDLib's NetQueryDelayer delays the
+// one query; each server keeps its own download budget). Before, every file
+// on every server stopped for each one, and no file could be started
+// meanwhile: under the speed limit that was most of the time.
+//
+// The fallback to the shared gate, for premiumFallbackFor:
+//   - a plain FLOOD_WAIT on a file part (asking too much, not the speed
+//     limit);
+//   - most file requests refused: at least premiumRecentMin speed-limit
+//     waits in premiumRecent and more than premiumRecentRatio per part
+//     answered meanwhile.
+var (
+	premiumFallbackFor = 2 * time.Hour
+	premiumRecent      = 10 * time.Minute
+	premiumRecentMin   = 40
+	premiumRecentRatio = 2.0
+)
+
+// Why the fallback was taken (PremiumFallbacks).
+const (
+	FallbackPlainWait = "plain FLOOD_WAIT on a file part"
+	FallbackRefused   = "most file requests refused"
+)
+
+// premiumPerRequest says whether a speed-limit wait on a file part holds only
+// that request now (false: the shared gate, the fallback).
+func (g *floodGuard) premiumPerRequest(now time.Time) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return !now.Before(g.sharedUntil)
+}
+
+// fallBackLocked goes back to the shared gate for premiumFallbackFor.
+func (g *floodGuard) fallBackLocked(now time.Time, why string) {
+	if now.Before(g.sharedUntil) {
+		return
+	}
+	g.sharedUntil = now.Add(premiumFallbackFor)
+	if g.fallbacks == nil {
+		g.fallbacks = map[string]int{}
+	}
+	g.fallbacks[why]++
+}
+
+// partAnswered and partPremium keep the recent record of file parts.
+func (g *floodGuard) partAnswered(now time.Time) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.partsAt = append(trimTimes(g.partsAt, now.Add(-premiumRecent)), now)
+}
+
+func (g *floodGuard) partPremium(now time.Time) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.premiumAt = append(trimTimes(g.premiumAt, now.Add(-premiumRecent)), now)
+	g.partsAt = trimTimes(g.partsAt, now.Add(-premiumRecent))
+	if len(g.premiumAt) >= premiumRecentMin && float64(len(g.premiumAt)) > premiumRecentRatio*float64(max(1, len(g.partsAt))) {
+		g.fallBackLocked(now, FallbackRefused)
+	}
+}
+
+// PremiumMode reports how speed-limit waits are taken now: per request, or
+// the shared gate until when; and the fallbacks taken since start, by why.
+func (g *floodGuard) PremiumMode() (perRequest bool, sharedUntil time.Time, fallbacks map[string]int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	now := time.Now()
+	out := make(map[string]int, len(g.fallbacks))
+	for k, v := range g.fallbacks {
+		out[k] = v
+	}
+	if now.Before(g.sharedUntil) {
+		return false, g.sharedUntil, out
+	}
+	return true, time.Time{}, out
+}
+
+// sleepRequest waits d for this request alone, outside the transfer's time
+// budget, as the gate's waits are.
+func sleepRequest(ctx context.Context, d time.Duration, hooks partHooks) error {
+	resume := pauseDownloadWait(ctx)
+	if hooks.waiting != nil {
+		hooks.waiting(true)
+	}
+	started := time.Now()
+	timer := time.NewTimer(d)
+	var err error
+	select {
+	case <-ctx.Done():
+		timer.Stop()
+		err = ctx.Err()
+	case <-timer.C:
+	}
+	resume()
+	if hooks.waiting != nil {
+		hooks.waiting(false)
+	}
+	if hooks.waited != nil {
+		hooks.waited(time.Since(started))
+	}
+	return err
 }
 
 func newFloodGuard() *floodGuard {
@@ -216,14 +329,37 @@ func (g *floodGuard) invokeGate(ctx context.Context, next tg.Invoker, input bin.
 		} else {
 			err = next.Invoke(ctx, input, output)
 		}
+		if files && err == nil {
+			g.partAnswered(time.Now())
+		}
 		d, flood := tgerr.AsFloodWait(err)
 		if !flood {
 			return err
 		}
+		premium := tgerr.Is(err, tgerr.ErrPremiumFloodWait)
 		if hooks.flood != nil {
-			hooks.flood(d, tgerr.Is(err, tgerr.ErrPremiumFloodWait))
+			hooks.flood(d, premium)
 		}
-		g.closeGate(d, files, tgerr.Is(err, tgerr.ErrPremiumFloodWait))
+		if files && premium {
+			now := time.Now()
+			perRequest := g.premiumPerRequest(now)
+			g.partPremium(now)
+			if perRequest {
+				// This request alone waits; the other files, here and on
+				// the other servers, go on.
+				g.floods.Add(1)
+				if err := sleepRequest(ctx, d+floodGateMargin, hooks); err != nil {
+					return err
+				}
+				continue
+			}
+		}
+		if files && !premium {
+			g.mu.Lock()
+			g.fallBackLocked(time.Now(), FallbackPlainWait)
+			g.mu.Unlock()
+		}
+		g.closeGate(d, files, premium)
 		// A regular account may receive speed-limit waits for hours. Keep
 		// the same part/transfer alive, without spending failure attempts or
 		// throwing away bytes already written. The next loop waits on the
