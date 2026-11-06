@@ -55,7 +55,8 @@ jobs:
           python tests/e2e/cluster_live_process.py
           python tests/e2e/ftp_interop.py
       - name: Install FFmpeg for media E2E
-        timeout-minutes: 3
+        # The package mirror can crawl (about 50 KB/s on 2026-11-06): 3 minutes failed a good build.
+        timeout-minutes: 10
         run: |
           command -v ffmpeg && command -v ffprobe && exit 0
           sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
@@ -111,3 +112,5 @@ jobs:
       - run: python tests/ui/queue_place.py
       - run: python tests/ui/archive_priorities.py
       - run: python tests/ui/archive_update_banner.py
+      - run: python tests/ui/archive_layout.py
+      - run: python tests/ui/queue_download_order.py
