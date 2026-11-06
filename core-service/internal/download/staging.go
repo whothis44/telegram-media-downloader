@@ -536,6 +536,18 @@ func (l *Library) moveStaged(ctx context.Context, mv stagedMove) error {
 			l.stageSignal()
 			return nil
 		}
+		// Moved to the library by hand, at its own path (ix.12.6): the
+		// journal's size and SHA-256 say it is the same file.
+		if l.stagedInLibrary(ctx, mv) {
+			if record, err := l.register(ctx, item, l.stagedCandidate(mv), false); err == nil {
+				_, _ = l.writer.ExecContext(context.WithoutCancel(ctx), `DELETE FROM tgdl_stage_moves WHERE path=?`, mv.path)
+				if l.OnStaged != nil {
+					l.OnStaged(context.WithoutCancel(ctx), item, record)
+				}
+				l.stageSignal()
+				return nil
+			}
+		}
 		// Removed by someone or something else: its messages go back in the queue.
 		return l.stagedLost(ctx, mv, append([]Item{item}, d.followers...), append([]stageFate{d.fate}, d.fates...))
 	}
@@ -1002,6 +1014,32 @@ func (l *Library) stageFollowers(ctx context.Context, path string) ([]Item, erro
 
 // stagedArrived reports whether mv's file is catalogued in the library
 // with its bytes.
+// stagedInLibrary: the library holds mv's file at mv's path with the
+// journal's size and SHA-256 (moved there by hand).
+func (l *Library) stagedInLibrary(ctx context.Context, mv stagedMove) bool {
+	f, info, err := l.open(mv.path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	if info.Size() != mv.size {
+		return false
+	}
+	sum, _, err := hashFile(ctx, f)
+	return err == nil && sum == mv.sum
+}
+
+// stagedCandidate is mv's file in the library, for register.
+func (l *Library) stagedCandidate(mv stagedMove) candidate {
+	c := candidate{path: mv.path, sha256: mv.sum}
+	if f, info, err := l.open(mv.path); err == nil {
+		c.info = info
+		c.fingerprint, _ = fileFingerprint(f, info)
+		f.Close()
+	}
+	return c
+}
+
 func (l *Library) stagedArrived(ctx context.Context, mv stagedMove) bool {
 	var n int
 	if l.reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM downloads WHERE file_path=? AND lower(file_hash)=?`, mv.path, mv.sum).Scan(&n) != nil || n == 0 {
