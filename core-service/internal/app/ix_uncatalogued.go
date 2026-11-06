@@ -61,10 +61,17 @@ func (a *App) ixPlanUncatalogued(ctx context.Context) ([]ixMoveOp, error) {
 		if m == nil || len(sum) != 64 || size <= 0 {
 			continue
 		}
-		folders[dir] = true
-		k := dir + "/" + m[1] + m[3] + "\x00" + strconv.FormatInt(size, 10)
-		if _, ok := keep[k]; !ok {
-			keep[k] = keeper{rel, sum, size}
+		// A file in a topic folder may have a hand-moved copy in the
+		// group's own type folder, where it went before (ix.12.10).
+		for _, d := range []string{dir, ixTopicLegacyDir(dir)} {
+			if d == "" {
+				continue
+			}
+			folders[d] = true
+			k := d + "/" + m[1] + m[3] + "\x00" + strconv.FormatInt(size, 10)
+			if _, ok := keep[k]; !ok {
+				keep[k] = keeper{rel, sum, size}
+			}
 		}
 	}
 	rows.Close()

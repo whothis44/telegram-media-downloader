@@ -1177,6 +1177,9 @@ func (a *App) handleIxMovePlan(w http.ResponseWriter, r *http.Request) {
 	case "uncatalogued-copies":
 		ops, err = a.ixPlanUncatalogued(ctx)
 		title = "Move copies the catalogue does not know to _trash (same name, message and size as a catalogued file in the same folder; the bytes are compared before each move)"
+	case ixTopicPlanKind:
+		ops, err = a.ixPlanTopicFolders(ctx)
+		title = "Move forum files into their topic's folder (<group>/<topic>/<type>; General stays; the bytes are checked before each move)"
 	case "collection", "originals":
 		m, merr := a.ixModelNow(ctx)
 		if m == nil {
@@ -1232,7 +1235,7 @@ func (a *App) handleIxMovePlan(w http.ResponseWriter, r *http.Request) {
 		}
 		ops, err = a.ixPlanCopy(ctx, m, uniq, toString(b["folder"]), move)
 	default:
-		err = errors.New("kind must be duplicate-copies, uncatalogued-copies, collection or originals")
+		err = errors.New("kind must be duplicate-copies, uncatalogued-copies, topic-folders, collection or originals")
 	}
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())

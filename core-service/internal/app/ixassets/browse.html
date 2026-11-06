@@ -166,6 +166,7 @@ mark{background:#fff1a8;color:#111}
         <p class="muted" style="margin:0">Every plan is listed in full before anything happens. Applying it checks each file's fingerprint at its new place before the old copy is let go, records every step, and can be undone. Nothing is ever deleted: "trash" means a dated <code>_trash</code> folder in the downloads folder.</p>
         <div class="row"><b>Extra copies:</b> <button class="b" id="plan-dups">Plan: move extra copies to _trash (byte-identical files, near-identical videos)</button>
           <button class="b" id="plan-uncat" title="Files in the library the catalogue does not know, with the same name, message and size as a catalogued file beside them: copies moved in by hand and downloaded again. Their bytes are compared before each move.">Plan: move uncatalogued copies to _trash</button></div>
+        <div class="row"><b>Forum topics:</b> <button class="b" id="plan-topics" title="Files of forum groups saved before topic folders existed move from group/type to group/topic/type. The General topic stays where it is. Each file's fingerprint is checked before it moves, and the plan can be undone.">Plan: move forum files into topic folders</button></div>
         <div class="row"><b>A collection:</b> <select class="t" id="plan-coll"></select> to folder <input class="t" id="plan-coll-dir" placeholder="collections/my-set"> <label class="chk"><input type="checkbox" id="plan-coll-move"> move instead of copy</label> <button class="b" id="plan-coll-go">Plan</button></div>
         <div class="row"><b>Originals of:</b> <select class="t" id="plan-orig"></select> to folder <input class="t" id="plan-orig-dir" placeholder="originals/sports"> <label class="chk"><input type="checkbox" id="plan-orig-move"> move instead of copy</label> <button class="b" id="plan-orig-go">Plan</button></div>
         <div id="plans"></div>
@@ -928,6 +929,7 @@ async function makePlan(body) {
 }
 $('#plan-dups').onclick = () => makePlan({ kind: 'duplicate-copies' });
 $('#plan-uncat').onclick = () => makePlan({ kind: 'uncatalogued-copies' });
+$('#plan-topics').onclick = () => makePlan({ kind: 'topic-folders' });
 $('#plan-coll-go').onclick = () => makePlan({ kind: 'collection', collection: Number($('#plan-coll').value), folder: $('#plan-coll-dir').value, move: $('#plan-coll-move').checked });
 $('#plan-orig-go').onclick = () => { const v = $('#plan-orig').value; makePlan({ kind: 'originals', category: v.startsWith('cat:') ? v.slice(4) : '', group: v.startsWith('group:') ? v.slice(6) : '', folder: $('#plan-orig-dir').value, move: $('#plan-orig-move').checked }); };
 async function loadPlans() {

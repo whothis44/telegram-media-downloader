@@ -34,6 +34,10 @@ type Item struct {
 	Identity   telegram.MediaIdentity
 	Facts      telegram.MediaFacts
 	TTLSeconds int // self-destruct timer of the source media, 0 when none
+	// Topic: the folder of the message's forum topic inside the group's
+	// folder ("": none, or the General topic). It is the topic's name when
+	// its first file was saved (ix.12.10), already a safe path component.
+	Topic string `json:",omitempty"`
 	// SkipDuplicates: media already in the library under another message is
 	// not catalogued again. Reposts and forwards of one photo or clip
 	// otherwise each became an entry pointing at the same file.
@@ -433,6 +437,9 @@ func (c hashClient) DownloadFrom(ctx context.Context, id telegram.MediaIdentity,
 	return c.Client.(ResumeClient).DownloadFrom(ctx, id, offset, io.MultiWriter(w, c.digest))
 }
 
+// SafeComponent is value made safe as one folder or file name.
+func SafeComponent(value string) string { return safeComponent(value) }
+
 func safeComponent(value string) string {
 	value = strings.Map(func(r rune) rune {
 		if r < 32 || strings.ContainsRune(`/\:*?"<>|`, r) {
@@ -483,6 +490,9 @@ func destinationParts(item Item) (dir, stem, ext string) {
 		folder = "gifs"
 	}
 	dir = filepath.Join(safeComponent(group), folder)
+	if strings.TrimSpace(item.Topic) != "" {
+		dir = filepath.Join(safeComponent(group), safeComponent(item.Topic), folder)
+	}
 	name := safeComponent(item.Name)
 	ext = filepath.Ext(name)
 	stem = strings.TrimSuffix(name, ext) + "_" + strconv.FormatInt(item.MessageID, 10) + "_"
@@ -494,6 +504,23 @@ func destinationParts(item Item) (dir, stem, ext string) {
 // not know: copies of it that reached the library by hand (ix.12.6).
 func (l *Library) orphansFor(ctx context.Context, item Item) []string {
 	dir, stem, ext := destinationParts(item)
+	dirs := []string{dir}
+	if item.Topic != "" {
+		// A forum topic's file moved in by hand may sit in the group's own
+		// type folder, where files went before topic folders (ix.12.10).
+		plain := item
+		plain.Topic = ""
+		legacy, _, _ := destinationParts(plain)
+		dirs = append(dirs, legacy)
+	}
+	var out []string
+	for _, dir := range dirs {
+		out = append(out, l.orphansIn(ctx, item, dir, stem, ext)...)
+	}
+	return out
+}
+
+func (l *Library) orphansIn(ctx context.Context, item Item, dir, stem, ext string) []string {
 	var out []string
 	for _, e := range l.folderListing(dir) {
 		name := e.name

@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.18-ix.12.10] — 2026-11-06
+
+### Added
+- **Big-video checks remember what they saw.** A check of a big queued video samples frames from Telegram and compares them with the saved videos of a similar length. Until now a "no match" was final, even when the video's original was saved later, and checking again would cost the parts again. The sampled frames (about 20 bytes each) are now kept with the check, and whenever saved videos get their fingerprints, the queued videos still waiting with a "no match" are compared with them on this computer: no request to Telegram, nothing downloaded. A copy found this way is held at the back like any other probable copy; a partial match waits at the back too. Checks made before this version kept no frames and are not compared again.
+- **Forum topic folders.** A file of a forum group's topic is saved in `<group>/<topic>/<type>/`; the General topic, and chats without topics, stay in `<group>/<type>/`. A topic's folder keeps the name the topic had when its first file was saved (a rename later moves nothing); two topics with the same name get the topic's number added to the second, and a topic whose name is not known yet is "Topic <number>". Files saved before: Organise → "Plan: move forum files into topic folders", listed in full first, each file's SHA-256 checked before it moves, and undone in one click. A copy moved in by hand where such files went before is still adopted rather than downloaded again, and the "uncatalogued copies" plan still pairs it with its file.
+- Report: big-video checks in the last hour and the last 24 hours (checks, MB of parts, copies, partial matches), how many videos wait for a check, the checks' turn, and what comparing kept frames again found.
+
+### Changed
+- **Big-video checks get 3 minutes in every 10 while downloads are busy or speed-limited** (1 minute until now). On one archive they ran about 7 an hour under the speed limit, using about 84 MB of parts an hour (2.4% of what came in), while about 1,900 big videos waited for a check; a check of a video no other check had flagged found a copy about one time in six (a rough figure). The new report line shows whether the longer turn pays off.
+
+### Fixed
+- **Organise moves now take the archive's other records of a file along.** A move pointed only the catalogue at the file's new place; the held copies that looked like it, links of messages sharing it, integrity checks, fingerprints and lower-quality records kept the old path. A held copy whose saved look-alike was moved was then let go as if that file had left the archive. On the archive this was found on, no move had ever been made. Undo puts them back too.
+
 ## [3.4.18-ix.12.9] — 2026-11-06
 
 ### Added

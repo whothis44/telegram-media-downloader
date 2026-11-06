@@ -761,6 +761,9 @@ func (a *App) ixRepoint(ctx context.Context, plan int64, o ixMoveOp) error {
 	if _, err = tx.ExecContext(ctx, `UPDATE downloads SET file_path=? WHERE id IN (`+strings.Join(ids, ",")+`)`, o.Repoint); err != nil {
 		return err
 	}
+	if err = ixRepointRefs(ctx, tx, []string{original, o.Src}, o.Repoint); err != nil {
+		return err
+	}
 	if _, err = tx.ExecContext(ctx, `UPDATE ix_moves SET rows=?, src_stored=? WHERE plan_id=? AND seq=?`, strings.Join(ids, ","), original, plan, o.Seq); err != nil {
 		return err
 	}
@@ -806,6 +809,43 @@ func (a *App) ixUnrepoint(ctx context.Context, plan int64, o ixMoveOp) error {
 		if _, err := tx.ExecContext(ctx, `UPDATE downloads SET file_path=? WHERE id IN (`+strings.Join(back, ",")+`)`, original); err != nil {
 			return err
 		}
+		if err := ixRepointRefs(ctx, tx, []string{o.Repoint}, original); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
+}
+
+// ixPathRefs are the archive's other records that name a library file by
+// its path. A move pointed only the catalogue (downloads) at the new place
+// until ix.12.10, so a held copy whose saved look-alike was moved was let go
+// as if that file had left the archive.
+var ixPathRefs = [][2]string{
+	{"ix_held", "like_path"}, {"ix_msg_link", "of_path"}, {"ix_subst", "of_path"},
+	{"ix_vfp", "file_path"}, {"ix_pdq", "file_path"}, {"ix_lowq", "alt_path"}, {"ix_fixity", "path"},
+}
+
+// ixRepointRefs points those records at to (from: the file's old spellings).
+func ixRepointRefs(ctx context.Context, tx *sql.Tx, from []string, to string) error {
+	seen := map[string]bool{}
+	var olds []any
+	for _, f := range from {
+		for _, v := range []string{f, ixNormPath(f), strings.ReplaceAll(ixNormPath(f), "/", `\`)} {
+			if v != "" && v != to && !seen[v] {
+				seen[v] = true
+				olds = append(olds, v)
+			}
+		}
+	}
+	if len(olds) == 0 {
+		return nil
+	}
+	marks := strings.TrimSuffix(strings.Repeat("?,", len(olds)), ",")
+	for _, r := range ixPathRefs {
+		// OR REPLACE: ix_fixity is keyed by the path.
+		if _, err := tx.ExecContext(ctx, `UPDATE OR REPLACE `+r[0]+` SET `+r[1]+`=? WHERE `+r[1]+` IN (`+marks+`)`, append([]any{to}, olds...)...); err != nil {
+			return err
+		}
+	}
+	return nil
 }
