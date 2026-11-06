@@ -13,7 +13,8 @@ jobs:
   go:
     name: Go application
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    # Room for the package installs below when the mirror is slow.
+    timeout-minutes: 110
     defaults:
       run:
         working-directory: core-service
@@ -40,12 +41,12 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install process E2E dependencies
-        timeout-minutes: 3
+        timeout-minutes: 10
         working-directory: .
         run: |
           python -m pip install --timeout 30 --retries 2 pyftpdlib==2.2.0 pyOpenSSL cryptography websocket-client
       - name: Native process end-to-end checks
-        timeout-minutes: 5
+        timeout-minutes: 8
         working-directory: .
         run: |
           python tests/e2e/ws_sessions.py
@@ -55,24 +56,26 @@ jobs:
           python tests/e2e/cluster_live_process.py
           python tests/e2e/ftp_interop.py
       - name: Install FFmpeg for media E2E
-        timeout-minutes: 3
+        # The package mirror can crawl (about 50 KB/s on 2026-11-06): 3 minutes failed a good build.
+        timeout-minutes: 10
         run: |
           command -v ffmpeg && command -v ffprobe && exit 0
           sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
           sudo apt-get install -y ffmpeg
       - name: Native media end-to-end checks
-        timeout-minutes: 2
+        timeout-minutes: 5
         working-directory: .
         run: |
           python tests/e2e/media.py
       - name: Install browser E2E dependencies
-        timeout-minutes: 5
+        # The same Chromium install took 9.5 minutes in the browser job on 2026-11-06.
+        timeout-minutes: 20
         working-directory: .
         run: |
           python -m pip install --timeout 30 --retries 2 playwright
           python -m playwright install --with-deps chromium
       - name: Browser against the running production server
-        timeout-minutes: 3
+        timeout-minutes: 6
         working-directory: .
         run: |
           python tests/e2e/browser.py
@@ -98,7 +101,8 @@ jobs:
   ui:
     name: Browser regression checks
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Installing Chromium's system packages took 9.5 minutes from a slow mirror (2026-11-06).
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -111,3 +115,5 @@ jobs:
       - run: python tests/ui/queue_place.py
       - run: python tests/ui/archive_priorities.py
       - run: python tests/ui/archive_update_banner.py
+      - run: python tests/ui/archive_layout.py
+      - run: python tests/ui/queue_download_order.py

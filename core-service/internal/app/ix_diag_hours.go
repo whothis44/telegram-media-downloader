@@ -92,12 +92,36 @@ func (a *App) ixDiagHours(ctx context.Context, now time.Time) []string {
 				r.accts++
 				r.pace.Bytes += h.Bytes
 				r.pace.Parts += h.Parts
+				for dc, b := range h.DCBytes {
+					if r.pace.DCBytes == nil {
+						r.pace.DCBytes = map[int]int64{}
+					}
+					r.pace.DCBytes[dc] += b
+				}
+				for dc, n := range h.DCPremium {
+					if r.pace.DCPremium == nil {
+						r.pace.DCPremium = map[int]int{}
+					}
+					r.pace.DCPremium[dc] += n
+				}
+				ixAddCounts(&r.pace.DCSamples, h.DCSamples)
+				ixAddCounts(&r.pace.DCInflight, h.DCInflight)
+				ixAddCounts(&r.pace.DCWaiting, h.DCWaiting)
+				ixAddCounts(&r.pace.DCWindow, h.DCWindow)
+				ixAddCounts(&r.pace.DCLarge, h.DCLarge)
+				ixAddCounts(&r.pace.DCLargeWaiting, h.DCLargeWaiting)
+				ixAddCounts(&r.pace.DCLargeLimit, h.DCLargeLimit)
 				r.pace.Waits += h.Waits
 				r.pace.Premium += h.Premium
 				r.pace.Seconds = max(r.pace.Seconds, h.Seconds)
 				r.winSum += h.Window
 				// Seconds per part and the full share: the slowest account's.
 				r.pace.PartSecs = max(r.pace.PartSecs, h.PartSecs)
+				r.pace.TriesUp += h.TriesUp
+				r.pace.ClimbsRefused += h.ClimbsRefused
+				r.pace.TriesDown += h.TriesDown
+				r.pace.DropsKept += h.DropsKept
+				r.pace.ByAnswers = r.pace.ByAnswers || h.ByAnswers
 				r.pace.FullShare = max(r.pace.FullShare, h.FullShare)
 			}
 		}
@@ -112,6 +136,8 @@ func (a *App) ixDiagHours(ctx context.Context, now time.Time) []string {
 	tot.errs = map[string]int{}
 	var fullSum, partSum float64
 	var pacedHours, partHours int
+	// Speed-limited hours, all servers and each one: whether the limit is per server.
+	limited, limitedBytes, limitedDC := 0, int64(0), map[int]int64{}
 	for _, s := range starts {
 		r := rows[s]
 		tot.files += r.files
@@ -130,6 +156,22 @@ func (a *App) ixDiagHours(ctx context.Context, now time.Time) []string {
 				partHours++
 			}
 			line += fmt.Sprintf(" | waits %d, speed limit %d | %.1f s a part, %.1f parts allowed, full %d%% of the time", r.pace.Waits, r.pace.Premium, r.pace.PartSecs, r.winSum, int(r.pace.FullShare*100+0.5))
+			if len(r.pace.DCBytes) > 0 || len(r.pace.DCPremium) > 0 {
+				line += " | per server: " + ixDCList(r.pace.DCBytes, r.pace.DCPremium)
+			}
+			if len(r.pace.DCSamples) > 0 {
+				line += " | parts per server, on average: " + ixDCLoad(r.pace)
+			}
+			if r.pace.TriesUp+r.pace.TriesDown > 0 {
+				line += " | " + ixTriesLine(r.pace)
+			}
+			if r.pace.Premium > 0 {
+				limited++
+				limitedBytes += r.pace.Bytes
+				for dc, b := range r.pace.DCBytes {
+					limitedDC[dc] += b
+				}
+			}
 		}
 		if len(r.errs) > 0 {
 			line += " | errors: " + ixKindList(r.errs)
@@ -149,7 +191,86 @@ func (a *App) ixDiagHours(ctx context.Context, now time.Time) []string {
 	if len(tot.errs) > 0 {
 		sum += " · errors: " + ixKindList(tot.errs)
 	}
-	return append([]string{sum, "  what limits downloads (a guess from these numbers): " + ixLimitGuess(tot, fullSum, pacedHours, partSum, partHours)}, out...)
+	head := []string{sum, "  what limits downloads (a guess from these numbers): " + ixLimitGuess(tot, fullSum, pacedHours, partSum, partHours)}
+	if limited > 0 {
+		// Bytes an hour in the hours with speed-limit waits. If the limit were per
+		// server, more servers busy would give more in all; the hours' files differ
+		// in size, so this is a hint, not a measurement.
+		per := make(map[int]int64, len(limitedDC))
+		for dc, b := range limitedDC {
+			per[dc] = b / int64(limited)
+		}
+		head = append(head, fmt.Sprintf("  speed-limited hours: %d, %d MB an hour in all; per server, MB an hour: %s", limited, limitedBytes/int64(limited)>>20, ixDCList(per, nil)))
+	}
+	return append(head, out...)
+}
+
+func ixAddCounts(dst *map[int]int, src map[int]int) {
+	for k, v := range src {
+		if *dst == nil {
+			*dst = map[int]int{}
+		}
+		(*dst)[k] += v
+	}
+}
+
+// ixTriesLine says how the pacer's tries were judged, and where judging by
+// answer time would have decided otherwise than by bytes: the evidence for
+// switching it on (Settings → Downloads) or leaving it off.
+func ixTriesLine(h telegram.PaceHour) string {
+	by := "bytes"
+	if h.ByAnswers {
+		by = "answer time"
+	}
+	return fmt.Sprintf("tries judged by %s: %d bigger (answer time would have kept %d that bytes refused), %d smaller (bytes kept %d that answer time would have refused)", by, h.TriesUp, h.ClimbsRefused, h.TriesDown, h.DropsKept)
+}
+
+// ixDCLoad is "DC4 1.2 in flight of 2.0 allowed, 3.1 waiting", by server: far
+// fewer in flight than allowed means too few parts are asked for; as many as
+// allowed with more waiting means the window holds them back.
+func ixDCLoad(h telegram.PaceHour) string {
+	dcs := make([]int, 0, len(h.DCSamples))
+	for dc := range h.DCSamples {
+		dcs = append(dcs, dc)
+	}
+	sort.Ints(dcs)
+	parts := make([]string, 0, len(dcs))
+	for _, dc := range dcs {
+		n := float64(h.DCSamples[dc])
+		if n == 0 {
+			continue
+		}
+		x := fmt.Sprintf("DC%d %.1f in flight of %.1f allowed, %.1f waiting", dc, float64(h.DCInflight[dc])/n, float64(h.DCWindow[dc])/n, float64(h.DCWaiting[dc])/n)
+		if h.DCLargeLimit[dc] > 0 {
+			x += fmt.Sprintf(" (large files %.1f of %.0f, %.1f waiting for one)", float64(h.DCLarge[dc])/n, float64(h.DCLargeLimit[dc])/n, float64(h.DCLargeWaiting[dc])/n)
+		}
+		parts = append(parts, x)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// ixDCList is "DC1 820 MB (3 limit waits), DC4 10 MB", by server number.
+func ixDCList(bytes map[int]int64, premium map[int]int) string {
+	seen := map[int]bool{}
+	var dcs []int
+	for dc := range bytes {
+		seen[dc] = true
+		dcs = append(dcs, dc)
+	}
+	for dc := range premium {
+		if !seen[dc] {
+			dcs = append(dcs, dc)
+		}
+	}
+	sort.Ints(dcs)
+	parts := make([]string, len(dcs))
+	for i, dc := range dcs {
+		parts[i] = fmt.Sprintf("DC%d %d MB", dc, bytes[dc]>>20)
+		if n := premium[dc]; n > 0 {
+			parts[i] += fmt.Sprintf(" (%d limit waits)", n)
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 func ixKindList(m map[string]int) string {

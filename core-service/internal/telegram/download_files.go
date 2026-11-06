@@ -135,6 +135,17 @@ func (f *downloadFiles) acquire(ctx context.Context, dc int, size int64) (func()
 	}
 }
 
+// usage is dc's large-file slots: in use, waited for, and how many there are.
+func (f *downloadFiles) usage(dc int) (large, waiting, limit int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := downloadFileKey{dc: dc, large: true}
+	for _, c := range f.waiting[key] {
+		waiting += c
+	}
+	return f.active[key], waiting, f.large
+}
+
 // smallFree says whether a small file of dc would get a slot at once: fewer
 // running and waiting than there are slots.
 func (f *downloadFiles) smallFree(dc int) bool {

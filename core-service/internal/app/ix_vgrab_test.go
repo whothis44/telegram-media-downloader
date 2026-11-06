@@ -143,7 +143,16 @@ func TestIxFFmpegFramesAtTheRightTimes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 || ixJPEGWidth(t, got[0].Pic) != 64 || ixJPEGWidth(t, got[1].Pic) != 160 || got[0].AtMs != 4000 {
+	// The two outputs of one input may each take a frame a frame apart (4000
+	// and 4040 ms), so they are told apart by size, not by their order.
+	widths := map[int]int64{}
+	for _, g := range got {
+		widths[ixJPEGWidth(t, g.Pic)] = g.AtMs
+	}
+	near := func(ms int64, ok bool) bool { return ok && ms >= 4000 && ms <= 4100 }
+	small, okSmall := widths[64]
+	large, okLarge := widths[160]
+	if len(got) != 2 || !near(small, okSmall) || !near(large, okLarge) {
 		var desc []string
 		for _, g := range got {
 			desc = append(desc, fmt.Sprintf("%d ms %d px (asked %.0f s)", g.AtMs, ixJPEGWidth(t, g.Pic), g.Req.At))
@@ -408,20 +417,24 @@ func TestIxFramesOldAndNewOnALongVideo(t *testing.T) {
 	}
 }
 
-// ffmpeg's messages as Linux and Windows builds print them.
-func TestIxShowinfoLines(t *testing.T) {
-	log := "  Duration: 00:01:00.00, start: 1.400000, bitrate: 15494 kb/s\n" +
-		"[showinfo@o0 @ 0x55d0c1a2b3c0] config in time_base: 1/12800, frame_rate: 25/1\n" +
-		"[showinfo@o0 @ 0x55d0c1a2b3c0] n:   0 pts:  38400 pts_time:4.4     duration:    512 duration_time:0.04\n" +
-		"[showinfo@o12 @ 000001f5c2d8a640] n:   0 pts:1280000 pts_time:101.4   duration:    512\n" +
-		"[showinfo@o3 @ 000001f5c2d8a640] n:   0 pts:NOPTS   pts_time:NOPTS\n"
-	got := map[string]string{}
-	for _, m := range ixShowinfoRe.FindAllStringSubmatch(log, -1) {
-		got[m[1]] = m[2]
+// What the metadata filter writes to an output's time file, and ffmpeg's
+// start time as Linux and Windows builds print it.
+func TestIxFrameTimeLines(t *testing.T) {
+	for _, c := range []struct{ file, want string }{
+		{"frame:0    pts:38400   pts_time:4.4\nix=0\nframe:1    pts:38912   pts_time:4.44\nix=0\n", "4.4"},
+		{"frame:0    pts:1280000 pts_time:101.4\r\nix=12\r\n", "101.4"},
+		{"frame:0    pts:NOPTS   pts_time:NOPTS\nix=3\n", ""},
+		{"", ""},
+	} {
+		got := ""
+		if m := ixFrameTimeRe.FindStringSubmatch(c.file); m != nil {
+			got = m[1]
+		}
+		if got != c.want {
+			t.Fatalf("%q: %q, want %q", c.file, got, c.want)
+		}
 	}
-	if fmt.Sprint(got) != "map[0:4.4 12:101.4]" {
-		t.Fatalf("%v", got)
-	}
+	log := "  Duration: 00:01:00.00, start: 1.400000, bitrate: 15494 kb/s\n"
 	if m := ixStartRe.FindStringSubmatch(log); m == nil || m[1] != "1.400000" {
 		t.Fatalf("start %v", m)
 	}

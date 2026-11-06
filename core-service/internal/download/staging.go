@@ -259,14 +259,24 @@ func (l *Library) ingestStaged(ctx context.Context, item Item, client Client, st
 	if err := l.ensureStageTable(ctx); err != nil {
 		return Record{}, err
 	}
-	dir, name, err := destinationName(item)
-	if err != nil {
-		return Record{}, err
-	}
-	relative := filepath.Join(dir, name)
 	stageRoot, err := stageRootFor(st.Dir)
 	if err != nil {
 		return Record{}, err
+	}
+	// A part kept by an earlier attempt in this folder goes on under its own
+	// name, as in the library (resume.go).
+	resuming := canResume(client, item.Identity.Size)
+	var progress partRow
+	if resuming {
+		progress = l.partLoad(ctx, item, stageRoot)
+	}
+	relative := filepath.FromSlash(progress.path)
+	if progress.path == "" {
+		dir, name, err := destinationName(item)
+		if err != nil {
+			return Record{}, err
+		}
+		relative = filepath.Join(dir, name)
 	}
 	release := l.reserveStage(item.Identity.Size)
 	defer release()
@@ -276,6 +286,9 @@ func (l *Library) ingestStaged(ctx context.Context, item Item, client Client, st
 	}
 	digest := sha256.New()
 	m := NewManager(hashClient{client, digest}, telegram.NewDedupIndex())
+	if resuming {
+		m.resume = l.partResumeFor(item, filepath.ToSlash(relative), stageRoot, progress, digest)
+	}
 	journaled := false
 	m.prepared = func() error {
 		// Written before the local file is published, so a restart finds it.
@@ -973,7 +986,9 @@ func (l *Library) stagedArrived(ctx context.Context, mv stagedMove) bool {
 // recoverStaging runs at start-up: a download stopped just before its local
 // file was published is finished from its .part when the bytes check out,
 // and leftover partial downloads in the staging folder are removed (the
-// download queue fetches those again, as for direct downloads).
+// download queue fetches those again, as for direct downloads), except those
+// with progress recorded (resume.go), which the next attempt checks and carries
+// on. partSweep has already removed the records nothing comes back for.
 func (l *Library) recoverStaging(ctx context.Context) error {
 	var exists int
 	if err := l.reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tgdl_stage_moves'`).Scan(&exists); err != nil {
@@ -1021,6 +1036,19 @@ func (l *Library) recoverStaging(ctx context.Context) error {
 				_ = os.Rename(part, local)
 			}
 		}
+	}
+	if kept, err := l.reader.QueryContext(ctx, `SELECT stage_dir, path FROM tgdl_part_progress WHERE stage_dir<>''`); err == nil {
+		for kept.Next() {
+			var dir, path string
+			if kept.Scan(&dir, &path) == nil && filepath.IsLocal(filepath.FromSlash(path)) {
+				local := filepath.Join(dir, filepath.FromSlash(path))
+				keep[filepath.Join(filepath.Dir(local), partName(filepath.Base(local)))] = true
+				roots[dir] = true
+			}
+		}
+		kept.Close()
+	} else {
+		return err // without the list, a kept part could be removed
 	}
 	if l.Staging != nil {
 		if st := l.stagingFor(ctx, Item{}); st.Dir != "" {

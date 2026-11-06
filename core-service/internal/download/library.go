@@ -312,7 +312,7 @@ func (l *Library) Ingest(ctx context.Context, item Item, client Client) (Record,
 	resuming := canResume(client, item.Identity.Size)
 	var progress partRow
 	if resuming {
-		progress = l.partLoad(ctx, item)
+		progress = l.partLoad(ctx, item, "")
 	}
 	relative := filepath.FromSlash(progress.path)
 	if progress.path == "" {
@@ -335,7 +335,7 @@ func (l *Library) Ingest(ctx context.Context, item Item, client Client) (Record,
 	// owns all cross-message coalescing and does not retain this temporary map.
 	m := NewManager(hashClient{client, digest}, telegram.NewDedupIndex())
 	if resuming {
-		m.resume = l.partResumeFor(item, filepath.ToSlash(relative), progress, digest)
+		m.resume = l.partResumeFor(item, filepath.ToSlash(relative), "", progress, digest)
 	}
 	m.prepared = func() error {
 		_, err := l.writer.ExecContext(ctx, `UPDATE tgdl_ingest_files SET sha256=? WHERE path=?`, hex.EncodeToString(digest.Sum(nil)), filepath.ToSlash(relative))

@@ -28,12 +28,33 @@ import (
 //     in the minute after a cut answer requests sent before it and are not
 //     cut for again;
 //   - when downloads keep waiting for room and nothing flooded, it tries a
-//     different window for six intervals and compares their average speed
-//     with a fresh baseline. A bigger window (one part more) is kept only
-//     if it brings at least half of what it could; a
-//     smaller one is kept if it loses less than half of what it could. After
-//     a bigger window brought nothing, the next try is a smaller one, so a
-//     lucky measurement is taken back later rather than built on;
+//     different window for six intervals and compares it with a fresh
+//     baseline. A bigger window (one part more) is kept only if it brings at
+//     least half of what it could; a smaller one is kept if it loses less
+//     than half of what it could. After a bigger window brought nothing, the
+//     next try is a smaller one, so a lucky measurement is taken back later
+//     rather than built on;
+//   - what a try brings is judged by how fast Telegram answers a part, when
+//     enough parts were answered (ix.12.3): parts a second are the parts in
+//     flight over the time each takes, so one part more answered as fast as
+//     before is that much faster, and one that only makes every part wait
+//     longer brings nothing. Bytes a second, used before and still when few
+//     parts were answered, also move with files starting and finishing: with
+//     that noise, tries of fewer parts were kept and windows drifted down to
+//     one part on most datacenters, where unlimited hours brought a third of
+//     what they had;
+//   - judging by answer time is off unless switched on (SetPaceByAnswers):
+//     off, every try is judged by bytes as before, and the hour-by-hour record
+//     counts where answer time would have decided otherwise (a climb bytes
+//     refused, a drop bytes kept), so that the numbers decide whether to
+//     switch it on;
+//   - judging by answer time has fallbacks, per datacenter, because a pacer
+//     that climbs too readily floods Telegram. Two cuts for Telegram's waits
+//     within an hour send it back to judging by bytes for two hours, under
+//     the window that flooded. And a bigger window that answer time kept but
+//     bytes would not have is checked five minutes after the climb: when the
+//     speed is then clearly below what it was before, the window goes back to
+//     where the climb began and is judged by bytes for two hours;
 //   - when Telegram answers parts slowly (more than 8 s a part on average),
 //     the window keeps only as many parts as it answers within 8 s at that
 //     speed: Telegram may slow an account down instead of asking it to
@@ -51,25 +72,40 @@ import (
 // account's gate.
 
 const (
-	paceInterval   = 10 * time.Second
-	paceStart      = 2   // conservative starting point for regular accounts
-	paceMin        = 1   // never fewer
-	paceMax        = 8   // local regular-account ceiling, not a claimed Telegram quota
-	paceGainShare  = 0.5 // a try is kept when it brings at least half the speed it could (step/window)
-	paceCut        = 0.6
-	paceFloodHold  = time.Minute
-	pacePlateau    = 2 * time.Minute
-	paceCeiling    = 10 * time.Minute // after a flood, stay below the window it happened at this long
-	paceCeilingMin = 3                // the window under a flood's ceiling may still be 2
-	paceTrial      = 6                // one minute of measurements per trial
-	paceBase       = 3                // thirty seconds of fresh baseline measurements
-	paceHistoryLen = 30               // intervals kept for the 5-minute speed
-	paceFullRecent = 2 * time.Minute  // windows full this recently say how many files are enough
-	paceSlow       = 8 * time.Second  // parts answered slower than this on average: fewer in flight
-	paceSlowMin    = 2                // the fewest a slow answer cuts to
+	paceInterval     = 10 * time.Second
+	paceStart        = 2   // conservative starting point for regular accounts
+	paceMin          = 1   // never fewer
+	paceMax          = 8   // local regular-account ceiling, not a claimed Telegram quota
+	paceGainShare    = 0.5 // a try is kept when it brings at least half the speed it could (step/window)
+	paceCut          = 0.6
+	paceFloodHold    = time.Minute
+	pacePlateau      = 2 * time.Minute
+	paceCeiling      = 10 * time.Minute // after a flood, stay below the window it happened at this long
+	paceCeilingMin   = 3                // the window under a flood's ceiling may still be 2
+	paceTrial        = 6                // one minute of measurements per trial
+	paceBase         = 3                // thirty seconds of fresh baseline measurements
+	paceHistoryLen   = 30               // intervals kept for the 5-minute speed
+	paceFullRecent   = 2 * time.Minute  // windows full this recently say how many files are enough
+	paceSlow         = 8 * time.Second  // parts answered slower than this on average: fewer in flight
+	paceSlowMin      = 2                // the fewest a slow answer cuts to
+	paceLatAnswers   = 12               // answered parts a try and its baseline need to be judged by answer time
+	paceFallbackCuts = 2                // cuts for Telegram's waits within an hour that end judging by answer time
+	paceFallbackFor  = 2 * time.Hour    // how long a datacenter is then judged by bytes
+	paceCheckAfter   = 5 * time.Minute
+	paceCheckLoss    = 0.15 // a climb that leaves the speed this much below where it was is taken back
 )
 
 var pacingOff atomic.Bool
+
+// paceByAnswers: tries are judged by answer time (off: by bytes, as before
+// ix.12.3; the record still counts where the two disagree).
+var paceByAnswers atomic.Bool
+
+// SetPaceByAnswers switches judging tries by answer time on or off.
+func SetPaceByAnswers(on bool) { paceByAnswers.Store(on) }
+
+// PaceByAnswers reports whether tries are judged by answer time.
+func PaceByAnswers() bool { return paceByAnswers.Load() }
 
 // SetPacing switches the download pacer on or off for every account.
 func SetPacing(on bool) { pacingOff.Store(!on) }
@@ -97,19 +133,32 @@ type dcPace struct {
 
 	// Learning.
 	steady       []float64 // speeds of the last full intervals at this window
-	trial        int       // the step being tried (negative: fewer parts), 0 when none
-	trialFrom    int
-	trialBase    float64
-	trialLeft    int
-	trialSpeeds  []float64
-	trialFull    bool
-	nextDown     bool // the last bigger window brought nothing: try a smaller one next
-	holdUntil    time.Time
-	lastCut      time.Time
-	ceiling      int // the window a flood happened at
-	ceilingUntil time.Time
-	fullAt       time.Time // the last interval downloads waited for room
-	state        string
+	steadyLat    []float64 // seconds a part took, in those intervals
+	trialBaseLat float64   // seconds a part took before the try (0: not known)
+	trialTook    time.Duration
+	trialAns     int
+	// Fallbacks (see the notes at the top).
+	bytesUntil time.Time   // judged by bytes until then
+	cutsAt     []time.Time // cuts for Telegram's waits, the last hour
+	checkAt    time.Time   // when to check a climb answer time kept (zero: none)
+	checkFrom  int         // the window the climb began at
+	checkBase  float64     // the speed before it
+	// Since the last hour record: tries judged with answer times known, and
+	// where answer time would have decided otherwise than bytes.
+	triesUp, climbsRefused, triesDown, dropsKept int
+	trial                                        int // the step being tried (negative: fewer parts), 0 when none
+	trialFrom                                    int
+	trialBase                                    float64
+	trialLeft                                    int
+	trialSpeeds                                  []float64
+	trialFull                                    bool
+	nextDown                                     bool // the last bigger window brought nothing: try a smaller one next
+	holdUntil                                    time.Time
+	lastCut                                      time.Time
+	ceiling                                      int // the window a flood happened at
+	ceilingUntil                                 time.Time
+	fullAt                                       time.Time // the last interval downloads waited for room
+	state                                        string
 
 	speed       float64   // bytes a second, last interval
 	history     []float64 // last intervals' speeds
@@ -122,6 +171,9 @@ type dcPace struct {
 }
 
 type downloadPacer struct {
+	// slots, optional, is a datacenter's large-file slots (downloadFiles.usage),
+	// sampled into the hour-by-hour record. It must not call the pacer.
+	slots     func(dc int) (large, waiting, limit int)
 	mu        sync.Mutex
 	dcs       map[int]*dcPace
 	path      string // where windows are kept ("" = not kept)
@@ -158,6 +210,11 @@ func (p *downloadPacer) dcLocked(dc int) *dcPace {
 		w := paceStart
 		if v, ok := p.saved[dc]; ok {
 			w = v
+			if paceByAnswers.Load() {
+				// Not below the start: windows had drifted to one part by the
+				// noise described at the top (ix.12.3).
+				w = max(w, paceStart)
+			}
 		}
 		d = &dcPace{dc: dc, window: w, wake: make(chan struct{}), state: "learning"}
 		p.dcs[dc] = d
@@ -273,7 +330,7 @@ func (p *downloadPacer) flood(dc int, premium bool) {
 	defer p.mu.Unlock()
 	now := p.now()
 	d := p.dcLocked(dc)
-	p.hourWaitLocked(now, premium)
+	p.hourWaitLocked(now, dc, premium)
 	if premium {
 		d.premium++
 		d.premiumAt = append(d.premiumAt, now)
@@ -329,9 +386,17 @@ func (p *downloadPacer) tick() {
 		case d.floods > 0 && now.Sub(d.lastCut) >= paceFloodHold:
 			d.ceiling, d.ceilingUntil = max(paceCeilingMin, d.window), now.Add(paceCeiling)
 			d.window = max(paceMin, int(math.Floor(float64(d.window)*paceCut)))
-			d.trial, d.nextDown, d.steady = 0, false, nil
+			d.trial, d.nextDown, d.steady, d.steadyLat = 0, false, nil, nil
 			d.holdUntil, d.lastCut = now.Add(paceFloodHold), now
 			d.state = "slowed: Telegram asked to wait"
+			d.checkAt = time.Time{}
+			d.cutsAt = append(trimTimes(d.cutsAt, now.Add(-time.Hour)), now)
+			if len(d.cutsAt) >= paceFallbackCuts {
+				// Flooding: back to the cautious judging, under this window.
+				d.bytesUntil = now.Add(paceFallbackFor)
+				d.ceilingUntil = now.Add(paceFallbackFor)
+				d.state = "slowed: Telegram asked to wait again; judging by bytes for two hours"
+			}
 		case d.floods > 0:
 			// Answers to parts asked for before the last cut.
 		case d.premium > 0 || d.gateWaiting > 0 || d.waitedGate:
@@ -341,13 +406,25 @@ func (p *downloadPacer) tick() {
 			if d.trial != 0 {
 				d.window, d.trial = d.trialFrom, 0
 			}
-			d.steady = nil
+			d.steady, d.steadyLat = nil, nil
 			if until := now.Add(paceFloodHold); until.After(d.holdUntil) {
 				d.holdUntil = until
 			}
 			d.state = "waiting for Telegram; keeping stable concurrency"
+			d.checkAt = time.Time{} // a speed limit says nothing about the climb
+		case !d.checkAt.IsZero() && !now.Before(d.checkAt):
+			// Five minutes after a climb that bytes alone would not have kept.
+			recent := meanOf(lastOf(d.history, paceHistoryLen))
+			if d.window > d.checkFrom && d.checkBase > 0 && recent < d.checkBase*(1-paceCheckLoss) {
+				d.window, d.trial = d.checkFrom, 0
+				d.bytesUntil = now.Add(paceFallbackFor)
+				d.steady, d.steadyLat, d.nextDown = nil, nil, false
+				d.holdUntil = now.Add(pacePlateau)
+				d.state = "more parts did not bring more; back, judging by bytes for two hours"
+			}
+			d.checkAt = time.Time{}
 		case now.Before(d.holdUntil):
-			d.steady = nil // do not compare a new trial with pre-wait speeds
+			d.steady, d.steadyLat = nil, nil // do not compare a new trial with pre-wait speeds
 		case d.answers > 0 && d.took/time.Duration(d.answers) > paceSlow && d.window > paceSlowMin && now.Sub(d.lastCut) >= paceFloodHold:
 			// Telegram answers slowly (it may slow an account down rather
 			// than ask it to wait). Parts in flight are speed × time per
@@ -359,18 +436,20 @@ func (p *downloadPacer) tick() {
 				d.window, d.trial = d.trialFrom, 0
 			}
 			d.window = max(paceSlowMin, int(float64(d.window)*paceSlow.Seconds()/lat.Seconds()))
-			d.nextDown, d.steady = false, nil
+			d.nextDown, d.steady, d.steadyLat = false, nil, nil
 			d.holdUntil, d.lastCut = now.Add(paceFloodHold), now
 			d.state = "slowed: Telegram answers slowly"
 		case d.trial != 0:
 			d.trialSpeeds = append(d.trialSpeeds, d.speed)
+			d.trialTook += d.took
+			d.trialAns += d.answers
 			d.trialFull = d.trialFull || d.waited
 			if d.trialLeft--; d.trialLeft > 0 {
 				break
 			}
 			d.judgeTrial(now)
 		case !d.waited:
-			d.steady = nil
+			d.steady, d.steadyLat = nil, nil
 			if d.bytes == 0 {
 				d.state = "idle"
 			} else {
@@ -378,6 +457,9 @@ func (p *downloadPacer) tick() {
 			}
 		default:
 			d.steady = lastOf(append(d.steady, d.speed), paceTrial)
+			if d.answers > 0 {
+				d.steadyLat = lastOf(append(d.steadyLat, d.took.Seconds()/float64(d.answers)), paceTrial)
+			}
 			if len(d.steady) < paceBase {
 				d.state = "measuring"
 				break
@@ -399,8 +481,13 @@ func (p *downloadPacer) tick() {
 			}
 			if step != 0 {
 				d.trial, d.trialFrom, d.trialBase = step, d.window, meanOf(d.steady)
+				d.trialBaseLat = 0
+				if len(d.steadyLat) >= paceBase {
+					d.trialBaseLat = meanOf(d.steadyLat)
+				}
 				d.trialLeft, d.trialSpeeds, d.trialFull = paceTrial, nil, false
-				d.steady = nil
+				d.trialTook, d.trialAns = 0, 0
+				d.steady, d.steadyLat = nil, nil
 				d.window += step
 				if step > 0 {
 					d.state = "trying more"
@@ -441,12 +528,57 @@ func (d *dcPace) judgeTrial(now time.Time) {
 	if d.trialBase > 0 {
 		change = speed/d.trialBase - 1
 	}
+	// By answer time when enough parts were answered: parts a second are the
+	// parts in flight over the time each takes (see the notes at the top).
+	bytesChange, answersChange, haveAnswers := change, 0.0, false
+	if d.trialBaseLat > 0 && d.trialAns >= paceLatAnswers {
+		if lat := d.trialTook.Seconds() / float64(d.trialAns); lat > 0 {
+			answersChange, haveAnswers = float64(from+step)/float64(max(1, from))*d.trialBaseLat/lat-1, true
+		}
+	}
+	byAnswers := haveAnswers && paceByAnswers.Load() && !now.Before(d.bytesUntil)
+	if byAnswers {
+		change = answersChange
+	}
+	if d.trialFull && haveAnswers {
+		// What each way would decide, for the record (whichever is in use).
+		keep := func(c float64) bool {
+			if step > 0 {
+				return c >= paceGainShare*could
+			}
+			return -c < paceGainShare*could
+		}
+		byBytes, byTime := keep(bytesChange), keep(answersChange)
+		if step > 0 {
+			d.triesUp++
+			if byTime && !byBytes {
+				d.climbsRefused++
+			}
+		} else {
+			d.triesDown++
+			if byBytes && !byTime {
+				d.dropsKept++
+			}
+		}
+	}
 	switch {
 	case !d.trialFull:
 		// Nobody waited for room: the try says nothing.
 		d.window, d.state = from, "not limiting"
 	case step > 0 && change >= paceGainShare*could:
+		if byAnswers && bytesChange < paceGainShare*could {
+			// Kept on answer time alone: check it on the speed shortly. A run of
+			// climbs is checked against where the first began.
+			if d.checkAt.IsZero() {
+				d.checkFrom, d.checkBase = from, d.trialBase
+			}
+			d.checkAt = now.Add(paceCheckAfter)
+		}
 		d.steady = lastOf(d.trialSpeeds, paceTrial)
+		d.steadyLat = nil
+		if d.trialAns > 0 {
+			d.steadyLat = []float64{d.trialTook.Seconds() / float64(d.trialAns)}
+		}
 		d.nextDown = false
 		d.state = "faster with more"
 	case step > 0:
@@ -457,6 +589,10 @@ func (d *dcPace) judgeTrial(now time.Time) {
 	case -change < paceGainShare*could:
 		// As fast with fewer: keep fewer, and see whether fewer still do.
 		d.steady = lastOf(d.trialSpeeds, paceTrial)
+		d.steadyLat = nil
+		if d.trialAns > 0 {
+			d.steadyLat = []float64{d.trialTook.Seconds() / float64(d.trialAns)}
+		}
 		d.state = "as fast with fewer"
 	default:
 		d.window = from

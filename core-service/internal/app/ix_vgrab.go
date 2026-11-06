@@ -200,14 +200,22 @@ func ixByTime(gs []ixGrabbed) []ixGrabbed {
 }
 
 var (
-	ixShowinfoRe = regexp.MustCompile(`showinfo@o(\d+)\b[^\n]*?\bn:\s*\d+\s+pts:\s*\S+\s+pts_time:\s*(-?\d+(?:\.\d+)?)`)
-	ixStartRe    = regexp.MustCompile(`Duration:[^,]*, start: (-?\d+(?:\.\d+)?)`)
+	// The first frame of an output's own time file (see ixFFmpegFramesRun).
+	ixFrameTimeRe = regexp.MustCompile(`(?m)^frame:\s*\d+\s+pts:\s*\S+\s+pts_time:\s*(-?\d+(?:\.\d+)?)`)
+	ixStartRe     = regexp.MustCompile(`Duration:[^,]*, start: (-?\d+(?:\.\d+)?)`)
 )
 
 // ixFFmpegFramesRun is one ffmpeg run: an input per time (seeked to its
 // keyframe, or exactly), an output per frame wanted. Each output has its
 // own filters, so one that gets no frame (a time past the end) does not
 // keep ffmpeg decoding the others to their end.
+//
+// Each output writes the time of its frame to a file of its own. They used
+// to be read from showinfo's lines in the log, but from ffmpeg 7 on each
+// output's filters run on a thread of their own, and their lines run into
+// each other: a line could lose the name of its output, and the time read
+// was then a later frame's, or none at all (and the asked time was taken
+// for the frame's).
 func ixFFmpegFramesRun(ctx context.Context, full string, reqs []ixFrameReq, hw string, exact bool) ([]ixGrabbed, error) {
 	bin := seekbar.FFmpegPath()
 	if bin == "" {
@@ -263,10 +271,11 @@ func ixFFmpegFramesRun(ctx context.Context, full string, reqs []ixFrameReq, hw s
 		file := filepath.Join(dir, fmt.Sprintf("o%d.jpg", j))
 		outs = append(outs, out{r, file})
 		args = append(args, "-map", fmt.Sprintf("%d:V:0", in), "-frames:v", "1",
-			"-vf", fmt.Sprintf("scale='min(%d,iw)':-2,showinfo@o%d", r.Width, j),
+			"-vf", fmt.Sprintf("scale='min(%d,iw)':-2,metadata=mode=add:key=ix:value=%d,metadata=mode=print:file=t%d.txt", r.Width, j, j),
 			"-c:v", "mjpeg", "-q:v", strconv.Itoa(r.Quality), "-f", "image2", "-update", "1", file)
 	}
 	cmd := exec.CommandContext(fctx, bin, args...)
+	cmd.Dir = dir // the time files, named without a path: a Windows path would need escaping in a filter
 	procutil.HideWindow(cmd)
 	var stderr ixTailBuffer
 	cmd.Stderr = &stderr
@@ -292,10 +301,13 @@ func ixFFmpegFramesRun(ctx context.Context, full string, reqs []ixFrameReq, hw s
 		start, _ = strconv.ParseFloat(m[1], 64)
 	}
 	pts := map[int]float64{}
-	for _, m := range ixShowinfoRe.FindAllStringSubmatch(log, -1) {
-		j, _ := strconv.Atoi(m[1])
-		if t, err := strconv.ParseFloat(m[2], 64); err == nil {
-			if _, ok := pts[j]; !ok {
+	for j := range outs {
+		b, err := os.ReadFile(filepath.Join(dir, fmt.Sprintf("t%d.txt", j)))
+		if err != nil {
+			continue
+		}
+		if m := ixFrameTimeRe.FindSubmatch(b); m != nil {
+			if t, err := strconv.ParseFloat(string(m[1]), 64); err == nil {
 				pts[j] = t - start
 			}
 		}
