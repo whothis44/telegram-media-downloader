@@ -16,6 +16,9 @@ Copies: the held-copy design stays (probable copies wait at the back, so that wh
 ### Added
 - Diagnostics and the finish estimate: the files ahead of held copies and set-aside files, and whether they finish before the deadline at the speed used.
 
+### Fixed
+- CI: ffmpeg comes from a static build first (the package mirror timed whole jobs out), and a file-slot test that could leave its slot taken under the race detector gives it back.
+
 ## [3.4.18-ix.12.4] — 2026-11-05
 
 ### Changed
