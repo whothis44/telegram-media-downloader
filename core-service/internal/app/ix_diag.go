@@ -114,7 +114,7 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 			}
 		}
 	}
-	if rows, err := a.db.Reader.QueryContext(ctx, `SELECT title FROM ix_group_info WHERE title<>'' UNION SELECT name FROM ix_peers WHERE name<>''`); err == nil {
+	if rows, err := a.db.Reader.QueryContext(ctx, `SELECT title FROM ix_group_info WHERE title<>'' UNION SELECT name FROM ix_peers WHERE name<>'' UNION SELECT title FROM ix_topics WHERE title<>''`); err == nil {
 		for rows.Next() {
 			var n string
 			if rows.Scan(&n) == nil {

@@ -274,7 +274,8 @@ function viewDlState() {
   const why = [[a.copies, 'likely copies'], [a.deadline, 'waiting while private chats and smaller files go first'], [a.lowerQuality, 'waiting for a lower quality first'], [a.bigLane, 'big files waiting their turn'], [a.byYou, 'paused by you']]
     .filter(([n]) => n > 0).map(([n, l]) => `${fmtNum(n)} ${l}`).join(' · ');
   const rescan = r.total ? `Rescan: ${fmtNum(r.done)} of ${fmtNum(r.total)} group(s) done${r.group ? ` · reading <b>${esc(r.group)}</b> (${r.phase === 'files' ? 'files' : 'messages'})` : ''} · about ${fmtNum(x.toDownload)} file(s) still to download${r.notQueued ? ` (${fmtNum(r.notQueued)} not queued yet)` : ''}.` : '';
-  return `<div class="dlstate"><b class="${cls}">${esc(words[x.verdict] || x.verdict)}</b>: ${fmtNum(x.ready)} ready · ${fmtNum(x.downloading)} downloading · ${fmtNum(x.setAside)} set aside${x.retryLater ? ` · ${fmtNum(x.retryLater)} to try again later` : ''}. <span class="${x.act ? 'warn' : 'muted'}">${esc(x.advice)}</span>
+  const word = x.verdict === 'speed-limited' && x.waits === 'plain' ? 'Telegram waits' : (words[x.verdict] || x.verdict);
+  return `<div class="dlstate"><b class="${cls}" title="${x.waits === 'plain' ? 'Short waits Telegram asked for, not its speed limit' : ''}">${esc(word)}</b>: ${fmtNum(x.ready)} ready · ${fmtNum(x.downloading)} downloading · ${fmtNum(x.setAside)} set aside${x.retryLater ? ` · ${fmtNum(x.retryLater)} to try again later` : ''}. <span class="${x.act ? 'warn' : 'muted'}">${esc(x.advice)}</span>
 ${why ? `<div class="muted">Set aside: ${why}.</div>` : ''}${rescan ? `<div class="muted">${rescan}</div>` : ''}</div>`;
 }
 

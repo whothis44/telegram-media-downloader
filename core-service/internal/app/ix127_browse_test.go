@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -91,5 +92,32 @@ func TestIx127FeedFiltersByForumTopic(t *testing.T) {
 		if n := count(q); n != want {
 			t.Errorf("%s: %d posts, want %d", q, n, want)
 		}
+	}
+}
+
+// ix.12.7: "speed-limited" says which waits: the speed limit
+// (FLOOD_PREMIUM_WAIT), or only ordinary FLOOD_WAITs, which the label called
+// "speed limit" too (seen 11-06: 0 speed-limit waits in the hour).
+func TestIx127DownloadStateSaysWhichWaits(t *testing.T) {
+	st := ixDlState{EngineRunning: true, Ready: 3, Downloading: 2, OtherWaits: 4, QuietMin: 1}
+	ixDlDecide(&st)
+	if st.Verdict != ixDlSpeedLimited || st.Waits != "plain" {
+		t.Fatalf("plain waits: %s %q", st.Verdict, st.Waits)
+	}
+	if s, _ := ixDlAdvice(st); !strings.Contains(s, "not its speed limit") {
+		t.Fatalf("advice: %s", s)
+	}
+	st.SpeedWaits = 1
+	ixDlDecide(&st)
+	if st.Waits != "speed-limit" {
+		t.Fatalf("speed limit: %q", st.Waits)
+	}
+	if s, _ := ixDlAdvice(st); !strings.Contains(s, "speed limit sets the pace") {
+		t.Fatalf("advice: %s", s)
+	}
+	st.SpeedWaits, st.OtherWaits = 0, 0
+	ixDlDecide(&st)
+	if st.Verdict != ixDlDownloading || st.Waits != "" {
+		t.Fatalf("no waits: %s %q", st.Verdict, st.Waits)
 	}
 }
