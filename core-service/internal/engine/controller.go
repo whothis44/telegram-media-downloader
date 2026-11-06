@@ -111,6 +111,11 @@ func (c *Controller) SetUpdateObserver(observer UpdateObserver) {
 }
 
 type running struct {
+	// claimMu makes the claims that leave out full servers take turns: each
+	// sees the files the claims before it took. Without it the workers of a
+	// start all counted the same servers as free and one server got four
+	// times its slots (ix.12.5).
+	claimMu         sync.Mutex
 	promotionCancel context.CancelFunc // guarded by controller.opMu
 	observing       atomic.Bool
 	jobUsers        atomic.Int64
@@ -1103,13 +1108,9 @@ func (c *Controller) worker(run *running, index int) {
 			work, err = c.work.ClaimExpiring(run.ctx, run.unthrottled(), time.Now(), !run.observing.Load())
 		case smaller:
 			// The large file before gave its place up for a smaller one.
-			full := run.fullServers(c.work)
-			work, err = c.work.ClaimSmallerAvoiding(run.ctx, run.unthrottled(), time.Now(), !run.observing.Load(), telegram.DownloadLargeFile, full)
-			if err == nil && work == nil {
-				work, err = c.work.ClaimAvoiding(run.ctx, run.unthrottled(), time.Now(), !run.observing.Load(), full)
-			}
+			work, err = run.claimNext(c.work, true)
 		default:
-			work, err = c.work.ClaimAvoiding(run.ctx, run.unthrottled(), time.Now(), !run.observing.Load(), run.fullServers(c.work))
+			work, err = run.claimNext(c.work, false)
 		}
 		smaller = false
 		if err != nil {
@@ -1296,6 +1297,22 @@ func (r *running) fullServers(work *WorkStore) []int {
 		return nil
 	}
 	return full
+}
+
+// claimNext claims the next file, leaving out full servers (smaller: one
+// under telegram.DownloadLargeFile first, then any). Claims take turns
+// (claimMu).
+func (r *running) claimNext(work *WorkStore, smaller bool) (*Work, error) {
+	r.claimMu.Lock()
+	defer r.claimMu.Unlock()
+	full := r.fullServers(work)
+	if smaller {
+		w, err := work.ClaimSmallerAvoiding(r.ctx, r.unthrottled(), time.Now(), !r.observing.Load(), telegram.DownloadLargeFile, full)
+		if err != nil || w != nil {
+			return w, err
+		}
+	}
+	return work.ClaimAvoiding(r.ctx, r.unthrottled(), time.Now(), !r.observing.Load(), full)
 }
 
 // fillClaimableServers records the servers of the rows workers could take

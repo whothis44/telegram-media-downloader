@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -161,5 +162,50 @@ func TestFillServersCanTakeClaimableRowsFirst(t *testing.T) {
 	}
 	if n, _ := s.FillServers(ctx, 500); n != 1 || serverOf(t, s, 2) != 4 {
 		t.Fatal("the background fill did not take the paused row")
+	}
+}
+
+type slotAccount struct{ connectingAccount }
+
+func (slotAccount) FileSlots() (small, large int) { return 5, 2 }
+
+// 25 workers claiming at the same moment, as at a start, still leave a
+// server no more files than its slots (ix.12.5: they counted the same free
+// slots and one server got 8 large files for 2 slots).
+func TestClaimsAtOnceKeepTheServerCap(t *testing.T) {
+	withLane(t, 0)
+	s := testStore(t)
+	ctx := context.Background()
+	const mb = int64(1) << 20
+	for i := 0; i < 40; i++ {
+		dc := 1
+		if i%4 == 3 {
+			dc = 4
+		}
+		if _, _, err := enqueueWork(ctx, s.writer, "one", Target{}, serverMessage(i+1, dc, 100*mb), 0, "history"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run := &running{ctx: ctx, ids: []string{"one"}, accounts: map[string]Account{"one": &slotAccount{}}}
+	var wg sync.WaitGroup
+	for i := 0; i < 25; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := run.claimNext(s, false); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	full, err := s.FullServers(ctx, 5, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var n1, n4 int
+	_ = s.reader.QueryRow(`SELECT COUNT(*) FROM tgdl_work WHERE status='processing' AND dc=1`).Scan(&n1)
+	_ = s.reader.QueryRow(`SELECT COUNT(*) FROM tgdl_work WHERE status='processing' AND dc=4`).Scan(&n4)
+	if n1 != 2 || n4 != 2 || len(full) != 2 {
+		t.Fatalf("server 1 has %d large files, server 4 %d (2 slots each); full %v", n1, n4, full)
 	}
 }

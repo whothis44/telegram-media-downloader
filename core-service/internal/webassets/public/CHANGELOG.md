@@ -17,6 +17,7 @@ Copies: the held-copy design stays (probable copies wait at the back, so that wh
 - Diagnostics and the finish estimate: the files ahead of held copies and set-aside files, and whether they finish before the deadline at the speed used.
 
 ### Fixed
+- **Claims take turns when they leave out full servers.** At 12.4's first start the 25 workers claimed at the same moment, each counting the same free slots, and one server got 8 large files for its 2 slots; the others waited behind them until those finished.
 - CI: ffmpeg comes from a static build first (the package mirror timed whole jobs out), and a file-slot test that could leave its slot taken under the race detector gives it back.
 
 ## [3.4.18-ix.12.4] — 2026-11-05
