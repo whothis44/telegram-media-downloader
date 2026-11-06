@@ -2,6 +2,30 @@
 
 All notable changes to this project are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.18-ix.12.7] — 2026-11-06
+
+### Fixed
+- **Servers no longer sit idle while files of the next size band wait.** The deadline order sets aside the bigger files of unranked groups while smaller ones are still to come, and its keep-busy step lets some go when workers would have nothing to do. It counted every claimable file as work, but a worker skips a server whose slots of that size are full (2 for files of 20 MB or more, 5 for smaller ones). Seen on one archive at 08:03: every claimable file was a ranked group's big file on two servers, so 5 or 6 files downloaded, no small-file slot was used and one server did nothing, while 11,000 files of 10–100 MB from private chats were set aside. And the rescans that were to bring the smaller files were held by the queue limit, so they never came. Now a claimable file counts only while its server has a free slot of its size, and set-aside files are let go into the slots nothing else would fill: on that server, of that size, smallest band first; held copies stay held. They take nothing from the files going first (a file downloads only from its own server). A rescan held by the queue limit no longer keeps half the workers free for files it cannot bring. The effect on speed is not measured yet: the report now shows each server's slots, and how many files were let go.
+- The dashboard's update check asked GitHub on every request while no update existed. GitHub allows 60 such requests an hour per address, shared with the launcher's own check, which then failed with 403 (twice on 11-06). Every answer is now kept for 10 minutes, and a failed check waits 2 minutes before the next.
+- The launcher's updater (`ix-update.ps1`) finds the latest release on the release page when GitHub's API refuses, and downloads from the usual addresses; the SHA256SUMS check is unchanged. Releases do not replace this script: copy the new `ix-update.ps1` next to `start.bat` to get it.
+
+### Added
+- **Media browser: a file not downloaded links to its saved copy.** When the same file is saved from another post, its tile says "copy saved", and its viewer opens the saved copy or its post. Every copy listed in the viewer can be opened.
+- **Media browser: forum topics.** A chat with topics gets a topic menu beside the filters (its topics with their posts, most first; messages with no topic are in General).
+- **Organise: "Plan: move uncatalogued copies to _trash".** For files moved into the library by hand that were then downloaded again (before 12.6 adopted such files): library files the catalogue does not know, with the same name, message and size as a catalogued file in the same folder. Making the plan reads no file; each step compares both files' SHA-256 before it moves anything, and a file whose bytes differ, or that the catalogue has meanwhile taken up, is skipped. Undo moves them back.
+- Diagnostics:
+  - "speed-limited" says which waits: Telegram's speed limit, or only its ordinary waits (the label said "speed limit" for those too).
+  - a `[process]` section: the app's CPU and bytes read and written, for the last hour and by 10 minutes;
+  - staging: copies to the library in the last hour (count, MB, MB/s while copying), the last copy, the oldest file waiting;
+  - what integrity checks and video fingerprints read from the library, hour by hour (they share the network with the staging copies);
+  - per server and hour: files finished, the window's cuts (for a plain wait, for slow answers), tries up and down, and the share of the time at the 2-part floor or below it;
+  - when each fallback to "every file waits for each" began and ends, not only how many.
+- A test feeds every log line's format with invented hard names (other scripts, emoji, `$&,;`, dots, spaces, long numbers; in chat names, paths, file names, errors, links) through the report's redaction and fails on any leak. Forum topic names are now hidden in the report too.
+
+### Fixed (tests)
+- `TestFTPLowRateDoesNotExpireNetworkDeadlines`: a 400 ms network timeout (100 ms flaked on a busy runner) against an upload more than six times as long.
+- A staging test that raced the background mover for a file on Windows retries the removal.
+
 ## [3.4.18-ix.12.6] — 2026-11-06
 
 ### Fixed
