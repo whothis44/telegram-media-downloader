@@ -12,7 +12,7 @@ import (
 func TestIxUnlinkedRowsGoBackToTheQueue(t *testing.T) {
 	a, ctx := ixTestApp(t)
 	const mb = int64(1) << 20
-	saved := ixTestVideo(1, 501, 40*mb, 30, 1280, 720, nil, 100) // a saved file
+	saved := ixTestVideo(1, 501, 40*mb, 30, 1280, 720, nil, 100)  // a saved file
 	copyOf := ixTestVideo(2, 502, 40*mb, 30, 1280, 720, nil, 200) // same size, another Telegram file: done, nothing saved
 	alone := ixTestVideo(3, 503, 41*mb, 30, 1280, 720, nil, 300)  // no saved file of its size
 	gone := ixTestVideo(4, 504, 40*mb, 30, 1280, 720, nil, 400)   // its message deleted on Telegram
