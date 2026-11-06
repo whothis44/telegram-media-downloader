@@ -277,6 +277,14 @@ func (a *App) ixTransferDiag(ctx context.Context, clean func(string) string) []s
 	if st.Full {
 		line += fmt.Sprintf(" · downloads waiting for room since %s", ixAgo(st.FullSince, time.Now()))
 	}
+	if st.On || st.Waiting > 0 || st.LastMoved > 0 {
+		speed := "-"
+		if st.CopySecsHour > 0 {
+			speed = strconv.FormatFloat(float64(st.MovedHourBytes)/1e6/st.CopySecsHour, 'f', 1, 64) + " MB/s while copying"
+		}
+		line += fmt.Sprintf(" · last hour: %d copied to the library, %.0f MB (%s, %.0f s of copying) · last copy %s · oldest waiting %s",
+			st.MovedHour, float64(st.MovedHourBytes)/1e6, speed, st.CopySecsHour, ixAgo(st.LastMoved, time.Now()), ixAgo(st.OldestWaiting, time.Now()))
+	}
 	if st.Bypassed > 0 {
 		line += fmt.Sprintf(" · %d downloads went straight to the library since start because staging was full (last %s)", st.Bypassed, ixAgo(st.BypassedAt, time.Now()))
 	}

@@ -85,8 +85,33 @@ type stageState struct {
 	bypassed   int
 	bypassedAt int64
 	fullSince  int64 // when they started waiting (Unix ms), 0: none waits
-	signal     chan struct{}
-	moving     sync.Mutex // one mover at a time
+	// Copies to the library done in the last hour, for the report (ix.12.7).
+	moved     []stageMoved
+	lastMoved int64 // Unix ms
+	signal    chan struct{}
+	moving    sync.Mutex // one mover at a time
+}
+
+// stageMoved is one copy from the staging folder to the library.
+type stageMoved struct {
+	at    time.Time
+	bytes int64
+	took  time.Duration
+}
+
+// noteMoved records a copy to the library, keeping the last hour.
+func (l *Library) noteMoved(bytes int64, took time.Duration) {
+	now := time.Now()
+	l.stage.mu.Lock()
+	defer l.stage.mu.Unlock()
+	keep := l.stage.moved[:0]
+	for _, m := range l.stage.moved {
+		if now.Sub(m.at) < time.Hour {
+			keep = append(keep, m)
+		}
+	}
+	l.stage.moved = append(keep, stageMoved{now, bytes, took})
+	l.stage.lastMoved = now.UnixMilli()
 }
 
 // stageFreeReserve is the free space the staging disk keeps when downloads
@@ -506,6 +531,7 @@ func hashFile(ctx context.Context, f io.Reader) (string, int64, error) {
 
 // moveStaged copies one staged file to the library and catalogues it.
 func (l *Library) moveStaged(ctx context.Context, mv stagedMove) error {
+	start := time.Now()
 	var item Item
 	if err := json.Unmarshal([]byte(mv.payload), &item); err != nil {
 		return stageDoubt{"the staging journal entry cannot be read: " + err.Error()}
@@ -751,6 +777,7 @@ func (l *Library) moveStaged(ctx context.Context, mv stagedMove) error {
 	bg := context.WithoutCancel(ctx)
 	_, _ = l.writer.ExecContext(bg, `DELETE FROM tgdl_stage_followers WHERE path=?`, mv.path)
 	_, _ = l.writer.ExecContext(bg, `DELETE FROM tgdl_stage_moves WHERE path=?`, mv.path)
+	l.noteMoved(mv.size, time.Since(start))
 	l.stageSignal()
 	if l.OnStaged != nil {
 		for _, r := range records {
@@ -1246,17 +1273,24 @@ func RekeyStaged(ctx context.Context, tx *sql.Tx, from, to, name string) error {
 // StagingStatus is what the staging folder holds, for the dashboard and
 // the diagnostics report.
 type StagingStatus struct {
-	Waiting      int      `json:"waiting"` // files waiting to be copied to the library
-	Bytes        int64    `json:"bytes"`
-	Failing      int      `json:"failing"` // of those, the last copy failed
-	FailingSince int64    `json:"failingSince,omitempty"`
-	Stuck        int      `json:"stuck"` // need a person; their local files are kept
-	StuckBytes   int64    `json:"stuckBytes,omitempty"`
-	Full         bool     `json:"full"`                // downloads are waiting for room in the staging folder
-	Bypassed     int      `json:"bypassed"`            // downloads sent straight to the library since start: staging was full (ix.12.5)
-	BypassedAt   int64    `json:"bypassedAt"`          // the last of them (unix ms)
-	FullSince    int64    `json:"fullSince,omitempty"` // since when (Unix ms)
-	Errors       []string `json:"errors,omitempty"`
+	Waiting      int   `json:"waiting"` // files waiting to be copied to the library
+	Bytes        int64 `json:"bytes"`
+	Failing      int   `json:"failing"` // of those, the last copy failed
+	FailingSince int64 `json:"failingSince,omitempty"`
+	Stuck        int   `json:"stuck"` // need a person; their local files are kept
+	StuckBytes   int64 `json:"stuckBytes,omitempty"`
+	Full         bool  `json:"full"`                // downloads are waiting for room in the staging folder
+	Bypassed     int   `json:"bypassed"`            // downloads sent straight to the library since start: staging was full (ix.12.5)
+	BypassedAt   int64 `json:"bypassedAt"`          // the last of them (unix ms)
+	FullSince    int64 `json:"fullSince,omitempty"` // since when (Unix ms)
+	// Copies to the library in the last hour (ix.12.7): how many, their
+	// bytes, the time spent copying them, and the last one (Unix ms).
+	MovedHour      int      `json:"movedHour"`
+	MovedHourBytes int64    `json:"movedHourBytes"`
+	CopySecsHour   float64  `json:"copySecsHour"`
+	LastMoved      int64    `json:"lastMoved,omitempty"`
+	OldestWaiting  int64    `json:"oldestWaiting,omitempty"` // the oldest file waiting, staged at (Unix ms)
+	Errors         []string `json:"errors,omitempty"`
 }
 
 func (l *Library) StagingStatus(ctx context.Context) StagingStatus {
@@ -1264,6 +1298,15 @@ func (l *Library) StagingStatus(ctx context.Context) StagingStatus {
 	l.stage.mu.Lock()
 	st.Full, st.FullSince = l.stage.waiters > 0, l.stage.fullSince
 	st.Bypassed, st.BypassedAt = l.stage.bypassed, l.stage.bypassedAt
+	now := time.Now()
+	for _, m := range l.stage.moved {
+		if now.Sub(m.at) < time.Hour {
+			st.MovedHour++
+			st.MovedHourBytes += m.bytes
+			st.CopySecsHour += m.took.Seconds()
+		}
+	}
+	st.LastMoved = l.stage.lastMoved
 	l.stage.mu.Unlock()
 	if !l.stage.known.Load() {
 		return st
@@ -1271,6 +1314,7 @@ func (l *Library) StagingStatus(ctx context.Context) StagingStatus {
 	_ = l.reader.QueryRowContext(ctx, `SELECT COALESCE(SUM(state='waiting'),0), COALESCE(SUM(CASE WHEN state='waiting' THEN size ELSE 0 END),0), COALESCE(SUM(error<>'' AND state='waiting'),0),
 		COALESCE(SUM(state='stuck'),0), COALESCE(SUM(CASE WHEN state='stuck' THEN size ELSE 0 END),0), COALESCE(MIN(CASE WHEN failing_since>0 THEN failing_since END),0) FROM tgdl_stage_moves`).
 		Scan(&st.Waiting, &st.Bytes, &st.Failing, &st.Stuck, &st.StuckBytes, &st.FailingSince)
+	_ = l.reader.QueryRowContext(ctx, `SELECT COALESCE(MIN(created_at),0) FROM tgdl_stage_moves WHERE state='waiting'`).Scan(&st.OldestWaiting)
 	rows, err := l.reader.QueryContext(ctx, `SELECT error, COUNT(*) FROM tgdl_stage_moves WHERE error<>'' GROUP BY error ORDER BY 2 DESC LIMIT 5`)
 	if err == nil {
 		for rows.Next() {

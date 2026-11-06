@@ -202,6 +202,10 @@ func checkMoved(t *testing.T, dir, stage string, l *Library, db *store.DB, want 
 	if offset, _, _ := stageProgress(t, db); offset != -1 {
 		t.Fatalf("progress left behind at %d", offset)
 	}
+	// The report's copy figures (ix.12.7).
+	if st := l.StagingStatus(context.Background()); st.MovedHour < 1 || st.MovedHourBytes < int64(len(want)) || st.LastMoved == 0 || st.Waiting != 0 {
+		t.Fatalf("staging status after the move: %+v", st)
+	}
 	for _, root := range []string{filepath.Join(dir, "downloads"), stage} {
 		filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 			if err == nil && !d.IsDir() && strings.HasSuffix(p, ".part") {
