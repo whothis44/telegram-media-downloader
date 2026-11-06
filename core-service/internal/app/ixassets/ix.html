@@ -169,6 +169,34 @@ function viewBackup() {
 <div class="btns"><button class="b" data-act="backup-now" ${st.running ? 'disabled' : ''}>Back up now</button></div></div>`;
 }
 
+// The forecast to the deletion date (ix_forecast.go): what of the queue
+// finishes in time at the last day's speed and if the speed limit stays on.
+function viewForecast(F) {
+  const rates = F.rates || [];
+  const label = ['At the last 24 hours\' speed', 'If Telegram\'s speed limit stays on'];
+  const gbh = (r) => fmtSize(r * 3600) + '/h';
+  let h = `<h3 style="margin:12px 0 4px">Forecast to the deletion date</h3><div>`;
+  rates.forEach((r, i) => {
+    if (!(r.rate > 0)) { h += `${label[i]}: <span class="muted">speed not known yet.</span><br>`; return; }
+    h += `${label[i]} (${gbh(r.rate)}, from ${fmtNum(r.hours)} hour(s)): <b>${fmtSize(r.budget)}</b> fit before the deletion date — `;
+    h += r.finishes ? `<span class="ok">everything left fits</span> (room for about ${fmtSize(r.spare)} more).<br>`
+      : `<span class="bad">${fmtNum(F.total.doneFiles[i])} of ${fmtNum(F.total.files)} queued file(s) finish</span> (${fmtSize(F.total.doneBytes[i])} of ${fmtSize(F.total.bytes)}).<br>`;
+  });
+  h += `</div><div class="muted">The queue in about the order it goes: what is downloading, ranked groups by place, other files, the files set aside (smaller files and private chats first), then probable copies held back and confirmed copies. ${F.unqueued ? `About ${fmtNum(F.unqueued)} file(s), ${fmtSize(F.unqueuedBytes)}, are not queued yet (a rescan adds them); they are counted before the held copies. ` : ''}Only groups already added count: adding a group makes the queue longer, and its files go ahead of the held copies (ahead of other groups too, if you rank it). Its messages are read first, in their own lane, even while the files lane waits. Per-server file slots change the real order a little and the deletion date is a day, not an hour: an estimate. To get a group's files in sooner, raise its rank in Priorities.${F.paused ? ` Not counted: ${fmtNum(F.paused)} file(s) paused by you or held for ever.` : ''}</div>`;
+  const cell = (r, i) => r.files ? `${fmtNum(r.doneFiles[i])} / ${fmtSize(r.doneBytes[i])}${r.doneFiles[i] < r.files ? '' : ' <span class="ok">all</span>'}` : '';
+  const table = (title, rows, first) => {
+    rows = (rows || []).filter((r) => r.files);
+    if (!rows.length) return '';
+    return `<div class="list"><table><tr><th>${title}</th>${first ? '<th></th>' : ''}<th class="n">In the queue</th><th class="n">Finishes at the 24 h speed</th><th class="n">Finishes under the limit</th></tr>${rows.map((r) => `<tr><td>${esc(r.name)}</td>${first ? `<td>${first(r)}</td>` : ''}<td class="n">${fmtNum(r.files)} / ${fmtSize(r.bytes)}</td><td class="n">${cell(r, 0)}</td><td class="n">${cell(r, 1)}</td></tr>`).join('')}</table></div>`;
+  };
+  h += table('Stage', F.stages) + table('Size', F.bands);
+  const ranked = (F.groups || []).filter((g) => g.place > 0);
+  const others = (F.groups || []).filter((g) => !g.place).slice(0, 15);
+  h += table('Ranked group', ranked, (g) => `place ${g.place}`);
+  if (others.length) h += `<div class="muted">Other groups, the most left over under the limit first:</div>` + table('Group', others, (g) => g.private ? '<span class="warn">private</span>' : '<span class="muted">public</span>');
+  return h;
+}
+
 function viewDeadline() {
   const d = state.status.deadline; if (!d) return '';
   const days = (sec) => (sec / 86400).toFixed(1);
@@ -185,10 +213,11 @@ function viewDeadline() {
   let h = `<div class="card"><h2>Before the deadline</h2>
 <div>${d.until ? `Telegram deletes this account in <b>${days(Math.max(0, left))} days</b>. ` : 'Telegram has not set a deletion date. '}<b>${fmtNum(d.toGetFiles || d.leftFiles)}</b> distinct file(s), <b>${fmtSize(d.toGetBytes || d.leftBytes)}</b>, still to download${d.copies ? ` (${fmtNum(d.copies)} more are copies of these or of saved files: they come free)` : ''}; ${fmtNum(d.leftFiles)} of them are in the download queue now${d.unscanned ? `, the rest come as the ${fmtNum(d.unscanned)} group(s) still waiting for their rescan are reached` : ''}. ${verdict}</div>
 <div class="muted">Speed: ${rate(d.rate24h)} over the last day, ${rate(d.rate3h)} over the last 3 hours, ${rate(d.rate1h)} over the last hour (files covered by a saved copy not counted).${d.active ? ` <b>Private chats go first, smaller files before larger ones</b>${deferred ? ` (${fmtNum(deferred)} file(s) set aside for now: public chats' files and larger files)` : ''}. Public chats can still be read from another account after the deletion; private ones can't.` : d.mode === 'off' ? ' Order: normal (Settings).' : ''}</div>
-<div class="btns"><button class="b" data-act="dl-loss">${state.loss ? 'Refresh' : 'Show'} what would be lost today</button></div>`;
+<div class="btns"><button class="b" data-act="dl-loss">${state.loss ? 'Refresh' : 'Show'} the forecast and what would be lost today</button></div>`;
   const L = state.loss;
   if (L && L.error) h += `<div class="bad">${esc(L.error)}</div>`;
-  else if (L && L.loss) {
+  if (L && L.forecast) h += viewForecast(L.forecast);
+  if (L && L.loss && !L.error) {
     h += L.loss.length ? `<div class="muted">Private chats first: they cannot be read again from another account. Then chats not fully scanned, then the most data.</div><div class="list"><table><tr><th>Chat</th><th></th><th class="n">Files left</th><th class="n">Size</th><th>Messages</th></tr>${L.loss.map((x) => `<tr><td>${esc(x.name)}</td><td>${x.private ? '<span class="warn">private</span>' : '<span class="muted">public</span>'}</td><td class="n">${fmtNum(x.files)}</td><td class="n">${fmtSize(x.bytes)}</td><td>${x.scanned ? '<span class="ok">all read</span>' : '<span class="warn">not all read yet</span>'}</td></tr>`).join('')}</table></div>` : '<div class="ok">Nothing would be lost: every chat is fully read and downloaded.</div>';
   }
   return h + '</div>';

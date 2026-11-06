@@ -966,6 +966,11 @@ func (a *App) ixSampleRecord(ctx context.Context, j ixSampleJob, f ixCopyFacts, 
 	if how == "confirmed" {
 		how = "matched by sampled frames" // probable, not proven
 	}
+	if res.Result == "nomatch" && res.Best >= ixSamplePartialHit {
+		// Not a copy, but partly the same footage: held at the back below
+		// (ix.12.9: the line said only "nomatch").
+		how = "partly the same footage, not a copy: at the back of the queue while likely copies are held"
+	}
 	if res.Result == "failed" {
 		how += " [" + res.Why + map[bool]string{true: ", final", false: ", tried again later"}[final] + "]"
 	}

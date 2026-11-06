@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.18-ix.12.9] — 2026-11-06
+
+### Added
+- **A forecast to the deletion date.** The Overview's "Before the deadline" card ("Show the forecast and what would be lost today") and the diagnostics report say what of the download queue would finish before Telegram deletes the account, at two speeds: the last 24 hours', and the speed-limited hours' (what to expect if Telegram's speed limit stays on). By stage (downloading, ranked groups and other files first, set aside, probable copies held back, confirmed copies), by size and by group, so a group can still be ranked higher in time. It walks the queue in about the order it goes and counts a file queued twice once; the files the rescans have not queued yet are counted before the held copies. Only groups already added count: adding a group makes the queue longer. Per-server file slots change the real order a little, and the deletion date is a day, not an hour: an estimate. The speeds come from what the network brought each hour (the pacer's record), not from finished files.
+
+### Changed
+- **Sharper previews of files not downloaded keep coming while Telegram's speed limit is on.** Every message's text and Telegram's tiny (about 40 px) preview are already kept; the 320 px previews (about 9 KB each) were fetched only in a 30-second turn every ten minutes while downloads were busy, and every speed-limit wait of the downloads made the pass slower still: under the limit almost none came (one in 43 minutes on one archive, which had 2,958 of some 74,000). Now the pass goes on while the downloads are speed-limited, one request at least every 10 seconds after the one before ended (some 250 previews an hour at most); only a plain FLOOD_WAIT stops it, for ten minutes. A preview request takes one part of one server's download window while Telegram answers it, so a few per cent of the downloads' parts at most; not measured yet. The report says how the pass is paced.
+- The log line of a big video whose sampled frames partly match a saved video (3 or 4 of 8) said "nomatch". It now says the video is partly the same footage, not a copy, and waits at the back of the queue (as it has since 12.5, while likely copies are held).
+
 ## [3.4.18-ix.12.8] — 2026-11-06
 
 ### Fixed

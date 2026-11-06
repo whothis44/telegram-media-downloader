@@ -89,6 +89,7 @@ type ixDeadlineInfo struct {
 	Unscanned     int              `json:"unscanned"`
 	Loss          []ixDeadlineLoss `json:"loss"`
 	BandLimits    []int64          `json:"bandLimits"`
+	Forecast      *ixForecast      `json:"forecast,omitempty"` // with the loss list only (ix_forecast.go)
 }
 
 // ixDeadlineEstimate measures what is left and how fast it goes.
@@ -185,6 +186,7 @@ func (a *App) ixDeadlineEstimate(ctx context.Context, withLoss bool) ixDeadlineI
 	if !withLoss {
 		return d
 	}
+	d.Forecast = a.ixForecastNow(ctx, d)
 	names := map[string]string{}
 	if metas, err := a.ixGroups(ctx); err == nil {
 		for _, g := range metas {
