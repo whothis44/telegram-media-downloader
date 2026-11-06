@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.18-ix.12.11] — 2026-11-06
+
+### Added
+- **Downloads take the parts a big-video check already read.** A check of a big queued video reads 10 to 32 parts of 1 MiB from Telegram (the index and the parts around the sample points). Most checked videos are not copies and are downloaded later, and those parts were fetched a second time: on one archive, by 11-06, 147 checked videos had been downloaded with 2.06 GB of their parts fetched twice. A check's parts are now kept in the data folder (`data\ixparts`), and the download of the same Telegram file takes them instead of asking Telegram: they take no place in the download windows. A part is used only with the length and SHA-256 it was kept with; one that differs, is cut short or is gone is fetched from Telegram as before, so the saved file is byte for byte what a plain download gives. At most 4 GB is kept, and nothing while the data disk has less than 20 GB free; a file's parts are removed once it is downloaded or no longer queued, and the oldest go first over the 4 GB. The folder is not in the backups. Downloads with per-chunk verification (`TGDL_VERIFY_CHUNKS`) and files of 1 MiB or less are unchanged.
+- **Smaller videos are checked once the big ones are.** Videos of 200 MB or more are checked first, as before. When none of them waits for a check, videos of 100 MB or more are, then of 50 MB, then of 20 MB; a bigger video queued later is checked first again. With the parts kept, checking a video that is downloaded anyway costs almost nothing. Below 20 MB a check reads most of the file, so it is not checked. A video that cannot be checked now (its check failed and waits to be tried again, or its message cannot be read) does not hold the smaller ones back.
+- Report: MB of kept parts the downloads used, parts refused and fetched again (by why), what is kept now and the free space, and the floor in use on the big-video checks line ("waiting for a check N (videos of 200 MB or more: the floor in use)").
+
 ## [3.4.18-ix.12.10] — 2026-11-06
 
 ### Added

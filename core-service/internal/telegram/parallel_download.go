@@ -89,12 +89,20 @@ func fetchParallel(ctx context.Context, api partFetcher, loc tg.InputFileLocatio
 
 // fetchParallelFrom is fetchParallel from start on, a multiple of the part size.
 func fetchParallelFrom(ctx context.Context, api partFetcher, loc tg.InputFileLocationClass, size, start int64, threads int, w io.Writer) error {
+	return fetchParallelKept(ctx, api, loc, size, start, threads, nil, w)
+}
+
+// fetchParallelKept is fetchParallelFrom taking the parts kept has (of the
+// right length) instead of asking Telegram for them (ix.12.11, kept_parts.go).
+// They go through the same in-order writing as fetched ones.
+func fetchParallelKept(ctx context.Context, api partFetcher, loc tg.InputFileLocationClass, size, start int64, threads int, kept KeptParts, w io.Writer) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	type result struct {
 		index int
 		data  []byte
 		err   error
+		kept  bool
 	}
 	parts := int((size + downloadPartSize - 1) / downloadPartSize)
 	results := make(chan result, threads)
@@ -103,12 +111,17 @@ func fetchParallelFrom(ctx context.Context, api partFetcher, loc tg.InputFileLoc
 		index := next
 		next++
 		inflight++
+		// Never blocks: no more results are on their way than threads.
+		if data, ok := keptPart(kept, index, size); ok {
+			results <- result{index: index, data: data, kept: true}
+			return
+		}
 		go func() {
 			data, err := fetchPart(ctx, api, loc, int64(index)*downloadPartSize)
-			results <- result{index, data, err}
+			results <- result{index: index, data: data, err: err}
 		}()
 	}
-	pending := map[int][]byte{}
+	pending := map[int]result{}
 	written, last := next, downloadPartSize
 	var failure error
 	for {
@@ -128,20 +141,23 @@ func fetchParallelFrom(ctx context.Context, api partFetcher, loc tg.InputFileLoc
 			cancel()
 			continue
 		}
-		pending[r.index] = r.data
+		pending[r.index] = r
 		for written < parts {
-			data, ok := pending[written]
+			p, ok := pending[written]
 			if !ok {
 				break
 			}
 			delete(pending, written)
-			if _, err := w.Write(data); err != nil {
+			if _, err := w.Write(p.data); err != nil {
 				failure = err
 				cancel()
 				break
 			}
+			if p.kept {
+				keptPartBytes.Add(int64(len(p.data)))
+			}
 			written++
-			if last = len(data); last < downloadPartSize {
+			if last = len(p.data); last < downloadPartSize {
 				parts = written
 			}
 		}

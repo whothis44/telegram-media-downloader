@@ -206,8 +206,9 @@ func (a *App) ixSampleRateDiag(ctx context.Context) string {
 		return fmt.Sprintf("%d checks, %d MB of parts, %d copies, %d partly the same", n, parts, copies, partial)
 	}
 	var due int64
-	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) `+ixSampleDue(false), ixSampleMinSize, now).Scan(&due)
+	floor := a.ixSampleFloor(ctx)
+	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) `+ixSampleDue(false), floor, now).Scan(&due)
 	t := ixSampleRecheckTotalOf(a)
-	return fmt.Sprintf("  big-video checks: last hour %s · last 24 h %s · waiting for a check %d · turn while downloads are busy %s in %s · kept frames compared again since start: %d comparisons, %d copies, %d partly the same",
-		window(now-3600_000), window(now-86400_000), due, ixRemoteBudgetSample, ixRemoteBudgetWindow, t.Compared.Load(), t.Copies.Load(), t.Partial.Load())
+	return fmt.Sprintf("  big-video checks: last hour %s · last 24 h %s · waiting for a check %d (videos of %d MB or more: the floor in use) · turn while downloads are busy %s in %s · kept frames compared again since start: %d comparisons, %d copies, %d partly the same",
+		window(now-3600_000), window(now-86400_000), due, floor>>20, ixRemoteBudgetSample, ixRemoteBudgetWindow, t.Compared.Load(), t.Copies.Load(), t.Partial.Load())
 }

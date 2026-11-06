@@ -29,7 +29,8 @@ import (
 )
 
 // Confirming big copies without downloading them. For a queued video of
-// 200 MB or more, frames are sampled across the whole file: the file on
+// 200 MB or more (less once none of those waits: ix_sample_floor.go), frames
+// are sampled across the whole file: the file on
 // Telegram is served to ffmpeg by a tiny web server on this computer
 // (127.0.0.1, a random port and a random path for each check), which
 // answers ffmpeg's byte ranges with 1 MiB parts read from Telegram on
@@ -485,6 +486,7 @@ func (a *App) ixSampleCheck(ctx context.Context, r ixCopyReader, msg *tg.Message
 	if len(cands) == 0 {
 		return ixSampleResult{Result: "nomatch", Note: "no saved video of a similar length has a fingerprint yet"}
 	}
+	outer := ctx
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	var refreshed bool
@@ -504,6 +506,13 @@ func (a *App) ixSampleCheck(ctx context.Context, r ixCopyReader, msg *tg.Message
 	if file.mime == "" {
 		file.mime = "video/mp4"
 	}
+	// Whatever the result, the parts read are kept for the download (ix.12.11,
+	// ix_part_store.go), once the server below has stopped.
+	defer func() {
+		if outer.Err() == nil {
+			a.ixPartsKeep(outer, ixPartIdent(att.Identity), file.partsNow())
+		}
+	}()
 	address, stop, err := ixServeRemote(file)
 	if err != nil {
 		return ixSampleResult{Result: "failed", Why: ixSampleWhyFFmpeg, Note: err.Error()}
@@ -599,6 +608,17 @@ func (a *App) ixSampleCheck(ctx context.Context, r ixCopyReader, msg *tg.Message
 	return res
 }
 
+// partsNow is a copy of the parts read so far.
+func (f *ixRangeFile) partsNow() map[int64][]byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make(map[int64][]byte, len(f.parts))
+	for i, p := range f.parts {
+		out[i] = p
+	}
+	return out
+}
+
 func (f *ixRangeFile) fetchedNow() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -672,7 +692,7 @@ func (a *App) ixSampleJobs(ctx context.Context, which int, n int) ([]ixSampleJob
 		order = ` ORDER BY w.sched_order>=` + strconv.Itoa(engine.UnrankedOrder) + `, w.file_size DESC, w.id`
 	}
 	rows, err := a.db.Reader.QueryContext(ctx, `SELECT w.id, w.file_size, w.account_id, w.body, h.work_id IS NOT NULL, COALESCE(h.like_key,'') `+ixSampleDueOf(which)+
-		order+` LIMIT ?`, ixSampleMinSize, time.Now().UnixMilli(), n)
+		order+` LIMIT ?`, a.ixSampleFloor(ctx), time.Now().UnixMilli(), n)
 	if err != nil {
 		return nil, err
 	}
@@ -811,7 +831,7 @@ func (a *App) ixSampleReuse(ctx context.Context, heldOnly bool) error {
 		return nil
 	}
 	rows, err = a.db.Reader.QueryContext(ctx, `SELECT w.id, w.identity `+ixSampleDue(heldOnly)+`
-		ORDER BY w.sched_order, w.file_size DESC, w.id`, ixSampleMinSize, time.Now().UnixMilli())
+		ORDER BY w.sched_order, w.file_size DESC, w.id`, a.ixSampleFloor(ctx), time.Now().UnixMilli())
 	if err != nil {
 		return err
 	}

@@ -87,6 +87,9 @@ func ixEnsureCopiesSchema(ctx context.Context, db *sql.DB) error {
 	if _, err := db.ExecContext(ctx, ixCopiesSchema); err != nil {
 		return err
 	}
+	if _, err := db.ExecContext(ctx, ixPartStoreSchema); err != nil { // ix_part_store.go (ix.12.11)
+		return err
+	}
 	// Checks made before the reasons were recorded are tried again.
 	// frames, dur_ms (ix.12.10): the sampled frames of a check and the video's
 	// length, to compare again when more saved videos have fingerprints.
@@ -601,6 +604,7 @@ func (a *App) ixCopiesDiag(ctx context.Context) []string {
 	out = append(out, fmt.Sprintf("  big videos sampled: checked %d big videos using %d MB instead of %.1f GB (%d more took the answer for the same file); %d matched by sampled frames; %d could not be checked%s · previews kept %d · likeness threshold %.3f",
 		s.Checked, s.PartsMB, float64(s.SizeBytes)/(1<<30), s.Reused, s.Confirmed, s.Failed, failed, c.Previews, c.Threshold))
 	out = append(out, a.ixSampleRateDiag(ctx))
+	out = append(out, a.ixPartsDiag(ctx)) // ix_part_store.go (ix.12.11)
 	out = append(out, a.ixPreviewAllDiag(ctx))
 	return out
 }

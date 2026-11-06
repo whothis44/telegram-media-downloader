@@ -543,14 +543,20 @@ func downloadMedia(ctx context.Context, client downloadClient, a Attachment, w i
 		return err
 	}
 	defer pool.Close()
+	// Parts an earlier check of this file kept (ix.12.11, kept_parts.go). Not
+	// with per-chunk verification, whose reader is the library's.
+	var kept KeptParts
+	if !verify && a.Identity.Size > downloadPartSize {
+		kept = keptPartsFor(a.Identity)
+	}
 	if offset := downloadOffsetOf(ctx); offset > 0 {
 		if offset%downloadPartSize != 0 || offset >= a.Identity.Size {
 			return fmt.Errorf("invalid resume offset %d of %d", offset, a.Identity.Size)
 		}
-		return fetchParallelFrom(ctx, tg.NewClient(pool), a.Location, a.Identity.Size, offset, max(threads, 1), w)
+		return fetchParallelKept(ctx, tg.NewClient(pool), a.Location, a.Identity.Size, offset, max(threads, 1), kept, w)
 	}
-	if !verify && threads > 1 && a.Identity.Size > downloadPartSize {
-		return fetchParallel(ctx, tg.NewClient(pool), a.Location, a.Identity.Size, threads, w)
+	if !verify && (threads > 1 || kept != nil) && a.Identity.Size > downloadPartSize {
+		return fetchParallelKept(ctx, tg.NewClient(pool), a.Location, a.Identity.Size, 0, max(threads, 1), kept, w)
 	}
 	if !verify {
 		_, err = downloader.NewDownloader().WithPartSize(downloadPartSize).Download(tg.NewClient(pool), a.Location).Stream(ctx, w)
