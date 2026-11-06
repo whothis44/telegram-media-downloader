@@ -586,6 +586,7 @@ func ixFFmpegFingerprint(ctx context.Context, path, hwaccel string) (float64, []
 	}
 	ctx, cancel := context.WithTimeout(ctx, ixVdupMaxDuration)
 	defer cancel()
+	ixNoteLibReadPath(ixReadVideoIdx, path) // decoded whole: about its size read
 	args := []string{"-hide_banner", "-nostdin", "-loglevel", "info"}
 	if hwaccel != "" {
 		args = append(args, "-hwaccel", hwaccel)

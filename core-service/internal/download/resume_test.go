@@ -588,6 +588,9 @@ func TestResumeHelperProcess(t *testing.T) {
 		item.GroupID, item.GroupName, item.MessageID, item.Identity.Key(), item.Identity.Size); err != nil {
 		t.Fatal(err)
 	}
+	if stage := os.Getenv("TGDL_RESUME_STAGE"); stage != "" {
+		library.Staging = func(context.Context) Staging { return Staging{Dir: stage} }
+	}
 	client := &resumeClient{data: resumeBytes(resumeTestSize), can: true}
 	dieAtPart, _ := strconv.Atoi(os.Getenv("TGDL_RESUME_DIE_PART"))
 	switch os.Getenv("TGDL_RESUME_DIE") {
@@ -614,8 +617,14 @@ func TestResumeHelperProcess(t *testing.T) {
 
 func runResumeCrash(t *testing.T, dir, how string, part int) {
 	t.Helper()
+	runResumeCrashIn(t, dir, "", how, part)
+}
+
+// runResumeCrashIn is runResumeCrash with the local staging folder stage (empty: off).
+func runResumeCrashIn(t *testing.T, dir, stage, how string, part int) {
+	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run=^TestResumeHelperProcess$", "-test.v")
-	cmd.Env = append(os.Environ(), "TGDL_RESUME_HELPER_DIR="+dir, "TGDL_RESUME_DIE="+how, "TGDL_RESUME_DIE_PART="+strconv.Itoa(part))
+	cmd.Env = append(os.Environ(), "TGDL_RESUME_HELPER_DIR="+dir, "TGDL_RESUME_DIE="+how, "TGDL_RESUME_DIE_PART="+strconv.Itoa(part), "TGDL_RESUME_STAGE="+stage)
 	out, err := cmd.CombinedOutput()
 	var exit *exec.ExitError
 	if !errors.As(err, &exit) || exit.ExitCode() != 42 {

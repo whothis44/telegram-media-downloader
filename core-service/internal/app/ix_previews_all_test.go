@@ -290,7 +290,8 @@ func TestIxPreviewsAllRateAndWaits(t *testing.T) {
 	if tries != 0 {
 		t.Fatalf("a wait counted as a failed try: %d", tries)
 	}
-	// The downloads meet the speed limit: slower again, but it goes on.
+	// The downloads meet the speed limit: it goes on, no slower than its
+	// own wait made it (ix.12.9: the downloads' waits no longer double it).
 	box.mu.Lock()
 	box.pauseUntil = time.Time{}
 	box.mu.Unlock()
@@ -303,8 +304,11 @@ func TestIxPreviewsAllRateAndWaits(t *testing.T) {
 	if len(r.asked) != 7 {
 		t.Fatalf("asked %v", r.asked)
 	}
-	if d := r.at[6].Sub(r.at[5]); d < 4*gap-5*time.Millisecond {
-		t.Fatalf("not slower after the speed limit: %v", d)
+	if d := r.at[6].Sub(r.at[5]); d < 2*gap-5*time.Millisecond {
+		t.Fatalf("gap after the downloads' speed limit: %v (want at least %v)", d, 2*gap)
+	}
+	if a.ixPreviewAllGapNow() != gap {
+		t.Fatalf("a round without its own wait keeps it slow: %v", a.ixPreviewAllGapNow())
 	}
 	if a.ixPreviewAllNow().Remaining != 0 {
 		t.Fatalf("left: %+v", a.ixPreviewAllNow())
@@ -323,6 +327,59 @@ func TestIxPreviewsAllRateAndWaits(t *testing.T) {
 	a.ixPreviewAllRound(ctx)
 	if p := a.ixPreviewAllNow(); len(r.asked) != 7 || p.Unavailable != 1 || p.Remaining != 0 {
 		t.Fatalf("no preview: %v %+v", r.asked, p)
+	}
+}
+
+// ix.12.9: while the downloads are speed-limited the pass goes on, at
+// least ixPreviewAllBusyGap apart; a plain FLOOD_WAIT in the last ten
+// minutes still stops it.
+func TestIxPreviewsAllUnderTheSpeedLimit(t *testing.T) {
+	a, ctx := ixTestApp(t)
+	ixAllDeadline(t, a, ctx)
+	for i := 1; i <= 3; i++ {
+		ixTestArchive(t, a, ixTestPhoto(i, ixTestChannel, int64(950+i), 1000-i))
+	}
+	r := &ixAllReader{preview: ixTestJPEG(t, image.NewRGBA(image.Rect(0, 0, 32, 24)), 80)}
+	ixAllUse(t, r, 5*time.Millisecond)
+	oldBusy, oldFlood, oldBusyGap := ixRemoteChecksBusy, ixFloodedLately, ixPreviewAllBusyGap
+	busy, flooded := true, true
+	ixRemoteChecksBusy = func(*App) bool { return busy }
+	ixFloodedLately = func(*App) bool { return flooded }
+	ixPreviewAllBusyGap = 60 * time.Millisecond
+	t.Cleanup(func() { ixRemoteChecksBusy, ixFloodedLately, ixPreviewAllBusyGap = oldBusy, oldFlood, oldBusyGap })
+
+	// A plain FLOOD_WAIT lately: nothing is asked.
+	if d := a.ixPreviewAllRound(ctx); d != time.Minute || len(r.asked) != 0 {
+		t.Fatalf("after a FLOOD_WAIT: waited %v, asked %v", d, r.asked)
+	}
+	if why := a.ixPreviewAllNow().Why; !strings.Contains(why, "FLOOD_WAIT") {
+		t.Fatalf("why: %q", why)
+	}
+	// Speed-limited only: it goes on, at the slower pace.
+	flooded = false
+	if a.ixPreviewAllGapNow() != ixPreviewAllBusyGap {
+		t.Fatalf("gap under the limit: %v", a.ixPreviewAllGapNow())
+	}
+	a.ixPreviewAllRound(ctx)
+	if len(r.asked) != 3 {
+		t.Fatalf("asked %v under the speed limit", r.asked)
+	}
+	for i := 1; i < 3; i++ {
+		if d := r.at[i].Sub(r.at[i-1]); d < ixPreviewAllBusyGap-5*time.Millisecond {
+			t.Fatalf("requests %v apart under the speed limit", d)
+		}
+	}
+	if p := a.ixPreviewAllNow(); p.Remaining != 0 || p.FetchedRun != 3 {
+		t.Fatalf("counts: %+v", p)
+	}
+	ixTestArchive(t, a, ixTestPhoto(9, ixTestChannel, 959, 10)) // one more to fetch
+	if line := a.ixPreviewAllDiag(ctx); !strings.Contains(line, "slow while downloads are speed-limited") {
+		t.Fatalf("report line: %s", line)
+	}
+	// Not busy: the usual pace.
+	busy = false
+	if a.ixPreviewAllGapNow() != 5*time.Millisecond {
+		t.Fatalf("gap when not busy: %v", a.ixPreviewAllGapNow())
 	}
 }
 

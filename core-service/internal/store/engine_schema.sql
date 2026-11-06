@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS tgdl_work (
  origin TEXT NOT NULL DEFAULT 'live',
  ttl_seconds INTEGER NOT NULL DEFAULT 0,
  sched_order INTEGER NOT NULL DEFAULT 131072,
+ dc INTEGER NOT NULL DEFAULT 0,
  attempts INTEGER NOT NULL DEFAULT 0,
  retry_at INTEGER NOT NULL DEFAULT 0,
  error TEXT,
@@ -64,6 +65,7 @@ CREATE TABLE IF NOT EXISTS tgdl_part_progress (
  offset INTEGER NOT NULL,
  sha256 TEXT NOT NULL,
  updated_at INTEGER NOT NULL,
+ stage_dir TEXT NOT NULL DEFAULT '',
  PRIMARY KEY (group_id,message_id,identity)
 );
 CREATE TABLE IF NOT EXISTS tgdl_group_rank (

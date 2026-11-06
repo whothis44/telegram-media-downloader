@@ -94,6 +94,11 @@ type Library struct {
 	// check that confirmed it (Record.DedupHow); DedupTelegramFile when it
 	// is the same Telegram file, known by a message without an entry.
 	Substitute func(context.Context, Item, Client) (path, how string, ok bool)
+	// Adopt (ix.12.6), when set, says whether a file already in the library
+	// under this message's own name (put there by hand, or from a staging
+	// folder emptied by hand) holds exactly the item's bytes, as checked on
+	// Telegram. Such a file is catalogued instead of downloaded again.
+	Adopt func(ctx context.Context, item Item, path string, client Client) bool
 	// SubstituteWait (with Substitute) names the key under which an item
 	// waits, at most SubstituteWaitMax, while another item with the same
 	// key is downloading, so that Substitute can find that one saved (the
@@ -118,6 +123,7 @@ type Library struct {
 
 	writer, reader *sql.DB
 	root           string
+	listings       folderListings // folder listings for adoption (ix.12.6)
 	dataDir        string
 	mu             sync.Mutex
 	flights        map[string]chan struct{}
@@ -269,6 +275,11 @@ func (l *Library) Ingest(ctx context.Context, item Item, client Client) (Record,
 	if client == nil {
 		return Record{}, errors.New("Telegram download client is unavailable")
 	}
+	if !l.blocked(ctx, item) {
+		if record, found, err := l.adoptOrphan(ctx, item, client); err != nil || found {
+			return record, err
+		}
+	}
 	if key, ok := l.substituteWait(ctx, item); ok {
 		max := l.SubstituteWaitMax
 		if max <= 0 {
@@ -312,7 +323,7 @@ func (l *Library) Ingest(ctx context.Context, item Item, client Client) (Record,
 	resuming := canResume(client, item.Identity.Size)
 	var progress partRow
 	if resuming {
-		progress = l.partLoad(ctx, item)
+		progress = l.partLoad(ctx, item, "")
 	}
 	relative := filepath.FromSlash(progress.path)
 	if progress.path == "" {
@@ -335,7 +346,7 @@ func (l *Library) Ingest(ctx context.Context, item Item, client Client) (Record,
 	// owns all cross-message coalescing and does not retain this temporary map.
 	m := NewManager(hashClient{client, digest}, telegram.NewDedupIndex())
 	if resuming {
-		m.resume = l.partResumeFor(item, filepath.ToSlash(relative), progress, digest)
+		m.resume = l.partResumeFor(item, filepath.ToSlash(relative), "", progress, digest)
 	}
 	m.prepared = func() error {
 		_, err := l.writer.ExecContext(ctx, `UPDATE tgdl_ingest_files SET sha256=? WHERE path=?`, hex.EncodeToString(digest.Sum(nil)), filepath.ToSlash(relative))
@@ -451,8 +462,9 @@ func (l *Library) destination(item Item) (string, error) {
 	return filepath.Join(dir, name), nil
 }
 
-// destinationName is a new unique name for the item, without touching disk.
-func destinationName(item Item) (dir, name string, err error) {
+// destinationParts is where the item's files go and how their names begin
+// and end: stem + 32 random hex digits + ext (destinationName).
+func destinationParts(item Item) (dir, stem, ext string) {
 	group := item.GroupName
 	if strings.TrimSpace(group) == "" {
 		group = item.GroupID
@@ -471,14 +483,119 @@ func destinationName(item Item) (dir, name string, err error) {
 		folder = "gifs"
 	}
 	dir = filepath.Join(safeComponent(group), folder)
-	name = safeComponent(item.Name)
-	extension := filepath.Ext(name)
+	name := safeComponent(item.Name)
+	ext = filepath.Ext(name)
+	stem = strings.TrimSuffix(name, ext) + "_" + strconv.FormatInt(item.MessageID, 10) + "_"
+	return dir, stem, ext
+}
+
+// orphansFor lists files in the item's library folder under its own name
+// (stem, 32 hex digits, ext) and of its exact size that the catalogue does
+// not know: copies of it that reached the library by hand (ix.12.6).
+func (l *Library) orphansFor(ctx context.Context, item Item) []string {
+	dir, stem, ext := destinationParts(item)
+	var out []string
+	for _, e := range l.folderListing(dir) {
+		name := e.name
+		if !strings.HasPrefix(name, stem) || !strings.HasSuffix(name, ext) || len(name) != len(stem)+32+len(ext) || e.size != item.Identity.Size {
+			continue
+		}
+		if _, err := hex.DecodeString(name[len(stem) : len(stem)+32]); err != nil {
+			continue
+		}
+		rel := filepath.ToSlash(filepath.Join(dir, name))
+		var n int
+		if l.reader.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM downloads WHERE file_path=?)+(SELECT COUNT(*) FROM tgdl_ingest_files WHERE path=?)`, rel, rel).Scan(&n) != nil || n > 0 {
+			continue
+		}
+		out = append(out, rel)
+	}
+	return out
+}
+
+type folderEntry struct {
+	name string
+	size int64
+}
+
+type folderListings struct {
+	mu sync.Mutex
+	at map[string]time.Time
+	of map[string][]folderEntry
+}
+
+// folderListingFor is how long a folder's listing is used before it is read
+// again: one listing per folder at most this often, not one per download.
+var folderListingFor = 10 * time.Minute
+
+// folderListing is the regular files of a library folder with their sizes,
+// read at most every folderListingFor.
+func (l *Library) folderListing(dir string) []folderEntry {
+	c := &l.listings
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if at, ok := c.at[dir]; ok && time.Since(at) < folderListingFor {
+		return c.of[dir]
+	}
+	if c.at == nil {
+		c.at, c.of = map[string]time.Time{}, map[string][]folderEntry{}
+	}
+	var out []folderEntry
+	if entries, err := os.ReadDir(filepath.Join(l.root, dir)); err == nil {
+		for _, e := range entries {
+			if !e.Type().IsRegular() {
+				continue
+			}
+			if info, err := e.Info(); err == nil {
+				out = append(out, folderEntry{e.Name(), info.Size()})
+			}
+		}
+	}
+	c.at[dir], c.of[dir] = time.Now(), out
+	return out
+}
+
+// adoptOrphan catalogues a copy of the item already in the library, when
+// Adopt confirms its bytes, instead of downloading the item again.
+func (l *Library) adoptOrphan(ctx context.Context, item Item, client Client) (Record, bool, error) {
+	if l.Adopt == nil {
+		return Record{}, false, nil
+	}
+	for _, path := range l.orphansFor(ctx, item) {
+		if !l.Adopt(ctx, item, path, client) {
+			continue
+		}
+		f, info, err := l.open(path)
+		if err != nil {
+			continue
+		}
+		fingerprint, err := fileFingerprint(f, info)
+		if err != nil {
+			f.Close()
+			continue
+		}
+		sum, n, err := hashFile(ctx, f)
+		f.Close()
+		if err != nil || n != item.Identity.Size {
+			continue
+		}
+		record, err := l.register(ctx, item, candidate{path: path, sha256: sum, info: info, fingerprint: fingerprint}, false)
+		if errors.Is(err, errCandidateChanged) {
+			continue
+		}
+		return record, err == nil, err
+	}
+	return Record{}, false, nil
+}
+
+// destinationName is a new unique name for the item, without touching disk.
+func destinationName(item Item) (dir, name string, err error) {
+	dir, stem, ext := destinationParts(item)
 	random := make([]byte, 16)
 	if _, err := rand.Read(random); err != nil {
 		return "", "", err
 	}
-	name = strings.TrimSuffix(name, extension) + "_" + strconv.FormatInt(item.MessageID, 10) + "_" + hex.EncodeToString(random) + extension
-	return dir, name, nil
+	return dir, stem + hex.EncodeToString(random) + ext, nil
 }
 
 // ensureDir creates dir under the library root and refuses symlinks on it.

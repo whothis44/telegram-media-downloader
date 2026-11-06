@@ -74,7 +74,8 @@ func (a *App) ixIngestWork(ctx context.Context, work *engine.Work, message *tg.M
 	if plan != nil && !plan.upgrade {
 		size = plan.alt.Doc.Size
 	}
-	if err := a.ixWaitStageRoom(ctx, size, transport); err != nil {
+	ctx, err := a.ixStagePlace(ctx, work, size, transport)
+	if err != nil {
 		return err
 	}
 	record, err := a.ingestTelegram(ctx, message, work.GroupID, work.GroupName, work.AccountID, transport)

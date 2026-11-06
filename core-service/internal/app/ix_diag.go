@@ -31,8 +31,15 @@ var (
 	// ": " (how Windows errors go on), a quote, or the end: folder names
 	// may hold spaces.
 	ixReWinPath = regexp.MustCompile(`(?i)(?:\b[A-Z]:[\\/]|\\\\)[^"'<>|\r\n]*?(?:: |["'<>|\r\n]|$)`)
-	ixReUnix    = regexp.MustCompile(`(?:^|[\s"'(=])((?:[\w.\-()\[\] ]+/)+[\w.\-()\[\] ]*\.[A-Za-z0-9]{1,5})`)
-	ixReFile    = regexp.MustCompile(`[\w\-() ]+\.(?i:jpe?g|png|gif|webp|mp4|mkv|mov|avi|webm|mp3|ogg|oga|m4a|pdf|zip|rar|7z|docx?|xlsx?|txt|apk|exe|heic|tgs)\b`)
+	// A relative path: a token with a slash, to the last extension on the
+	// line, whatever its characters (names in any script, with $, &, emoji,
+	// dots or spaces): hiding too much is safe, too little is not (ix.12.5).
+	ixReUnix = regexp.MustCompile(`(?:^|[\s"'(=])([^\s"'<>|]*/[^"'<>|\r\n]*\.[A-Za-z0-9]{1,5})(?:[\s"'),;]|$)`)
+	// A file name alone: from the last ": ", quote, slash or bracket before
+	// a media extension, spaces included.
+	ixReFile = regexp.MustCompile(`[^"'<>|/:\r\n]*?[^\s"'<>|/:]\.(?i:jpe?g|png|gif|webp|mp4|mkv|mov|avi|webm|mp3|ogg|oga|m4a|pdf|zip|rar|7z|docx?|xlsx?|txt|apk|exe|heic|tgs)\b`)
+	// A message number: every one, not only long ones.
+	ixReMsgNum  = regexp.MustCompile(`#\d+`)
 	ixReAt      = regexp.MustCompile(`@[A-Za-z][A-Za-z0-9_]{3,}`)
 	ixReEmailD  = regexp.MustCompile(`[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}`)
 	ixReLongNum = regexp.MustCompile(`\b\d{6,}\b`)
@@ -68,13 +75,23 @@ func (r *ixRedactor) clean(s string) string {
 		return "<path>" + end
 	})
 	s = ixReUnix.ReplaceAllStringFunc(s, func(m string) string {
-		lead := ""
+		lead, tail := "", ""
 		if len(m) > 0 && strings.ContainsRune(" \"'(=", rune(m[0])) {
 			lead = m[:1]
 		}
-		return lead + "<path>"
+		if n := len(m); n > 0 && strings.ContainsRune(" \"'),;\t\r\n", rune(m[n-1])) {
+			tail = m[n-1:]
+		}
+		return lead + "<path>" + tail
 	})
-	s = ixReFile.ReplaceAllString(s, "<file>")
+	s = ixReFile.ReplaceAllStringFunc(s, func(m string) string {
+		// Keep the space before the name, so words before it stay apart.
+		if t := strings.TrimLeft(m, " "); len(t) < len(m) {
+			return m[:len(m)-len(t)] + "<file>"
+		}
+		return "<file>"
+	})
+	s = ixReMsgNum.ReplaceAllString(s, "#<n>")
 	s = ixReGroupID.ReplaceAllStringFunc(s, r.group)
 	s = ixReAt.ReplaceAllString(s, "<user>")
 	s = ixReHex.ReplaceAllString(s, "<hash>")
@@ -97,7 +114,7 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 			}
 		}
 	}
-	if rows, err := a.db.Reader.QueryContext(ctx, `SELECT title FROM ix_group_info WHERE title<>'' UNION SELECT name FROM ix_peers WHERE name<>''`); err == nil {
+	if rows, err := a.db.Reader.QueryContext(ctx, `SELECT title FROM ix_group_info WHERE title<>'' UNION SELECT name FROM ix_peers WHERE name<>'' UNION SELECT title FROM ix_topics WHERE title<>''`); err == nil {
 		for rows.Next() {
 			var n string
 			if rows.Scan(&n) == nil {
@@ -125,16 +142,26 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 	line("recognition services: auto start %s", on(s.MLAutoStart))
 	line("\n[account]")
 	acct := a.ixAccount()
-	line("frozen %v · deactivated %v · flood wait %v · last error %s", acct.Frozen, acct.Deactivated, acct.FloodWait, r.clean(acct.LastError))
+	// Two different things (ix.12.3 says which is which): Telegram's own freeze
+	// dates for the account, and whether recent errors were refusals because of it.
 	fz := a.ixFreeze(ctx)
 	if fz.Until > 0 {
-		line("freeze: since %s, deletion %s (%d days left)", time.Unix(fz.Since, 0).UTC().Format("2006-01-02"), time.Unix(fz.Until, 0).UTC().Format("2006-01-02"), int(time.Unix(fz.Until, 0).Sub(now).Hours()/24))
+		line("freeze: Telegram reports the account frozen since %s, deletion %s (%d days left)", time.Unix(fz.Since, 0).UTC().Format("2006-01-02"), time.Unix(fz.Until, 0).UTC().Format("2006-01-02"), int(time.Unix(fz.Until, 0).Sub(now).Hours()/24))
 	} else {
 		line("freeze: none reported (checked %s)%s", ixAgo(fz.CheckedAt, now), map[bool]string{true: " · last check failed: " + r.clean(fz.Error), false: ""}[fz.Error != ""])
 	}
+	line("recent errors: refused as frozen %v · deactivated %v · flood wait %v · last error %s (a frozen account can still read, so this stays false while nothing is refused)", acct.Frozen, acct.Deactivated, acct.FloodWait, r.clean(acct.LastError))
 	line("hold: %s", r.clean(a.ixHold(ctx)))
 	line("\n[restarts]")
 	for _, l := range a.ixRestartsDiag(now) {
+		line("%s", l)
+	}
+	line("\n[process]")
+	for _, l := range ixProcessDiag(now) {
+		line("%s", l)
+	}
+	line("\n[memory]")
+	for _, l := range ixMemoryDiag() {
 		line("%s", l)
 	}
 	line("")
@@ -160,15 +187,36 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 	if d.Pace.Off {
 		line("download pacing is off (Settings): downloads go as in ix.8")
 	}
-	line("speed %.2f MB/s now, %.2f MB/s over 5 min · parts in flight allowed %d · Telegram waits: %d in the last hour, %d in the last day · speed-limit waits (no Premium): %d in the last hour, %d in the last day", mb(d.Pace.Speed), mb(d.Pace.Speed5m), d.Pace.Window, d.Pace.Floods1h, d.Pace.Floods24h, d.Pace.Premium1h, d.Pace.Premium24h)
+	// The 5-minute figure first: "now" counts whole 1 MiB parts of the last few
+	// seconds, so a few parts read as the same speed on every server.
+	line("speed %.2f MB/s over 5 min, %.2f MB/s now · parts in flight allowed %d · Telegram waits: %d in the last hour, %d in the last day · speed-limit waits (no Premium): %d in the last hour, %d in the last day", mb(d.Pace.Speed5m), mb(d.Pace.Speed), d.Pace.Window, d.Pace.Floods1h, d.Pace.Floods24h, d.Pace.Premium1h, d.Pace.Premium24h)
+	if !d.Pace.Off {
+		mode := "each holds only the request that got it (ix.12.4)"
+		if !d.Pace.PremiumPerRequest && !d.Pace.PremiumShared.IsZero() {
+			mode = "every file waits for each (as before ix.12.4) until " + d.Pace.PremiumShared.In(ixTZ).Format("15:04")
+		}
+		fb := ixKindList(d.Pace.PremiumFallbacks)
+		if fb == "" {
+			fb = "none"
+		}
+		line("speed-limit waits: %s · back to every file waiting, since start: %s", mode, fb)
+		if ps := d.Pace.FallbackPeriods; len(ps) > 0 {
+			sort.Slice(ps, func(i, j int) bool { return ps[i].Start.Before(ps[j].Start) })
+			var parts []string
+			for _, x := range ps[max(0, len(ps)-8):] {
+				parts = append(parts, fmt.Sprintf("%s–%s (%s)", x.Start.In(ixTZ).Format("15:04"), x.End.In(ixTZ).Format("15:04"), x.Why))
+			}
+			line("  every file waiting, the last times: %s", strings.Join(parts, " · "))
+		}
+	}
 	for _, dc := range d.Pace.DCs {
-		line("  DC%d: window %d, in flight %d, waiting %d, %.2f MB/s (5 min %.2f), %.1f s a part, waits last hour %d (speed limit %d) · %s", dc.DC, dc.Window, dc.InFlight, dc.Waiting, mb(dc.Speed), mb(dc.Speed5m), dc.PartSecs, dc.Floods1h, dc.Premium1h, dc.State)
+		line("  DC%d: window %d, in flight %d, waiting %d, %.2f MB/s over 5 min (now %.2f), %.1f s a part, waits last hour %d (speed limit %d) · %s", dc.DC, dc.Window, dc.InFlight, dc.Waiting, mb(dc.Speed5m), mb(dc.Speed), dc.PartSecs, dc.Floods1h, dc.Premium1h, dc.State)
 		line("    Telegram wait time since start: %.1f request-seconds (summed across requests, separate from network response time)", dc.GateWaitSecs)
 		line("    waiting for Telegram now %d requests; file slots: small %d/%d, large %d/%d (20 MB boundary)", dc.GateWaiting, dc.SmallFiles, dc.SmallFileLimit, dc.LargeFiles, dc.LargeFileLimit)
 	}
 	bf := d.Big
-	line("big files (%d MB or more): %d downloading (at most %d at once, 0 = no limit) · %d waiting · %d set aside · %d held · backfills queueing files %d · queue %d of %d · backfill paused by the queue limit %v",
-		bf.MinBytes>>20, bf.Downloading, bf.Limit, bf.Waiting, bf.SetAside, bf.Held, bf.Backfills, bf.QueueCount, bf.QueueCap, bf.CapPaused)
+	line("big files (%d MB or more): %d downloading (at most %d at once, 0 = no limit) · %d waiting · %d set aside · %d held · backfills queueing files %d · queue %d of %d (not counted: %d waiting for a free slot on their server) · backfill paused by the queue limit %v",
+		bf.MinBytes>>20, bf.Downloading, bf.Limit, bf.Waiting, bf.SetAside, bf.Held, bf.Backfills, bf.QueueCount, bf.QueueCap, bf.SlotBlocked, bf.CapPaused)
 	var days []string
 	for _, day := range d.Days {
 		days = append(days, fmt.Sprintf("%s %d files %d MB", day.Day[5:], day.Files, day.Bytes>>20))
@@ -253,7 +301,13 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 	line("deadline order %s (active %v) · queued %d files / %d MB · speed %.1f MB/h (day), %.1f MB/h (3 h), %.1f MB/h (hour) · estimate at %s speed (%.1f MB/h%s) · finishes %s · set aside by band %v · groups not fully read %d",
 		dl.Mode, dl.Active, dl.LeftFiles, dl.LeftBytes>>20, dl.Rate24h*3600/1e6, dl.Rate3h*3600/1e6, dl.Rate1h*3600/1e6,
 		map[string]string{"day": "the day's", "3h": "the last 3 h"}[dl.RateUsed], dl.Rate*3600/1e6, limit, dl.Finishes, dl.Deferred, dl.Unscanned)
+	line("  ahead of held copies and set-aside files: %d files / %d MB · finishes %s at that speed", dl.AheadFiles, dl.AheadBytes>>20, dl.AheadFinishes)
+	for _, l := range ixForecastDiag(a.ixForecastNow(ctx, dl), r.group) { // ix_forecast.go
+		line("%s", l)
+	}
+	a.ixSlotDiag(ctx, line, now)
 	fx := a.ixFixityStatus(ctx)
+	line("%s", ixLibReadsDiag())
 	line("integrity: %d files, %d checked this cycle, %d changed, %d missing, %d size differs, last %s", fx.Files, fx.Checked, fx.Changed, fx.Missing, fx.SizeOff, ixAgo(fx.LastCheck, now))
 	box := a.ixModelBox()
 	box.mu.Lock()

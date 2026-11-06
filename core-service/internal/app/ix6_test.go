@@ -315,6 +315,11 @@ func TestIxHeldCopiesAreReleasedWhenTheQueueEmpties(t *testing.T) {
 	if _, err := a.db.Writer.Exec(`INSERT INTO ix_held(work_id,group_id,message_id,like_path,like_key,reason,held_at) VALUES(1,'-1001',10,'x.mp4','h:x','looks like a saved copy',?)`, now); err != nil {
 		t.Fatal(err)
 	}
+	// With the record of why, as every hold since ix.10 has (one without is
+	// forgotten: ix.12.5).
+	if _, err := a.db.Writer.Exec(`INSERT INTO ix_copy_hold(work_id,how) VALUES(1,'saved')`); err != nil {
+		t.Fatal(err)
+	}
 	// The saved file it copies (a copy whose saved file is gone is let go).
 	if _, err := a.db.Writer.Exec(`INSERT INTO downloads(group_id,message_id,file_name,file_type,file_path,status) VALUES('-1001',3,'x.mp4','video','x.mp4','completed')`); err != nil {
 		t.Fatal(err)
