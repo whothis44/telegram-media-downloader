@@ -395,7 +395,14 @@ func (a *App) ixDeadlineStep(ctx context.Context) error {
 		return err
 	}
 	if unqueued {
-		return a.ixDeadlineKeepBusy(ctx, acctClause, args, reading)
+		// A rescan held by the queue limit brings nothing meanwhile: no
+		// workers need keeping free for it.
+		return a.ixDeadlineKeepBusy(ctx, acctClause, args, reading && !a.ixBigFilesMeasure(ctx).CapPaused)
+	}
+	// Slots that the band going now cannot use (its files are on other
+	// servers, or of the other size) take set-aside files too (ix_slotfill.go).
+	if small, large := ixFileSlots(a); small > 0 && large > 0 {
+		return a.ixDeadlineKeepBusy(ctx, acctClause, args, false)
 	}
 	return nil
 }
@@ -506,37 +513,56 @@ func (a *App) ixDeadlineKeepBusy(ctx context.Context, acctClause string, args []
 	if workers <= 0 {
 		workers = 25
 	}
-	ready, busy, err := a.ixClaimableNow(ctx, acctClause, args)
-	if err != nil {
-		return err
-	}
 	limit := workers
 	if reading {
 		limit = (workers + 1) / 2
 	}
-	need := limit - ready - busy
-	if need <= 0 {
-		return nil
-	}
-	q := `SELECT w.id FROM ix_deferred x JOIN tgdl_work w ON w.id=x.work_id
-		WHERE x.released_at=0 AND w.status='pending' AND w.paused=1 AND w.retry_at<=?` + strings.ReplaceAll(acctClause, "account_id", "w.account_id") + `
-		AND w.id NOT IN (SELECT work_id FROM ix_held WHERE released_at=0 AND reason<>'')
-		ORDER BY x.band, w.file_size, w.id LIMIT ` + strconv.Itoa(need)
-	rows, err := a.db.Reader.QueryContext(ctx, q, args...)
-	if err != nil {
-		return err
-	}
 	var ids []any
-	for rows.Next() {
-		var id int64
-		if rows.Scan(&id) == nil {
+	if small, large := ixFileSlots(a); small > 0 && large > 0 {
+		// By server slots (ix_slotfill.go): only files that would start count.
+		room, err := a.ixSlotRoomNow(ctx, acctClause, args, small, large)
+		if err != nil {
+			return err
+		}
+		picked, err := a.ixSlotFillPick(ctx, acctClause, args, room, limit-room.Ready-room.Busy)
+		if err != nil {
+			return err
+		}
+		for _, id := range picked {
 			ids = append(ids, id)
 		}
+	} else {
+		ready, busy, err := a.ixClaimableNow(ctx, acctClause, args)
+		if err != nil {
+			return err
+		}
+		need := limit - ready - busy
+		if need <= 0 {
+			return nil
+		}
+		q := `SELECT w.id FROM ix_deferred x JOIN tgdl_work w ON w.id=x.work_id
+			WHERE x.released_at=0 AND w.status='pending' AND w.paused=1 AND w.retry_at<=?` + strings.ReplaceAll(acctClause, "account_id", "w.account_id") + `
+			AND w.id NOT IN (SELECT work_id FROM ix_held WHERE released_at=0 AND reason<>'')
+			ORDER BY x.band, w.file_size, w.id LIMIT ` + strconv.Itoa(need)
+		rows, err := a.db.Reader.QueryContext(ctx, q, args...)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var id int64
+			if rows.Scan(&id) == nil {
+				ids = append(ids, id)
+			}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
 	}
-	rows.Close()
 	if len(ids) == 0 {
-		return rows.Err()
+		return nil
 	}
+	a.ixSlotFillNote(len(ids))
 	in := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
 	tx, err := a.db.Writer.BeginTx(ctx, nil)
 	if err != nil {

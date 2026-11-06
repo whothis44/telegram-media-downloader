@@ -341,6 +341,24 @@ func (c *Controller) Running() (accounts []string, observing, ok bool) {
 	return append([]string(nil), c.run.ids...), c.run.observing.Load(), true
 }
 
+// FileSlots is how many files of each size (small: under 20 MB) one server
+// downloads at once, from the first account's Telegram configuration; 0, 0
+// when no engine runs or the account does not say.
+func (c *Controller) FileSlots() (small, large int) {
+	c.mu.Lock()
+	run := c.run
+	ok := run != nil && c.state == "running"
+	c.mu.Unlock()
+	if !ok || len(run.ids) == 0 {
+		return 0, 0
+	}
+	slots, has := run.accounts[run.ids[0]].(interface{ FileSlots() (small, large int) })
+	if !has {
+		return 0, 0
+	}
+	return slots.FileSlots()
+}
+
 func (c *Controller) RequireRunning() error {
 	_, err := c.queueRun()
 	return err
