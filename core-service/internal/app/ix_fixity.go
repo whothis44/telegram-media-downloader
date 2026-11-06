@@ -157,6 +157,7 @@ func (a *App) ixFixityCheck(ctx context.Context, stored, want string, tgSize int
 		}
 	}
 	sum = hex.EncodeToString(h.Sum(nil))
+	ixNoteLibRead(ixReadIntegrity, size)
 	switch {
 	case want != "" && !strings.EqualFold(want, sum):
 		return "changed", "recorded " + want + ", now " + sum, size, sum

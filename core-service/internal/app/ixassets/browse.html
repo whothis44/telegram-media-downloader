@@ -128,6 +128,7 @@ mark{background:#fff1a8;color:#111}
           <button data-m="looks" title="What pictures and videos show (image recognition), in any language the model knows">Looks</button>
           <button data-m="both" class="on" title="Words and looks together, best match first">Both</button>
         </div>
+        <select class="t" id="topic" hidden title="This chat is a forum: show one of its topics"></select>
         <select class="t" id="type"><option value="">All kinds</option><option value="photo">Pictures</option><option value="video">Videos</option><option value="album">Albums</option><option value="other">Files, audio</option></select>
         <select class="t" id="status"><option value="">Any state</option><option value="held">Held back (likely copies)</option><option value="missing">Not downloaded</option><option value="subst">Same file as another upload</option></select>
         <select class="t" id="sort"><option value="best" hidden>Best match first</option><option value="new">Newest first</option><option value="old">Oldest first</option></select>
@@ -163,7 +164,8 @@ mark{background:#fff1a8;color:#111}
       </div>
       <div class="panel"><h2>Copy or move files</h2>
         <p class="muted" style="margin:0">Every plan is listed in full before anything happens. Applying it checks each file's fingerprint at its new place before the old copy is let go, records every step, and can be undone. Nothing is ever deleted: "trash" means a dated <code>_trash</code> folder in the downloads folder.</p>
-        <div class="row"><b>Extra copies:</b> <button class="b" id="plan-dups">Plan: move extra copies to _trash (byte-identical files, near-identical videos)</button></div>
+        <div class="row"><b>Extra copies:</b> <button class="b" id="plan-dups">Plan: move extra copies to _trash (byte-identical files, near-identical videos)</button>
+          <button class="b" id="plan-uncat" title="Files in the library the catalogue does not know, with the same name, message and size as a catalogued file beside them: copies moved in by hand and downloaded again. Their bytes are compared before each move.">Plan: move uncatalogued copies to _trash</button></div>
         <div class="row"><b>A collection:</b> <select class="t" id="plan-coll"></select> to folder <input class="t" id="plan-coll-dir" placeholder="collections/my-set"> <label class="chk"><input type="checkbox" id="plan-coll-move"> move instead of copy</label> <button class="b" id="plan-coll-go">Plan</button></div>
         <div class="row"><b>Originals of:</b> <select class="t" id="plan-orig"></select> to folder <input class="t" id="plan-orig-dir" placeholder="originals/sports"> <label class="chk"><input type="checkbox" id="plan-orig-move"> move instead of copy</label> <button class="b" id="plan-orig-go">Plan</button></div>
         <div id="plans"></div>
@@ -209,7 +211,7 @@ const fmtDur = (s) => { if (!s) return ''; s = Math.round(s); const h = Math.flo
 const roleText = { original: 'original', repost: 'repost', adds: 'adds new files' };
 const statusText = { held: 'waiting – likely a copy', missing: 'not downloaded', subst: 'same file as another upload' };
 
-const S = { info: null, view: 'families', group: '', category: '', people: [], from: 0, to: 0, q: '', match: 'both', type: '', status: '', sort: 'new', dups: false, collection: 0, cursor: 0, loading: false, done: false, tab: 'browse', cards: [], like: '', likeName: '', tieFrom: '' };
+const S = { info: null, view: 'families', group: '', topic: 0, category: '', people: [], from: 0, to: 0, q: '', match: 'both', type: '', status: '', sort: 'new', dups: false, collection: 0, cursor: 0, loading: false, done: false, tab: 'browse', cards: [], like: '', likeName: '', tieFrom: '' };
 const roleName = { core: 'Shared', member: 'Belongs', loose: 'Probably not part of it', elsewhere: 'Belongs to another set' };
 
 // ---------- info, sidebar ----------
@@ -249,9 +251,11 @@ function renderSide() {
   h += `<h3>Index</h3><div class="muted" style="padding:0 8px">${(info.sets || 0).toLocaleString()} sets · ${info.families.toLocaleString()} originals · ${info.repostPosts.toLocaleString()} reposts folded in · ${info.mergedAlbums.toLocaleString()} merged albums · ${info.held} held back · ${info.missing.toLocaleString()} not downloaded<br>Pictures indexed: ${info.media.done.toLocaleString()} / ${info.media.total.toLocaleString()} · videos: ${info.videos.done.toLocaleString()} / ${info.videos.total.toLocaleString()}${mlLine}<br><button class="link" id="rebuild">Rebuild now</button></div>`;
   h += overlapSideHTML();
   $('#side').innerHTML = h;
+  renderTopics();
   $$('#side .side-item').forEach((el) => el.addEventListener('click', () => {
     S.group = el.dataset.group || ''; S.category = el.dataset.cat || ''; S.collection = Number(el.dataset.coll || 0);
     if (el.dataset.all) { S.group = S.category = ''; S.collection = 0; S.people = []; }
+    S.topic = 0;
     if (S.tab === 'chat' && S.group) { $('#chat-group').value = S.group; openChat(S.group); return; }
     switchTab('browse'); renderSide(); resetFeed();
   }));
@@ -262,6 +266,17 @@ function renderSide() {
   }
   const rb = $('#rebuild'); if (rb) rb.addEventListener('click', async () => { rb.disabled = true; const r = await api('POST', '/api/ix/browse/rebuild'); if (!r.ok) toast(errText(r)); await loadInfo(); resetFeed(); });
 }
+// A forum chat: a menu of its topics (most posts first), beside the filters.
+function renderTopics() {
+  const sel = $('#topic'); if (!sel) return;
+  const g = S.info && S.group ? S.info.groups.find((x) => x.id === S.group) : null;
+  const list = (g && g.topics) || [];
+  sel.hidden = !list.length;
+  if (!list.some((t) => t.id === S.topic)) S.topic = 0;
+  sel.innerHTML = list.length ? `<option value="">All topics</option>` + list.map((t) => `<option value="${t.id}">${esc(t.name)} (${t.posts.toLocaleString()})</option>`).join('') : '';
+  sel.value = S.topic ? String(S.topic) : '';
+}
+$('#topic').addEventListener('change', () => { S.topic = Number($('#topic').value || 0); resetFeed(); });
 // A tab that needs a setting: greyed out, saying where to turn it on.
 function tabOn(sel, on, title, off) {
   const t = $(sel); t.classList.toggle('dis', !on); t.setAttribute('aria-disabled', String(!on)); t.title = on ? title : off;
@@ -316,7 +331,7 @@ function tileHTML(it, i, cardKey) {
   if (it.copies > 1) labs.push(`<span class="lab r" title="Copies of this file in the archive">×${it.copies}</span>`);
   if (it.new) labs.push(`<span class="lab t new" title="Brought by a later post">new</span>`);
   if (it.status === 'held') labs.push(`<span class="lab t held">waiting · likely copy</span>`);
-  if (it.status === 'missing') labs.push(`<span class="lab t miss">not downloaded</span>`);
+  if (it.status === 'missing') labs.push(it.like ? `<span class="lab t miss" title="Not downloaded here, but the same file is saved from another post: open it to reach that copy">copy saved</span>` : `<span class="lab t miss">not downloaded</span>`);
   if (it.previewOnly) labs.push(`<span class="lab t" title="Telegram's small preview is kept; the file is not downloaded">preview only</span>`);
   if (it.inferred) labs.push(`<span class="lab t placed" title="Its message was not saved, but it sits inside this album">probably in this album</span>`);
   if (it.sim && S.showSim) labs.push(`<span class="lab sim" title="Likeness (image recognition)">${Math.round(it.sim * 100)}%</span>`);
@@ -381,6 +396,7 @@ function cardHTML(c, key) {
 function feedURL() {
   const p = new URLSearchParams({ view: S.view, sort: S.sort === 'best' ? 'new' : S.sort, cursor: String(S.cursor), limit: S.view === 'media' ? '120' : '48' });
   for (const k of ['group', 'category', 'type', 'status']) if (S[k]) p.set(k, S[k]);
+  if (S.group && S.topic) p.set('topic', String(S.topic));
   if (S.dups) p.set('dups', '1');
   if (S.unique) p.set('unique', '1');
   if (S.from) p.set('from', String(S.from));
@@ -535,7 +551,7 @@ async function openItem(items, i) {
   const it = items[i]; if (!it) return;
   const q = it.id ? 'id=' + it.id : 'group=' + encodeURIComponent(it.group) + '&msg=' + it.msg;
   const viewHTML = (x) => {
-    if (x.status !== 'ok' && x.status !== 'subst' && x.like) return `<div style="color:#fff;text-align:center;padding:10px"><img src="${esc(x.like.thumb)}" style="max-height:60vh"><br>Not downloaded yet: this is the saved copy it most likely is.</div>`;
+    if (x.status !== 'ok' && x.status !== 'subst' && x.like) return `<div style="color:#fff;text-align:center;padding:10px"><button class="link" data-open-saved="1" title="Open the saved copy" style="border:0;padding:0;background:none"><img src="${esc(x.like.thumb)}" alt="" style="max-height:60vh"></button><br>${x.status === 'held' ? 'Not downloaded yet: this is the saved copy it most likely is.' : 'Not downloaded here: the same file is saved from another post.'}</div>`;
     if (!x.src) return x.previewOnly ? `<div style="color:#fff;text-align:center;padding:10px"><img src="${esc(x.thumb)}" alt="" style="min-width:320px"><br>Preview only: Telegram's small preview is kept, the file is not downloaded.</div>` : `<img src="${esc(x.thumb)}" alt="" style="min-width:200px;filter:blur(2px)">`;
     if (x.type === 'video') return `<video src="${esc(x.src)}${x.atMs ? '#t=' + (x.atMs / 1000).toFixed(1) : ''}" controls autoplay playsinline preload="metadata"></video>`;
     if (x.type === 'photo') return `<img src="${esc(x.src)}" alt="">`;
@@ -558,12 +574,17 @@ async function openItem(items, i) {
     <dt>Posted</dt><dd>${esc(d.post.groupName)}, ${fmtDate(d.post.date)}</dd>${d.post.fwd ? `<dt>Forwarded</dt><dd>from ${esc(d.post.fwd)}</dd>` : ''}
     ${x.key ? `<dt>File</dt><dd class="muted">${esc(x.key.startsWith('h:') ? 'SHA-256 ' + x.key.slice(2, 18) + '…' : x.key)}</dd>` : ''}</dl>
     <button class="link" data-open-chat="${esc(d.post.group)}:${d.post.msg}">Open in its chat</button>`;
+  const saved = x.like || it.like;
+  if (saved && x.status !== 'ok' && x.status !== 'subst') {
+    h += `<p class="saved-copy" id="lb-saved">${x.status === 'held' ? 'Its likely saved copy' : 'The same file, saved'}: <b>${esc(saved.name || saved.type)}</b><br><button class="link" data-open-saved="1">Open the saved copy</button> · <button class="link" data-open-chat="${esc(saved.group)}:${saved.msg}">Open its post</button></p>`;
+  }
   if (d.generic) h += `<p class="muted">This file appears in many unrelated posts (a logo or sticker), so it does not link posts together.</p>`;
   h += placedNoteHTML(x);
   if (d.copies.length > 1) {
     h += `<b>${d.copies.length} copies in the archive</b>`;
-    for (const c of d.copies) h += `<div class="copy"><img src="${esc(c.thumb)}" alt=""><div><b>${esc(c.groupName)}</b> · ${fmtDay(c.date)}${c.canon ? ' · <span class="ok">shown</span>' : ''}<br><span class="muted">${c.w ? c.w + '×' + c.h + ' · ' : ''}${fmtSize(c.size)} · ${esc(roleText[c.role] || c.role)}</span>
-      ${!c.canon && c.key ? `<br><button class="link" data-keeper="${esc(c.key)}" data-cluster="${esc(x.key)}">Show this copy instead</button>` : ''}</div></div>`;
+    d.copies.forEach((c, ci) => h += `<div class="copy"><img src="${esc(c.thumb)}" alt=""><div><b>${esc(c.groupName)}</b> · ${fmtDay(c.date)}${c.canon ? ' · <span class="ok">shown</span>' : ''}${c.status !== 'ok' && c.status !== 'subst' ? ' · <span class="muted">' + esc(statusText[c.status] || c.status) + '</span>' : ''}<br><span class="muted">${c.w ? c.w + '×' + c.h + ' · ' : ''}${fmtSize(c.size)} · ${esc(roleText[c.role] || c.role)}</span>
+      <br>${c.key && !(c.id && c.id === x.id) && c.key !== x.key ? `<button class="link" data-open-copy="${ci}">Open this copy</button> · ` : ''}<button class="link" data-open-chat="${esc(c.group)}:${c.msg}">Open its post</button>
+      ${!c.canon && c.key && x.key ? `<br><button class="link" data-keeper="${esc(c.key)}" data-cluster="${esc(x.key)}">Show this copy instead</button>` : ''}</div></div>`);
   }
   if (d.related && d.related.length) {
     h += `<b>Shares footage with</b>`;
@@ -575,6 +596,9 @@ async function openItem(items, i) {
   h += '<div id="lb-extra"></div>';
   $('#lb-info').innerHTML = h;
   if (x.key || it.key) loadExtra(x.key || it.key);
+  // A file not downloaded here: open the copy that is saved instead.
+  $$('#dlg [data-open-saved]').forEach((b) => b.onclick = () => { if (saved) openItem([saved], 0); });
+  $$('#lb-info [data-open-copy]').forEach((b) => b.onclick = () => openItem(d.copies, Number(b.dataset.openCopy)));
   $$('#lb-info [data-keeper]').forEach((b) => b.onclick = async () => { const r = await api('POST', '/api/ix/browse/keeper', { cluster: b.dataset.cluster, key: b.dataset.keeper }); toast(r.ok ? 'Saved. The browser shows that copy after its next update.' : errText(r)); });
 }
 
@@ -903,6 +927,7 @@ async function makePlan(body) {
   showPlan(r.data); loadPlans();
 }
 $('#plan-dups').onclick = () => makePlan({ kind: 'duplicate-copies' });
+$('#plan-uncat').onclick = () => makePlan({ kind: 'uncatalogued-copies' });
 $('#plan-coll-go').onclick = () => makePlan({ kind: 'collection', collection: Number($('#plan-coll').value), folder: $('#plan-coll-dir').value, move: $('#plan-coll-move').checked });
 $('#plan-orig-go').onclick = () => { const v = $('#plan-orig').value; makePlan({ kind: 'originals', category: v.startsWith('cat:') ? v.slice(4) : '', group: v.startsWith('group:') ? v.slice(6) : '', folder: $('#plan-orig-dir').value, move: $('#plan-orig-move').checked }); };
 async function loadPlans() {

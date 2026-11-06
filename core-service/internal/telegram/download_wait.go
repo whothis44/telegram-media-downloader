@@ -128,3 +128,24 @@ func downloadOffsetOf(ctx context.Context) int64 {
 	offset, _ := ctx.Value(downloadOffsetKey{}).(int64)
 	return offset
 }
+
+type checkpointStopKey struct{}
+
+// ErrDownloadStopped is returned by a transfer that stopped right after a
+// checkpoint because it was asked to (an update waiting, or a person pausing
+// it): nothing was lost, and the next attempt carries on from there. The queue
+// takes the row back without counting an attempt.
+var ErrDownloadStopped = errors.New("download stopped at a checkpoint; it carries on from there")
+
+// WithCheckpointStop: stop is asked at each part boundary of a transfer that
+// keeps its progress (download/resume.go). True ends it there, once its
+// progress up to that point is recorded. It must be cheap and concurrency safe.
+func WithCheckpointStop(ctx context.Context, stop func() bool) context.Context {
+	return context.WithValue(ctx, checkpointStopKey{}, stop)
+}
+
+// CheckpointStop is the transfer's stop question, nil without one.
+func CheckpointStop(ctx context.Context) func() bool {
+	stop, _ := ctx.Value(checkpointStopKey{}).(func() bool)
+	return stop
+}

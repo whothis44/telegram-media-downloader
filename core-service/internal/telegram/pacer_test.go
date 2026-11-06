@@ -509,12 +509,19 @@ func TestPacerKeepsAnHourByHourRecord(t *testing.T) {
 	if h.Bytes < 350<<20 || h.Premium != 1 || h.Waits != 1 || h.PartSecs != 2 || h.FullShare < 0.45 || h.FullShare > 0.55 || h.Window < 1 {
 		t.Fatalf("hour %+v", h)
 	}
+	// Per server (ix.12.3): all of it through DC 4, and its speed-limit wait.
+	if h.DCBytes[4] != h.Bytes || len(h.DCBytes) != 1 || h.DCPremium[4] != 1 {
+		t.Fatalf("per server: %v %v", h.DCBytes, h.DCPremium)
+	}
+	if h.DCSamples[4] == 0 || h.DCWindow[4] < h.DCSamples[4] {
+		t.Fatalf("per server load: samples %v windows %v", h.DCSamples, h.DCWindow)
+	}
 	// Kept across a restart.
 	p.mu.Lock()
 	p.saveHoursLocked()
 	p.mu.Unlock()
 	q := newDownloadPacer(path)
-	if got := q.hoursNewestFirst(); len(got) != 2 || got[1].Premium != 1 || got[1].PartSecs != 2 {
+	if got := q.hoursNewestFirst(); len(got) != 2 || got[1].Premium != 1 || got[1].PartSecs != 2 || got[1].DCBytes[4] != h.Bytes || got[1].DCPremium[4] != 1 {
 		t.Fatalf("reloaded %+v", got)
 	}
 }

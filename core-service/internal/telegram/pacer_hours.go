@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"time"
 )
@@ -25,6 +26,49 @@ type PaceHour struct {
 	Window    float64 `json:"window"`    // average parts allowed in flight
 	FullShare float64 `json:"fullShare"` // share of the hour downloads waited for room (0–1)
 	Seconds   int     `json:"seconds"`   // seconds of the hour the pacer was measuring
+	// Per Telegram server (datacenter): bytes received and speed-limit waits,
+	// to tell whether the limit is per server (ix.12.3).
+	DCBytes   map[int]int64 `json:"dcBytes,omitempty"`
+	DCPremium map[int]int   `json:"dcPremium,omitempty"`
+	// Per server (ix.12.4): the seconds Telegram asked for in its speed-limit
+	// waits, summed, and the waits that came for the same file as that
+	// server's wait before (a limit per file would show as most of them
+	// when several files are downloading).
+	DCPremiumSecs map[int]int `json:"dcPremiumSecs,omitempty"`
+	DCPremiumSame map[int]int `json:"dcPremiumSame,omitempty"`
+	// DCWaits: plain FLOOD_WAITs on file parts, per server (ix.12.5).
+	DCWaits map[int]int `json:"dcWaits,omitempty"`
+	// Per server, sampled every interval it was in use: parts in flight,
+	// requests waiting for room, and the window, summed (DCSamples of them).
+	// Their averages say whether the window, or too few parts asked for, is
+	// what holds downloads back.
+	DCSamples  map[int]int `json:"dcSamples,omitempty"`
+	DCInflight map[int]int `json:"dcInflight,omitempty"`
+	DCWaiting  map[int]int `json:"dcWaiting,omitempty"`
+	DCWindow   map[int]int `json:"dcWindow,omitempty"`
+	// Large-file slots (files of 20 MB or more), sampled likewise: in use,
+	// files waiting for one, and how many Telegram's configuration allows.
+	DCLarge        map[int]int `json:"dcLarge,omitempty"`
+	DCLargeWaiting map[int]int `json:"dcLargeWaiting,omitempty"`
+	DCLargeLimit   map[int]int `json:"dcLargeLimit,omitempty"`
+	// Tries of a bigger or smaller window with answer times known, and where
+	// judging by answer time would have decided otherwise than by bytes: a
+	// climb bytes refused (speed perhaps missed), a drop bytes kept (the
+	// window perhaps drifting down). ByAnswers: the hour was judged by answer time.
+	TriesUp       int  `json:"triesUp,omitempty"`
+	ClimbsRefused int  `json:"climbsRefused,omitempty"`
+	TriesDown     int  `json:"triesDown,omitempty"`
+	DropsKept     int  `json:"dropsKept,omitempty"`
+	ByAnswers     bool `json:"byAnswers,omitempty"`
+	// Per server (ix.12.7): the window's cuts for a plain FLOOD_WAIT and for
+	// slow answers, tries of a bigger and a smaller window, and the
+	// intervals it was in use at the 2-part floor or below it (of DCSamples).
+	DCCutsWait  map[int]int `json:"dcCutsWait,omitempty"`
+	DCCutsSlow  map[int]int `json:"dcCutsSlow,omitempty"`
+	DCTriesUp   map[int]int `json:"dcTriesUp,omitempty"`
+	DCTriesDown map[int]int `json:"dcTriesDown,omitempty"`
+	DCAtFloor   map[int]int `json:"dcAtFloor,omitempty"`
+	DCBelow     map[int]int `json:"dcBelowFloor,omitempty"`
 
 	took    time.Duration
 	answers int
@@ -53,13 +97,49 @@ func (p *downloadPacer) recordHourLocked(now time.Time, secs float64) {
 	h.Seconds += int(secs)
 	h.ticks++
 	full := false
+	h.ByAnswers = h.ByAnswers || paceByAnswers.Load()
 	for _, d := range p.dcs {
+		addDC(&h.DCTriesUp, d.dc, d.triesUp)
+		addDC(&h.DCTriesDown, d.dc, d.triesDown)
+		h.TriesUp += d.triesUp
+		h.ClimbsRefused += d.climbsRefused
+		h.TriesDown += d.triesDown
+		h.DropsKept += d.dropsKept
+		d.triesUp, d.climbsRefused, d.triesDown, d.dropsKept = 0, 0, 0, 0
 		h.Bytes += d.bytes
+		if d.bytes > 0 {
+			if h.DCBytes == nil {
+				h.DCBytes = map[int]int64{}
+			}
+			h.DCBytes[d.dc] += d.bytes
+		}
 		h.Parts += d.parts
 		h.took += d.took
 		h.answers += d.answers
 		if d.bytes > 0 || d.inflight > 0 || d.waited {
 			h.winSum += d.window
+			if h.DCSamples == nil {
+				h.DCSamples, h.DCInflight, h.DCWaiting, h.DCWindow = map[int]int{}, map[int]int{}, map[int]int{}, map[int]int{}
+			}
+			h.DCSamples[d.dc]++
+			h.DCInflight[d.dc] += d.inflight
+			h.DCWaiting[d.dc] += d.waiting
+			h.DCWindow[d.dc] += d.window
+			switch {
+			case d.window < paceLimitedFloor:
+				addDC(&h.DCBelow, d.dc, 1)
+			case d.window == paceLimitedFloor:
+				addDC(&h.DCAtFloor, d.dc, 1)
+			}
+			if p.slots != nil {
+				large, waiting, limit := p.slots(d.dc)
+				if h.DCLarge == nil {
+					h.DCLarge, h.DCLargeWaiting, h.DCLargeLimit = map[int]int{}, map[int]int{}, map[int]int{}
+				}
+				h.DCLarge[d.dc] += large
+				h.DCLargeWaiting[d.dc] += waiting
+				h.DCLargeLimit[d.dc] += limit
+			}
 		}
 		full = full || d.waited
 	}
@@ -72,6 +152,22 @@ func (p *downloadPacer) recordHourLocked(now time.Time, secs float64) {
 	}
 }
 
+// addDC adds n to a per-server count, making the map when needed.
+func addDC(m *map[int]int, dc, n int) {
+	if n == 0 {
+		return
+	}
+	if *m == nil {
+		*m = map[int]int{}
+	}
+	(*m)[dc] += n
+}
+
+// hourCountLocked adds one to a per-server count of the hour.
+func (p *downloadPacer) hourCountLocked(now time.Time, dc int, field func(*PaceHour) *map[int]int) {
+	addDC(field(p.hourLocked(now)), dc, 1)
+}
+
 func (h *PaceHour) derive() {
 	if h.answers > 0 {
 		h.PartSecs = (h.took / time.Duration(h.answers)).Seconds()
@@ -82,12 +178,27 @@ func (h *PaceHour) derive() {
 	}
 }
 
-func (p *downloadPacer) hourWaitLocked(now time.Time, premium bool) {
+func (p *downloadPacer) hourWaitLocked(now time.Time, dc int, premium bool, asked time.Duration, same bool) {
 	h := p.hourLocked(now)
 	if premium {
 		h.Premium++
+		if h.DCPremium == nil {
+			h.DCPremium, h.DCPremiumSecs, h.DCPremiumSame = map[int]int{}, map[int]int{}, map[int]int{}
+		}
+		if h.DCPremiumSecs == nil {
+			h.DCPremiumSecs, h.DCPremiumSame = map[int]int{}, map[int]int{}
+		}
+		h.DCPremium[dc]++
+		h.DCPremiumSecs[dc] += int(asked.Round(time.Second).Seconds())
+		if same {
+			h.DCPremiumSame[dc]++
+		}
 	} else {
 		h.Waits++
+		if h.DCWaits == nil {
+			h.DCWaits = map[int]int{}
+		}
+		h.DCWaits[dc]++
 	}
 }
 
@@ -152,7 +263,17 @@ func (p *downloadPacer) hoursNewestFirst() []PaceHour {
 	defer p.mu.Unlock()
 	out := make([]PaceHour, 0, len(p.hours))
 	for i := len(p.hours) - 1; i >= 0; i-- {
-		out = append(out, p.hours[i])
+		h := p.hours[i]
+		// The live hour's maps change under the lock.
+		h.DCBytes, h.DCPremium = maps.Clone(h.DCBytes), maps.Clone(h.DCPremium)
+		h.DCPremiumSecs, h.DCPremiumSame = maps.Clone(h.DCPremiumSecs), maps.Clone(h.DCPremiumSame)
+		h.DCWaits = maps.Clone(h.DCWaits)
+		h.DCSamples, h.DCInflight, h.DCWaiting, h.DCWindow = maps.Clone(h.DCSamples), maps.Clone(h.DCInflight), maps.Clone(h.DCWaiting), maps.Clone(h.DCWindow)
+		h.DCLarge, h.DCLargeWaiting, h.DCLargeLimit = maps.Clone(h.DCLarge), maps.Clone(h.DCLargeWaiting), maps.Clone(h.DCLargeLimit)
+		h.DCCutsWait, h.DCCutsSlow = maps.Clone(h.DCCutsWait), maps.Clone(h.DCCutsSlow)
+		h.DCTriesUp, h.DCTriesDown = maps.Clone(h.DCTriesUp), maps.Clone(h.DCTriesDown)
+		h.DCAtFloor, h.DCBelow = maps.Clone(h.DCAtFloor), maps.Clone(h.DCBelow)
+		out = append(out, h)
 	}
 	return out
 }

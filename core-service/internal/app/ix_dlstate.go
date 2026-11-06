@@ -105,17 +105,22 @@ type ixDlState struct {
 	Aside       ixDlAside `json:"aside"`
 	ToDownload  int       `json:"toDownload"` // in the queue, plus found missing and not queued yet
 	// What the verdict went by.
-	EngineRunning   bool       `json:"engineRunning"`
-	QueuePaused     bool       `json:"queuePaused"`
-	ReadOnly        bool       `json:"readOnly"`
-	QuietMin        int        `json:"quietMin"`        // minutes since bytes arrived or a file finished
-	SpeedWaits      int        `json:"speedWaits"`      // Telegram's speed-limit waits, last 10 minutes
-	TelegramWaiting int        `json:"telegramWaiting"` // requests currently waiting for Telegram
-	OtherWaits      int        `json:"otherWaits"`      // its other waits, last 10 minutes
-	SafetyNet       string     `json:"safetyNet"`       // stalled only: "soon" (set-aside files are let go then), "on" (they were), or ""
-	SafetyNetMin    int        `json:"safetyNetMin"`    // soon: minutes until; on: minutes it lasts
-	Rescan          ixDlRescan `json:"rescan"`
-	heldForever     bool       // likely copies wait for a person
+	EngineRunning   bool `json:"engineRunning"`
+	QueuePaused     bool `json:"queuePaused"`
+	ReadOnly        bool `json:"readOnly"`
+	QuietMin        int  `json:"quietMin"`        // minutes since bytes arrived or a file finished
+	SpeedWaits      int  `json:"speedWaits"`      // Telegram's speed-limit waits, last 10 minutes
+	TelegramWaiting int  `json:"telegramWaiting"` // requests currently waiting for Telegram
+	OtherWaits      int  `json:"otherWaits"`      // its other waits, last 10 minutes
+	// speed-limited only: "speed-limit" when Telegram's speed limit
+	// (FLOOD_PREMIUM_WAIT) asked for waits in the last 10 minutes, "plain"
+	// when only its ordinary waits (FLOOD_WAIT) did (ix.12.7: the label said
+	// "speed limit" for those too).
+	Waits        string     `json:"waits,omitempty"`
+	SafetyNet    string     `json:"safetyNet"`    // stalled only: "soon" (set-aside files are let go then), "on" (they were), or ""
+	SafetyNetMin int        `json:"safetyNetMin"` // soon: minutes until; on: minutes it lasts
+	Rescan       ixDlRescan `json:"rescan"`
+	heldForever  bool       // likely copies wait for a person
 }
 
 var ixDlBoxes sync.Map // *App -> *ixCached[ixDlState]
@@ -294,6 +299,15 @@ func ixDlDecide(st *ixDlState) {
 	default:
 		st.Verdict = ixDlDownloading
 	}
+	// Which waits: the speed limit, or only ordinary ones.
+	switch {
+	case st.Verdict != ixDlSpeedLimited:
+		st.Waits = ""
+	case st.SpeedWaits > 0:
+		st.Waits = "speed-limit"
+	default:
+		st.Waits = "plain"
+	}
 }
 
 // ixDlAdvice is the one sentence: whether to do anything. Plain words; it
@@ -326,6 +340,9 @@ func ixDlAdvice(st ixDlState) (string, bool) {
 		}
 		return s, true
 	case ixDlSpeedLimited:
+		if st.Waits == "plain" {
+			return "Nothing to do — Telegram asked for short waits, not its speed limit; downloads go on between them, and more queued files would not help.", false
+		}
 		return "Nothing to do — Telegram's speed limit sets the pace; more queued files would not help.", false
 	case ixDlFilling:
 		switch {
@@ -402,7 +419,11 @@ func (st ixDlState) diagLine(group func(string) string) string {
 	} else {
 		net += fmt.Sprintf(" %d min", st.SafetyNetMin)
 	}
+	verdict := st.Verdict
+	if st.Waits != "" {
+		verdict += " (" + map[string]string{"speed-limit": "speed limit", "plain": "plain waits only, no speed limit"}[st.Waits] + ")"
+	}
 	return fmt.Sprintf("download state: %s · ready %d · downloading %d · retry later %d · set aside %d (copies %d, private/smaller first %d, lower quality %d, big-file lane %d, paused by a person %d) · quiet %d min · Telegram waits in 10 min: %d speed limit, %d other · safety net %s · rescan on %v, adding %v, held %v, queue full %v · groups %d done, %d failed, %d left (%d not read) of %d · reading %s · to download %d (%d not queued yet)",
-		st.Verdict, st.Ready, st.Downloading, st.RetryLater, st.SetAside, a.Copies, a.Deadline, a.LowerQuality, a.BigLane, a.ByYou,
+		verdict, st.Ready, st.Downloading, st.RetryLater, st.SetAside, a.Copies, a.Deadline, a.LowerQuality, a.BigLane, a.ByYou,
 		st.QuietMin, st.SpeedWaits, st.OtherWaits, net, r.On, r.Adding, r.Held, r.QueueFull, r.Done, r.Failed, r.Left, r.Unread, r.Total, cur, st.ToDownload, r.NotQueued)
 }
