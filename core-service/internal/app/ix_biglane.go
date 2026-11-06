@@ -70,6 +70,9 @@ type ixBigFiles struct {
 	QueueCount int  `json:"queueCount"`
 	QueueCap   int  `json:"queueCap"`
 	CapPaused  bool `json:"capPaused"`
+	// Claimable files waiting for a slot on their server, left out of
+	// QueueCount (ixSlotBlockedNow, ix.12.8; within the bound).
+	SlotBlocked int `json:"slotBlocked"`
 }
 
 // ixBigFilesNow is kept for ixStatusCacheTTL (the Downloads card asks
@@ -103,6 +106,7 @@ func (a *App) ixBigFilesMeasure(ctx context.Context) ixBigFiles {
 	// live monitoring, less those that wait apart.
 	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM tgdl_work WHERE origin<>'live' AND status IN ('pending','processing')`).Scan(&b.QueueCount)
 	b.QueueCount = max(0, b.QueueCount-a.ixWaitingApart(ctx, b.QueueCap)-a.ixSharedWaiting())
+	b.SlotBlocked = a.ixWaitingApartCounts(ctx)[2]
 	b.CapPaused = b.Backfills > 0 && b.QueueCount >= b.QueueCap
 	return b
 }

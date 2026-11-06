@@ -215,8 +215,8 @@ func (a *App) ixDiagnostics(ctx context.Context) string {
 		line("    waiting for Telegram now %d requests; file slots: small %d/%d, large %d/%d (20 MB boundary)", dc.GateWaiting, dc.SmallFiles, dc.SmallFileLimit, dc.LargeFiles, dc.LargeFileLimit)
 	}
 	bf := d.Big
-	line("big files (%d MB or more): %d downloading (at most %d at once, 0 = no limit) · %d waiting · %d set aside · %d held · backfills queueing files %d · queue %d of %d · backfill paused by the queue limit %v",
-		bf.MinBytes>>20, bf.Downloading, bf.Limit, bf.Waiting, bf.SetAside, bf.Held, bf.Backfills, bf.QueueCount, bf.QueueCap, bf.CapPaused)
+	line("big files (%d MB or more): %d downloading (at most %d at once, 0 = no limit) · %d waiting · %d set aside · %d held · backfills queueing files %d · queue %d of %d (not counted: %d waiting for a free slot on their server) · backfill paused by the queue limit %v",
+		bf.MinBytes>>20, bf.Downloading, bf.Limit, bf.Waiting, bf.SetAside, bf.Held, bf.Backfills, bf.QueueCount, bf.QueueCap, bf.SlotBlocked, bf.CapPaused)
 	var days []string
 	for _, day := range d.Days {
 		days = append(days, fmt.Sprintf("%s %d files %d MB", day.Day[5:], day.Files, day.Bytes>>20))

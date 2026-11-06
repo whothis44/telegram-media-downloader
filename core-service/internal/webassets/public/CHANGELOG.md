@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.18-ix.12.8] — 2026-11-06
+
+### Fixed
+- **Files waiting for a busy server no longer hold the rescans.** A rescan's files pass stops queueing while the queue holds its limit (500) of files that can download. On 11-06 from about 08:00 to 10:45, about 470 claimable files of one server waited for its 2 slots for files of 20 MB or more, and they alone kept the queue at its limit, so the rescans queued nothing for hours: no files for the other servers, and none of the small files the deadline order was waiting for. Files that cannot start before a slot of their size frees on their own server now wait apart, as files of 1 GB waiting for the big-file lane already did, and under the same bound (twice the limit, the two together), so the rescans still cannot queue without end. The report's big-files line says how many were left out. While a rescan reads, the deadline order keeps half the workers for the files it brings, as before 12.7 whenever a rescan ran.
+
+### Added
+- **The diagnostics report is saved in the data folder:** `data\ixreports\latest.txt` every 10 minutes, and the first one of each hour as `YYYY-MM-DD_HH.txt` (the last 48 kept). It is the dashboard's report, with the same placeholders for chats, files, people and links, readable on this computer without the dashboard login. Nothing is sent anywhere.
+
 ## [3.4.18-ix.12.7] — 2026-11-06
 
 ### Fixed

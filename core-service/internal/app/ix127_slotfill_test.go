@@ -76,6 +76,17 @@ func TestIx127SetAsideFilesFillFreeServerSlots(t *testing.T) {
 		t.Fatal(err)
 	}
 	ixTestBackfill(t, a, ctx, "-1003") // a private chat still to read: band 0 to come
+	// From 12.8 the files waiting for DC1's and DC4's large slots do not
+	// count towards the queue limit (TestIx128...); a limit of 10 still holds
+	// the rescan here with what remains, as the 520 did on 12.7.
+	cfg, err := a.config.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ensureMap(cfg, "advanced")["history"] = map[string]any{"backpressureCap": 10}
+	if err = a.config.Save(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
 	if b := a.ixBigFilesMeasure(ctx); !b.CapPaused {
 		t.Fatalf("the rescan should be held by the queue limit: %+v", b)
 	}
