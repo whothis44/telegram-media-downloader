@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/botnick/telegram-media-downloader/core-service/internal/telegram"
 )
@@ -33,11 +34,21 @@ type ResumeClient interface {
 	DownloadFrom(context.Context, telegram.MediaIdentity, int64, io.Writer) error
 }
 
-// Files at least this big keep their progress, every this many bytes.
+// Files at least this big keep their progress, every this many bytes or this
+// often, whichever comes first. A checkpoint syncs the file: on the NAS it took
+// 6 to 8 ms, which cost nothing measurable at 8 MiB against unlimited downloading
+// (2 to 5% when writing flat out at 23 MB/s, about 13% at 2 MiB). Under
+// Telegram's speed limit a file gets 8 MiB only every few minutes, so the clock
+// sets how much a restart can lose then.
 var (
-	resumeMinSize       int64 = 64 << 20
-	partCheckpointEvery int64 = 64 << 20
+	resumeMinSize       int64 = 8 << 20
+	partCheckpointEvery int64 = 8 << 20
+	partCheckpointAfter       = 30 * time.Second
 )
+
+// A file asked to stop with no more than this left finishes instead: stopping
+// would cost a new request and a read of everything kept, to save very little.
+var partStopNearEnd int64 = 8 << 20
 
 // partAfterPublish is for tests: between publishing a file and clearing its record.
 var partAfterPublish func()
@@ -259,21 +270,23 @@ func (m *Manager) transfer(ctx context.Context, identity telegram.MediaIdentity,
 			root.Remove(tmpName)
 		}
 	}()
-	writer := &mediaWriter{ctx: ctx, dst: tmp, remaining: identity.Size - start, sum: running, written: start, saved: start}
+	writer := &mediaWriter{ctx: ctx, dst: tmp, remaining: identity.Size - start, sum: running, written: start, saved: start, savedAt: time.Now()}
 	if running != nil {
-		writer.checkpoint = func(offset int64) error {
+		writer.stop = telegram.CheckpointStop(ctx)
+		writer.checkpoint = func(offset int64) (bool, error) {
 			if err := tmp.Sync(); err != nil {
-				return fmt.Errorf("sync partial file: %w", err)
+				return false, fmt.Errorf("sync partial file: %w", err)
 			}
 			if m.resume.beforeSave != nil {
 				m.resume.beforeSave()
 			}
 			// A record that cannot be written only costs the progress since the
 			// last one: not a reason to fail a good download.
-			if err := m.resume.save(ctx, offset, hex.EncodeToString(running.Sum(nil))); err == nil {
-				keep = true
+			if err := m.resume.save(ctx, offset, hex.EncodeToString(running.Sum(nil))); err != nil {
+				return false, nil
 			}
-			return nil
+			keep = true
+			return true, nil
 		}
 	}
 	var downloadErr error
@@ -287,6 +300,11 @@ func (m *Manager) transfer(ctx context.Context, identity telegram.MediaIdentity,
 		if m.resume != nil {
 			m.resume.clear(context.WithoutCancel(ctx))
 		}
+	}
+	if writer.stopped && keep {
+		// Asked to stop, and stopped right after recording a checkpoint: the
+		// part stays for the next attempt, whatever the client made of it.
+		return telegram.ErrDownloadStopped
 	}
 	if downloadErr != nil {
 		if errors.Is(downloadErr, errPartTooLong) {
@@ -344,11 +362,21 @@ type mediaWriter struct {
 	dst       io.Writer
 	remaining int64
 	// With sum set, progress is recorded on part boundaries, where Telegram can
-	// be asked to carry on.
+	// be asked to carry on. checkpoint says whether the record was written.
 	sum            hash.Hash
 	written, saved int64
-	checkpoint     func(int64) error
+	savedAt        time.Time
+	checkpoint     func(int64) (bool, error)
+	recorded       bool // saved is in the record (not only where the attempt began)
+	// stop, optional, asks at each part boundary whether to end there: the
+	// writer then records a checkpoint at once and ends the transfer.
+	stop    func() bool
+	stopped bool
 }
+
+// errStopAtCheckpoint ends the client's transfer; transfer reports it as
+// telegram.ErrDownloadStopped.
+var errStopAtCheckpoint = errors.New("stopped after a checkpoint")
 
 func (w *mediaWriter) Write(p []byte) (int, error) {
 	if err := w.ctx.Err(); err != nil {
@@ -362,10 +390,23 @@ func (w *mediaWriter) Write(p []byte) (int, error) {
 	if w.sum != nil {
 		w.sum.Write(p[:n])
 		w.written += int64(n)
-		if err == nil && w.remaining > 0 && w.written%telegram.PartSize == 0 && w.written-w.saved >= partCheckpointEvery {
-			w.saved = w.written
-			if err := w.checkpoint(w.written); err != nil {
-				return n, err
+		if err == nil && w.remaining > 0 && w.written%telegram.PartSize == 0 {
+			stopping := w.stop != nil && w.remaining > partStopNearEnd && w.stop()
+			due := w.written-w.saved >= partCheckpointEvery ||
+				(w.written > w.saved && partCheckpointAfter > 0 && time.Since(w.savedAt) >= partCheckpointAfter)
+			if due || (stopping && w.written > w.saved) {
+				w.saved, w.savedAt = w.written, time.Now()
+				recorded, err := w.checkpoint(w.written)
+				if err != nil {
+					return n, err
+				}
+				w.recorded = recorded
+			}
+			// Only a recorded checkpoint lets it stop: without one it goes on,
+			// and tries again at the next part.
+			if stopping && w.recorded && w.saved == w.written {
+				w.stopped = true
+				return n, errStopAtCheckpoint
 			}
 		}
 	}

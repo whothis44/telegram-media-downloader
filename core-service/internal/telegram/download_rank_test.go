@@ -129,7 +129,11 @@ func TestFileSlotWakesTheNextWhenABetterWaiterLeaves(t *testing.T) {
 	better, cancel := context.WithCancel(WithDownloadRank(ctx, 1, nil))
 	betterDone := make(chan struct{})
 	go func() {
-		f.acquire(better, 1, downloadLargeFile)
+		// The better waiter may take the freed slot before it is cancelled:
+		// then it gives the slot back, as every caller does.
+		if rel, err := f.acquire(better, 1, downloadLargeFile); err == nil && rel != nil {
+			rel()
+		}
 		close(betterDone)
 	}()
 	for {

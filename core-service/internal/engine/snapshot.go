@@ -78,11 +78,18 @@ func (c *Controller) Snapshot(ctx context.Context) (map[string]any, error) {
 	c.mu.Unlock()
 	active, queued, recent := []map[string]any{}, []map[string]any{}, []map[string]any{}
 	// Active workers <=64; pending and history views are independently bounded.
+	// The pending rows are the next to download, in the order they will (the
+	// claim order: the group ranking first), then rows paused or set aside.
+	// They used to be the first 1,000 by id: since the ranking, a row from deep
+	// in that list would start, jump into the middle of the page, and vanish.
 	rows, err := c.reader.QueryContext(ctx, `SELECT id,group_id,group_name,message_id,media_type,file_name,file_size,account_id,status,paused,created_at,updated_at,error,
  (SELECT file_path FROM downloads WHERE group_id=tgdl_work.group_id AND message_id=tgdl_work.message_id LIMIT 1)
- FROM tgdl_work WHERE status='processing' OR id IN (SELECT id FROM tgdl_work WHERE status='pending' ORDER BY id LIMIT 1000)
+ FROM tgdl_work WHERE status='processing'
+ OR id IN (SELECT id FROM tgdl_work WHERE status='pending' AND paused=0 ORDER BY `+claimOrderSQL+` LIMIT 1000)
+ OR id IN (SELECT id FROM tgdl_work WHERE status='pending' AND paused<>0 ORDER BY `+claimOrderSQL+` LIMIT 500)
  OR id IN (SELECT id FROM tgdl_work WHERE status IN ('completed','failed','skipped') ORDER BY updated_at DESC LIMIT 100)
- ORDER BY CASE WHEN status='pending' THEN id ELSE -updated_at END,id DESC`)
+ ORDER BY CASE WHEN status='processing' THEN 0 WHEN status='pending' AND paused=0 THEN 1 WHEN status='pending' THEN 2 ELSE 3 END,
+ CASE WHEN status='pending' THEN 0 ELSE -updated_at END,`+claimOrderSQL)
 	if err != nil {
 		return nil, err
 	}
@@ -129,6 +136,7 @@ func (c *Controller) Snapshot(ctx context.Context) (map[string]any, error) {
 			if paused {
 				item["status"] = "paused"
 			}
+			item["order"] = len(queued) // its place in the download order
 			queued = append(queued, item)
 		default:
 			item["status"] = "failed"

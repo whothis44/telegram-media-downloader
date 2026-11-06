@@ -48,6 +48,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 0
 		}
 	}
+	if superviseWanted(args) {
+		// The server as a child, its crash words kept (supervise.go); when the
+		// child cannot start, it runs here as before.
+		if code, ok := supervise(stderr); ok {
+			return code
+		}
+	}
 	cfg, err := config.FromFullEnv(os.Getenv)
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, err)
@@ -77,7 +84,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "crash log: %v\n", crashErr)
 	}
 	if lastRun != nil {
-		_, _ = fmt.Fprintf(stderr, "The last run did not stop cleanly: %s\n", lastRun.Text())
+		// ASCII: a Windows console's code page showed the middle dot as "Â·".
+		_, _ = fmt.Fprintf(stderr, "The last run did not stop cleanly: %s\n", strings.ReplaceAll(lastRun.Text(), " · ", " - "))
 	}
 	defer crashes.Finish()
 	defer a.Close()

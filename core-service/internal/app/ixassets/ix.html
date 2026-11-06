@@ -24,6 +24,7 @@ button.b{border:1px solid var(--line);background:var(--soft);color:var(--fg);bor
 button.b.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-fg);font-weight:600}button.b:disabled{opacity:.5;cursor:default}
 button.mini{border:0;background:none;color:var(--muted);cursor:pointer;font-size:13px;padding:2px 4px;text-decoration:underline}button.mini:disabled{opacity:.5;cursor:default}
 input.t,select.t{padding:6px 9px;border-radius:8px;border:1px solid var(--line);background:var(--soft);color:var(--fg);font-size:14px}
+select.t{max-width:100%}
 .chips{display:flex;flex-wrap:wrap;gap:6px}.chip{white-space:nowrap;border:1px solid var(--line);background:var(--soft);color:var(--fg);border-radius:999px;padding:3px 10px;font-size:12.5px;cursor:pointer}
 .chip span{color:var(--muted);margin-left:2px}.chip.on{background:var(--accent);border-color:var(--accent);color:var(--accent-fg)}.chip.on span{color:var(--accent-fg)}
 .sticky{position:sticky;top:0;z-index:2;background:var(--bg);padding:8px 0;display:flex;flex-direction:column;gap:8px;border-bottom:1px solid var(--line)}
@@ -75,6 +76,7 @@ async function api(method, url, body) {
 const errText = (r) => (r.data && r.data.error) || ('HTTP ' + r.status);
 
 const state = {
+  setDraft: {}, // settings changed and not saved yet (applySetDrafts)
   tab: (location.hash || '#overview').slice(1),
   status: null, error: '',
   // categories
@@ -111,10 +113,11 @@ function updateBanner() {
         ? '<div class="status" role="status"><b>Downloads are done.</b> Restarting…</div>'
         : '<div class="status warn" role="status"><b>Downloads are done: nothing will be lost.</b> Close the downloader\'s window and open <code>start.bat</code> to finish updating. Until then no new file starts. <button class="mini" data-act="u-cancel">Go back to downloading</button></div>';
     }
-    return `<div class="status" role="status"><b>Waiting for ${fmtNum(u.files)} download${u.files === 1 ? '' : 's'} to finish</b> (${fmtSize(u.bytesLeft || 0)} left). No new file starts meanwhile, apart from self-destructing media.${u.restarts ? ' It restarts by itself when they are done.' : ''} <span class="btns" style="margin-top:6px">${u.restarts ? '<button class="b" data-act="u-now">Update now</button>' : ''}<button class="b" data-act="u-cancel">Go back to downloading</button></span></div>`;
+    return `<div class="status" role="status"><b>${u.autoNow ? `Installing version ${esc(u.latest)} by itself: waiting` : 'Waiting'} for ${fmtNum(u.files)} download${u.files === 1 ? '' : 's'} in progress</b> (${fmtSize(u.bytesLeft || 0)} left). Files of 8 MB or more stop at their next checkpoint, at most 30 seconds away, and carry on after the restart; smaller and nearly finished files finish. No new file starts meanwhile, apart from self-destructing media.${u.restarts ? ' It restarts by itself when they are done.' : ''} <span class="btns" style="margin-top:6px">${u.restarts ? '<button class="b" data-act="u-now">Update now</button>' : ''}<button class="b" data-act="u-cancel">Go back to downloading</button></span></div>`;
   }
-  if (u.newer) return `<div class="status" role="status"><b>Version ${esc(u.latest)} is out</b> (you have ${esc(u.current)}). <span class="btns" style="margin-top:6px"><button class="b primary" data-act="u-start">Update when downloads finish</button><span class="muted">No new file starts until then, and files in progress finish first.</span></span></div>`;
-  return '';
+  const note = u.autoNote ? `<div class="muted">${esc(u.autoNote)}</div>` : '';
+  if (u.newer) return `<div class="status" role="status"><b>Version ${esc(u.latest)} is out</b> (you have ${esc(u.current)}). <span class="btns" style="margin-top:6px"><button class="b primary" data-act="u-start">Update when downloads finish</button><span class="muted">No new file starts until then. Files of 8 MB or more stop at their next checkpoint and carry on after the restart; smaller ones finish first.${u.auto ? '' : ' Settings → Downloads can install updates by themselves.'}</span></span>${note}</div>`;
+  return note ? `<div class="status" role="status">${note}</div>` : '';
 }
 
 function banner() {
@@ -208,9 +211,9 @@ ${ex.finishedAt && !ex.running ? `<div class="muted">Last written ${esc(fmtTime(
   h += viewBackup();
   h += viewDeadline();
   h += viewDownloads();
-  h += viewKeeping();
+  h += viewIntegrity();
   h += `<div class="card"><h2>Messages captured</h2><div class="muted">${fmtNum(total)} messages saved across ${gs.length} group(s). ${notYet ? `<b>${notYet} group(s) have not had a full rescan yet</b> — use the Rescan tab to capture their history.` : 'Every group has had a full rescan.'} New posts are saved as the monitor sees them.</div>
-<div class="btns"><button class="b" data-act="g-finish-complete" ${gs.some((g) => !g.finishedAt && groupComplete(g)) ? '' : 'disabled'} title="Every group marked ✓ complete (all messages and all files saved) is set to finished; rescans then leave it alone">✓ Finish all complete groups</button><span class="muted">Finished groups are skipped by every rescan. To finish or reopen several at once, tick them in Rescan → Choose groups.</span></div>
+<div class="muted">Finished groups are skipped by every rescan. To finish or reopen groups, tick them in <button class="mini" data-act="tab" data-key="rescan">Rescan → Choose groups</button>.</div>
 <div class="muted">Complete: every message Telegram says the group holds has been saved (checked at each rescan) <b>and</b> every file of those messages is saved. Files waiting as likely copies of saved files do not count against it. “Messages ✓ · N files to go” means the messages are all in but files are still queued or not queued yet. Groups rescanned before version ix.5 may show a few short: system notices (pins, renames) are only saved from ix.5 on; a new rescan fills them in.</div>
 <div class="list"><table><tr><th>Group</th><th>Category</th><th>Messages saved</th><th>Telegram says</th><th>Complete?</th><th>Finished</th><th>Deleted on Telegram</th><th>Files</th><th>Dates</th><th>Last full rescan</th></tr>`;
   for (const g of gs) {
@@ -224,24 +227,41 @@ ${ex.finishedAt && !ex.running ? `<div class="muted">Last written ${esc(fmtTime(
       : `<span class="warn">${fmtNum(short)} short</span>`;
     const ids = g.maxId ? `<div class="muted" title="Every message number from 1 to the newest is either saved here or confirmed gone on Telegram (checked at the end of each messages pass)">IDs 1–${fmtNum(g.maxId)}: ${fmtNum(Math.min(g.maxId, g.messages + g.gone))} accounted for${g.maxId - g.messages - g.gone > 0 ? `, <span class="warn">${fmtNum(g.maxId - g.messages - g.gone)} unchecked</span>` : ''}</div>` : '';
     const link = g.username ? `<div class="muted"><a href="https://t.me/${esc(g.username)}" target="_blank" rel="noopener">t.me/${esc(g.username)}</a></div>` : g.invite ? `<div class="muted" title="Invite link">${esc(g.invite)}</div>` : '';
-    h += `<tr><td><a href="/ix/view/${esc(g.dir)}/index.html" target="_blank">${esc(g.name)}</a>${link}${g.about ? `<div class="muted" style="max-width:340px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(g.about)}">${esc(g.about)}</div>` : ''}</td><td>${esc(g.category || '')}</td><td class="n">${g.messages ? fmtNum(g.messages) : '<span class="warn">none yet</span>'}${g.comments ? `<div class="muted">+${fmtNum(g.comments)} comments</div>` : ''}</td><td class="n">${g.tgCount ? fmtNum(g.tgCount) : '<span class="muted">–</span>'}</td><td>${complete}${ids}</td><td>${g.finishedAt ? `<button class="fin on" data-act="g-open" data-id="${esc(g.id)}" title="Finished ${esc(fmtDate(Math.floor(g.finishedAt / 1000)))}: rescans leave it alone. Click to reopen.">✓ Finished</button>` : `<button class="fin" data-act="g-finish" data-id="${esc(g.id)}" title="Mark finished: rescans will leave it alone">Finish</button>`}</td><td class="n">${fmtNum(g.deleted)}</td><td class="n">${fmtNum(g.files)}</td><td class="muted">${esc(fmtDate(g.firstDate))}${g.firstDate ? ' – ' : ''}${esc(fmtDate(g.lastDate))}</td><td>${g.lastWalk ? esc(fmtTime(g.lastWalk)) : '<span class="warn">never</span>'}</td></tr>`;
+    h += `<tr><td><a href="/ix/view/${esc(g.dir)}/index.html" target="_blank">${esc(g.name)}</a>${link}${g.about ? `<div class="muted" style="max-width:340px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(g.about)}">${esc(g.about)}</div>` : ''}</td><td>${esc(g.category || '')}</td><td class="n">${g.messages ? fmtNum(g.messages) : '<span class="warn">none yet</span>'}${g.comments ? `<div class="muted">+${fmtNum(g.comments)} comments</div>` : ''}</td><td class="n">${g.tgCount ? fmtNum(g.tgCount) : '<span class="muted">–</span>'}</td><td>${complete}${ids}</td><td>${g.finishedAt ? `<span class="ok" title="Finished ${esc(fmtDate(Math.floor(g.finishedAt / 1000)))}: rescans leave it alone. Reopen it in Rescan → Choose groups.">✓ Finished</span>` : '<span class="muted">—</span>'}</td><td class="n">${fmtNum(g.deleted)}</td><td class="n">${fmtNum(g.files)}</td><td class="muted">${esc(fmtDate(g.firstDate))}${g.firstDate ? ' – ' : ''}${esc(fmtDate(g.lastDate))}</td><td>${g.lastWalk ? esc(fmtTime(g.lastWalk)) : '<span class="warn">never</span>'}</td></tr>`;
   }
   h += `</table></div></div>`;
   return h;
 }
 
-function viewKeeping() {
-  const s = state.status, hd = s.held || {}, fx = s.fixity || {}, pic = s.pictures || {}, vd = s.dups || {}, dd = s.dedup || {};
+// Overview → Integrity: the monthly re-read, with its switch.
+function viewIntegrity() {
+  const s = state.status, fx = s.fixity || {};
+  return `<div class="card"><h2>Integrity check</h2>
+<div>${fmtNum(fx.checked || 0)} of ${fmtNum(fx.files || 0)} stored files re-read this month (every file is re-read about once a month and its fingerprint compared)${fx.changed ? ` · <span class="bad">${fmtNum(fx.changed)} changed</span>` : ''}${fx.missing ? ` · <span class="bad">${fmtNum(fx.missing)} missing</span>` : ''}${fx.sizeOff ? ` · <span class="warn">${fmtNum(fx.sizeOff)} not the size Telegram gave</span>` : ''}${!fx.changed && !fx.missing && fx.checked ? ' · <span class="ok">no problems</span>' : ''}.</div>
+<label><input type="checkbox" data-set="fixityEnabled" ${s.fixityEnabled ? 'checked' : ''}> Re-read every stored file about once a month to check it is unchanged (reads from the NAS; follows the duplicate-finding quiet hours)</label>
+<div class="btns"><button class="b primary" data-act="set-save">Save</button>${state.setMsg ? `<span class="muted">${esc(state.setMsg)}</span>` : ''}</div></div>`;
+}
+
+// Overview → Downloads: one line on copies; the figures are in Copies & duplicates.
+function copiesLine() {
+  const hd = state.status.held || {};
+  return `<div class="muted" style="margin-top:6px">Not downloaded because they are copies: ${fmtNum(hd.subst || 0)} exact re-upload(s), ${fmtNum(hd.held || 0)} likely copies held at the back of the queue. <button class="mini" data-act="tab" data-key="duplicates">Copies &amp; duplicates</button></div>`;
+}
+
+// Copies & duplicates: every figure on copies, once.
+function viewCopiesTab() {
+  const s = state.status, hd = s.held || {}, pic = s.pictures || {}, vd = s.dups || {}, dd = s.dedup || {}, sm = (s.copies || {}).sampled || {};
   const pct = (a, b) => b ? Math.floor((100 * a) / b) + '%' : '—';
   const dc = (c) => `${fmtNum((c || {}).files || 0)} (${fmtNum((c || {}).mb || 0)} MB)`;
-  return `<div class="card"><h2>Copies, duplicates and integrity</h2>
+  return `<div class="card"><h2>Copies among what is left to download</h2>
 <div><b>Not downloaded because they are copies:</b> ${fmtNum(hd.subst || 0)} exact re-upload(s) (${fmtNum(hd.savedMb || 0)} MB saved; the bytes were checked on Telegram) · ${fmtNum(hd.held || 0)} likely copies held at the back of the queue${s.settings.holdForever ? ' (kept held: Settings)' : ' until nothing else is waiting'}.</div>
 <div style="margin-top:6px" title="Counted since ${esc(dd.since || 'this version')}"><b>Duplicates, last 7 days:</b> found before downloading — same Telegram file ${dc(dd.telegramFile)}, exact re-upload check ${dc(dd.reupload)} · <span class="${(dd.after || {}).files ? 'warn' : ''}">found after downloading ${dc(dd.after)} downloaded for nothing</span> (the copies were removed) · ${fmtNum(dd.checks || 0)} checked on Telegram (${fmtNum(dd.noHashes || 0)} without Telegram's hashes${dd.checkFailed ? `, <span class="warn">${fmtNum(dd.checkFailed)} unreadable</span>` : ''}, ${fmtNum(dd.sampledMb || 0)} MB read as samples).</div>
+${viewCopies()}
+<div class="muted">Big videos checked by sampling: ${fmtNum(sm.checked || 0)}, using ${fmtNum(sm.partsMb || 0)} MB instead of ${fmtSize(sm.sizeBytes || 0)}; ${fmtNum(sm.confirmed || 0)} matched a saved video by sampled frames (probable copies).</div>
 <div class="btns"><button class="b" data-act="held-release" ${hd.held ? '' : 'disabled'}>Download the held files now</button><button class="b" data-act="subst-fetch" ${hd.subst ? '' : 'disabled'}>Fetch the real files of re-uploads</button>${state.keepMsg ? `<span class="muted">${esc(state.keepMsg)}</span>` : ''}</div>
 <div class="muted">Every message is archived in full either way, so any of these files can be fetched later.</div>
 <div style="margin-top:6px"><b>Duplicate finding:</b> pictures ${fmtNum(pic.done || 0)} of ${fmtNum(pic.total || 0)} (${pct(pic.done || 0, pic.total)}), ${fmtNum(pic.grouped || 0)} grouped with a look-alike, ${fmtNum(pic.suggested || 0)} to review · videos ${fmtNum(vd.done || 0)} of ${fmtNum(vd.total || 0)} (${pct(vd.done || 0, vd.total)}). Runs on this PC from the files on the NAS; it never uses Telegram.</div>
-<div style="margin-top:6px"><b>Integrity check:</b> ${fmtNum(fx.checked || 0)} of ${fmtNum(fx.files || 0)} stored files re-read this month (every file is re-read about once a month and its fingerprint compared)${fx.changed ? ` · <span class="bad">${fmtNum(fx.changed)} changed</span>` : ''}${fx.missing ? ` · <span class="bad">${fmtNum(fx.missing)} missing</span>` : ''}${fx.sizeOff ? ` · <span class="warn">${fmtNum(fx.sizeOff)} not the size Telegram gave</span>` : ''}${!fx.changed && !fx.missing && fx.checked ? ' · <span class="ok">no problems</span>' : ''}.</div>
-</div>`;
+</div>` + viewCopySettings(s.settings);
 }
 
 // What downloads are doing (ix_dlstate.go): the verdict the dashboard's
@@ -254,7 +274,8 @@ function viewDlState() {
   const why = [[a.copies, 'likely copies'], [a.deadline, 'waiting while private chats and smaller files go first'], [a.lowerQuality, 'waiting for a lower quality first'], [a.bigLane, 'big files waiting their turn'], [a.byYou, 'paused by you']]
     .filter(([n]) => n > 0).map(([n, l]) => `${fmtNum(n)} ${l}`).join(' · ');
   const rescan = r.total ? `Rescan: ${fmtNum(r.done)} of ${fmtNum(r.total)} group(s) done${r.group ? ` · reading <b>${esc(r.group)}</b> (${r.phase === 'files' ? 'files' : 'messages'})` : ''} · about ${fmtNum(x.toDownload)} file(s) still to download${r.notQueued ? ` (${fmtNum(r.notQueued)} not queued yet)` : ''}.` : '';
-  return `<div class="dlstate"><b class="${cls}">${esc(words[x.verdict] || x.verdict)}</b>: ${fmtNum(x.ready)} ready · ${fmtNum(x.downloading)} downloading · ${fmtNum(x.setAside)} set aside${x.retryLater ? ` · ${fmtNum(x.retryLater)} to try again later` : ''}. <span class="${x.act ? 'warn' : 'muted'}">${esc(x.advice)}</span>
+  const word = x.verdict === 'speed-limited' && x.waits === 'plain' ? 'Telegram waits' : (words[x.verdict] || x.verdict);
+  return `<div class="dlstate"><b class="${cls}" title="${x.waits === 'plain' ? 'Short waits Telegram asked for, not its speed limit' : ''}">${esc(word)}</b>: ${fmtNum(x.ready)} ready · ${fmtNum(x.downloading)} downloading · ${fmtNum(x.setAside)} set aside${x.retryLater ? ` · ${fmtNum(x.retryLater)} to try again later` : ''}. <span class="${x.act ? 'warn' : 'muted'}">${esc(x.advice)}</span>
 ${why ? `<div class="muted">Set aside: ${why}.</div>` : ''}${rescan ? `<div class="muted">${rescan}</div>` : ''}</div>`;
 }
 
@@ -292,18 +313,42 @@ ${(() => {
   if (d.errors && d.errors.length) {
     h += `<div class="list" style="margin-top:8px"><table><tr><th>Why files failed</th><th>Files</th></tr>${d.errors.map((e) => `<tr><td class="muted">${esc(e.error)}</td><td class="n">${fmtNum(e.count)}</td></tr>`).join('')}</table></div>`;
   }
-  h += viewCopies();
+  h += copiesLine();
   h += `<div class="btns"><button class="b" data-act="dl-retry" ${d.failed && d.engineRunning ? '' : 'disabled'}>Retry all ${fmtNum(d.failed)} failed now</button>${state.dlMsg ? `<span class="muted">${esc(state.dlMsg)}</span>` : ''}</div></div>`;
   return h;
+}
+
+// The staging folder: a local drive or the suggested folder, or one typed in.
+// The choice fills the stageDir text box, which is what is saved.
+function stagePicker(s) {
+  const g = state.status.staging || {};
+  const cur = s.stageDir || '';
+  const drives = g.drives || [];
+  const driveOf = (p) => drives.find((d) => p && p.toUpperCase().startsWith(d.root.toUpperCase()));
+  const space = (d) => d ? ` — ${fmtSize(d.free)} free of ${fmtSize(d.total)}` : '';
+  const opts = [['', 'Off: download straight to the downloads folder']];
+  if (g.suggest) opts.push([g.suggest, `The app's data folder (suggested)${space(driveOf(g.suggest))}`]);
+  for (const d of drives) opts.push([d.root, `Drive ${d.root}${space(d)}`]);
+  const known = opts.some(([v]) => v === cur);
+  const other = state.stageOther || (cur && !known);
+  opts.push(['__other', 'Another folder…']);
+  const sel = other ? '__other' : cur;
+  return `<div class="btns">Download first to: <select class="t" data-stage-pick aria-label="Staging folder">${opts.map(([v, l]) => `<option value="${esc(v)}" ${v === sel ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>
+<input class="t" data-set-text="stageDir" aria-label="Staging folder path" value="${esc(cur)}" placeholder="a folder that exists, for example ${esc(g.suggest || 'D:\\Telegram staging')}" style="flex:1;min-width:240px;${other ? '' : 'display:none'}"></div>
+<div class="muted">Staged files go into a <code>tgdl-staging</code> folder made inside the one chosen. It must be on this computer and not inside the downloads folder.</div>`;
 }
 
 // Settings → Copies (ix_copies*.go).
 function viewCopySettings(s) {
   const c = state.status.copies || {}, q = c.queue || {}, sm = c.sampled || {}, cal = c.calibration;
   const n = (x) => fmtNum((x || {}).files || 0);
-  return `<div class="card"><h2>Copies</h2>
-<div class="muted">Held copies only wait: nothing is skipped for good, and every message is archived in full. Now: ${n(q.held)} held (${n(q.vsSaved)} copies of saved videos, ${n(q.vsQueued)} lesser copies of queued ones, ${n(q.recog)} by image recognition), ${n(q.confirmed)} confirmed. Big videos checked by sampling: ${fmtNum(sm.checked || 0)}, using ${fmtNum(sm.partsMb || 0)} MB instead of ${fmtSize(sm.sizeBytes || 0)}; ${fmtNum(sm.confirmed || 0)} confirmed copies.</div>
-<label><input type="checkbox" data-set="skipConfirmed" ${s.confirmedGoEarly ? '' : 'checked'}> Skip confirmed copies until everything else is done (recommended). A confirmed copy is a held video whose frames, sampled across the file without downloading it, match a saved video. “Download the held files now” (Overview) still fetches them.</label>
+  return `<div class="card"><h2>Copy rules</h2>
+<div class="muted">What counts as a copy, and what waits because of it. Held copies only wait: nothing is skipped for good, and every message is archived in full.</div>
+<label><input type="checkbox" data-set="substExact" ${s.substExact ? 'checked' : ''}> Don't download exact re-uploads: when a file is exactly as large as one already saved, compare its bytes on Telegram first (from 256 KB; uses Telegram's own fingerprints of every part, or, for videos from 2 MB, of the start, middle and end or three 1 MB samples; photos only when size, pixel size and preview match a saved one)</label>
+<label><input type="checkbox" data-set="holdLikely" ${s.holdLikely ? 'checked' : ''}> Hold probable copies at the back of the queue: videos as long, as large and with the same preview as one already saved download after everything else.</label>
+<label style="margin-left:22px"><input type="checkbox" data-set="holdForever" ${s.holdForever ? 'checked' : ''}> …and keep them held until I release them (“Download the held files now”, above)</label>
+<label><input type="checkbox" data-set="sampleBig" ${(s.sampleBig ?? s.holdLikely) ? 'checked' : ''}> Check big videos by sampling: a few frames across a queued video of 200 MB or more are read (about 10 MB) and compared with saved videos. A match holds it at the back; a held video that matches nothing goes back to its place. With holding off, matches are only counted.</label>
+<label><input type="checkbox" data-set="skipConfirmed" ${s.confirmedGoEarly ? '' : 'checked'}> Skip videos matched by sampled frames until everything else is done (recommended): held videos whose frames, sampled across the file without downloading it, match a saved video. A match is probable, not proven. “Download the held files now” (above) still fetches them.</label>
 <label><input type="checkbox" data-set="copyThumbs" ${s.copyThumbsOff ? '' : 'checked'}> Compare Telegram's small previews of queued videos and large pictures with saved files (needs image recognition; one small request per file, a few seconds apart). The previews are kept and shown in the browser for files not downloaded.</label>
 <label>Sharper previews of everything not downloaded: <select class="t" data-set-select="previewsAll">${[['auto', 'while Telegram has set a deletion date (recommended)'], ['on', 'always'], ['off', 'never']].map(([v, l]) => `<option value="${v}" ${(s.previewsAll || 'auto') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
 <div class="muted">Fetches Telegram's 320 px preview (about 20 KB) of every photo and video not downloaded, queued or not, private chats first, so the browser shows it instead of the tiny blurry one. No image recognition needed. One request every 1.5 seconds or slower, paused whenever Telegram asks the account to wait, so it never holds up downloads.</div>
@@ -318,7 +363,7 @@ function viewCopies() {
   if (!c || !c.queue) return pv;
   const q = c.queue, k = c.known || {};
   const n = (x) => `<b>${fmtNum((x || {}).files || 0)}</b> (${fmtSize((x || {}).bytes || 0)})`;
-  let x = `<div style="margin-top:6px"><b>Copies in the queue:</b> of ${n(q.all)} queued, ${n(q.same)} are the same Telegram file as one saved or queued before (never downloaded twice) and ${n(q.held)} are probable copies held at the back: ${fmtNum((q.vsSaved || {}).files || 0)} of saved videos, ${fmtNum((q.vsQueued || {}).files || 0)} lesser copies of queued ones, ${fmtNum((q.recog || {}).files || 0)} found by image recognition; ${n(q.confirmed)} confirmed by their first frames.</div>`;
+  let x = `<div style="margin-top:6px"><b>Copies in the queue:</b> of ${n(q.all)} queued, ${n(q.same)} are the same Telegram file as one saved or queued before (never downloaded twice) and ${n(q.held)} are probable copies held at the back: ${fmtNum((q.vsSaved || {}).files || 0)} of saved videos, ${fmtNum((q.vsQueued || {}).files || 0)} lesser copies of queued ones, ${fmtNum((q.recog || {}).files || 0)} found by image recognition; ${n(q.confirmed)} matched by sampled frames.</div>`;
   if (k.measured) x += `<div class="muted">Everything seen in messages and not downloaded: ${n(k.missing)}; ${n(k.same)} are the same Telegram file as another, ${n(k.held)} are held, and ${n(k.likely)} more videos look like copies (they will be held when queued).${c.previews ? ` ${fmtNum(c.previews)} Telegram preview(s) kept for files not downloaded.` : ''}</div>`;
   return x + pv;
 }
@@ -332,6 +377,16 @@ function transferNotes() {
     x += `<div class="muted">Local staging folder: ${fmtNum(g.waiting || 0)} file(s), ${fmtSize(g.bytes || 0)}, waiting to be copied to the downloads folder${g.failing ? ` · <span class="warn">${fmtNum(g.failing)} copy attempt(s) failing; they are retried and the local files are kept</span>` : ''}${g.stuck ? ` · <span class="bad">${fmtNum(g.stuck)} need you: their local files are kept (see the diagnostics report)</span>` : ''}.</div>`;
   }
   return x;
+}
+
+// Rescan → how rescans run (moved from Settings → Account safety).
+function viewRescanRules(s) {
+  return `<div class="card"><h2>How rescans run</h2>
+<div class="muted">When and how gently messages are read and files queued. It does not change what goes first (Priorities), and downloads already queued go on.</div>
+<label>Pace of rescans (also how many files a rescan may queue: 500, or 200 when gentle; the ranking still sets their order): <select class="t" data-set-select="pace"><option value="normal" ${s.pace === 'normal' ? 'selected' : ''}>Normal</option><option value="gentle" ${s.pace === 'gentle' ? 'selected' : ''}>Gentle (pauses more often, smaller download batches)</option></select></label>
+<div class="btns">Quiet hours (no new group starts, and a higher-ranked group waits instead of taking over; downloads keep going): <input class="t" data-set-text="quietStart" value="${esc(s.quietStart)}" placeholder="22:00" style="width:80px"> to <input class="t" data-set-text="quietEnd" value="${esc(s.quietEnd)}" placeholder="07:00" style="width:80px"> <span class="muted">empty = none</span></div>
+<label><input type="checkbox" data-set="pauseOnFreeze" ${s.pauseOnFreeze ? 'checked' : ''}> Pause rescans when Telegram reports the account frozen <span class="muted">A frozen account can still read history. Leave this off to keep capturing messages while you can.</span></label>
+<div class="btns"><button class="b primary" data-act="set-save">Save</button>${state.setMsg ? `<span class="muted">${esc(state.setMsg)}</span>` : ''}</div></div>`;
 }
 
 // ---------------- Rescan ----------------
@@ -350,6 +405,7 @@ function viewRescan() {
   const notQueued = groups().filter((g) => !g.finishedAt && !items.some((i) => i.groupId === g.id && (i.state === 'waiting' || i.state === 'running')));
   let h = `<div class="card"><h2>Rescan everything</h2><div class="muted">Full history of every group, one group after another, with photos, videos <b>and files/documents</b> switched on. Groups already in the queue are skipped.</div>
 <div class="btns"><button class="b primary" data-act="p-everything" ${notQueued.length ? '' : 'disabled'}>Rescan all ${notQueued.length} group(s)</button></div></div>`;
+  h += viewRescanRules(s.settings);
   h += `<div class="status">${head} Two lanes run side by side, one group each. <b>Messages:</b> every group's history is saved, without waiting for downloads. <b>Files:</b> as soon as a group's messages are saved, it is walked again to fetch the files still missing (failed files get another try too). <b>★ First</b> groups go on the <a href="#priorities">ranked list</a>: first in both lanes, and their files download first. Runs inside the server — you can close this page.${q.notice ? `<div class="muted" style="margin-top:4px">${esc(q.notice)}</div>` : ''}<div style="margin-top:6px">${viewDlState()}</div></div>`;
   h += `<div class="btns" style="margin-bottom:12px">${q.running ? `<button class="b" data-act="q-pause">Pause</button>` : `<button class="b primary" data-act="q-start" ${counts.waiting ? '' : 'disabled'}>Start</button>`}
 <button class="b" data-act="q-clear-finished" ${counts.done + counts.failed ? '' : 'disabled'}>Remove finished</button><button class="b" data-act="q-clear" ${items.length ? '' : 'disabled'}>Clear queue</button>
@@ -375,14 +431,14 @@ function viewRescan() {
       const msgs = it.messagesAt ? it.messages : (it.state === 'running' && !files) || (it.state === 'done' && !it.phase) ? (it.carried || 0) + it.processed : it.carried ? it.carried : null;
       const missing = it.messagesAt ? it.missing : null;
       h += `<tr><td class="n">${i + 1}</td><td>${it.priority ? '<b title="Goes first, files included">★</b> ' : ''}${esc(it.name)}${it.error ? `<div class="muted bad">${esc(it.error)}</div>` : ''}</td><td><span class="pill ${esc(pending ? 'running' : it.state)}" ${pending ? 'title="Every message is read and every missing file is queued; these files are still in the download queue"' : ''}>${esc(label)}</span><span class="muted">${when}${leftNote}</span></td><td class="n">${msgs === null ? '<span class="muted">–</span>' : fmtNum(msgs)}</td><td class="n">${missing === null ? '<span class="muted">–</span>' : fmtNum(missing)}</td><td class="n">${(files && it.state !== 'waiting') || !it.phase ? fmtNum(it.downloaded) : '<span class="muted">–</span>'}</td><td class="n">${it.attempts || 0}</td>
-<td>${it.state === 'running' || it.state === 'waiting' ? `<button class="mini" title="The same as the Priorities tab: ★ First adds this group to the end of the ranking, Remove ★ takes it off" data-act="q-priority" data-id="${esc(it.groupId)}" data-on="${it.priority ? '' : '1'}">${it.priority ? 'Remove ★' : '★ First'}</button>` : `<button class="mini" data-act="q-retry" data-id="${esc(it.groupId)}">Run again</button>`}<button class="mini" data-act="q-remove" data-id="${esc(it.groupId)}">${it.state === 'running' ? 'Stop' : 'Remove'}</button></td></tr>`;
+<td>${it.state === 'running' || it.state === 'waiting' ? `<button class="mini" title="What goes first is set in the Priorities tab" data-act="go-prio" data-name="${esc(it.name)}">${it.priority ? 'Ranked: change in Priorities' : 'Rank in Priorities…'}</button>` : `<button class="mini" data-act="q-retry" data-id="${esc(it.groupId)}">Run again</button>`}<button class="mini" data-act="q-remove" data-id="${esc(it.groupId)}">${it.state === 'running' ? 'Stop' : 'Remove'}</button></td></tr>`;
     });
     h += `</table></div>`;
   }
   // picker
   const queued = new Set(items.filter((i) => i.state === 'waiting' || i.state === 'running').map((i) => i.groupId));
   let list = groups().map((g) => ({ id: g.id, name: g.name, files: g.files, never: !g.lastWalk, finished: !!g.finishedAt,
-    sub: (g.finishedAt ? '<b>finished</b> — rescans leave it alone (undo on the Overview) · ' : '') + (g.category ? esc(g.category) + ' · ' : '') + (g.files ? fmtNum(g.files) + ' files downloaded · ' : 'no files yet · ') + (g.lastWalk ? 'messages captured, last rescan ' + fmtTime(g.lastWalk) : (g.files ? '<b>messages not captured yet</b>' : 'never rescanned')) }));
+    sub: (g.finishedAt ? '<b>finished</b> — rescans leave it alone (tick it and reopen it below) · ' : '') + (g.category ? esc(g.category) + ' · ' : '') + (g.files ? fmtNum(g.files) + ' files downloaded · ' : 'no files yet · ') + (g.lastWalk ? 'messages captured, last rescan ' + fmtTime(g.lastWalk) : (g.files ? '<b>messages not captured yet</b>' : 'never rescanned')) }));
   const withFiles = groups().filter((g) => g.files > 0 && !g.lastWalk && !g.finishedAt && !queued.has(g.id)).length;
   if (state.showAll && state.dialogs) {
     const have = new Set(list.map((x) => x.id));
@@ -397,7 +453,7 @@ function viewRescan() {
 <button class="mini" data-act="p-dialogs" ${state.dialogsLoading ? 'disabled' : ''}>${state.dialogsLoading ? 'Loading chats…' : state.showAll ? 'Hide other chats' : 'Show all my chats'}</button></div>
 <div class="list">${shown.map((x) => `<div class="row" style="grid-template-columns:1fr"><label><input type="checkbox" data-pick="${esc(x.id)}" data-name="${esc(x.name)}" data-finished="${x.finished ? '1' : ''}" ${state.pick.has(x.id) ? 'checked' : ''}><span><b>${esc(x.name)}</b> <span class="muted">${x.extra ? esc(x.sub) : x.sub}${queued.has(x.id) ? ' · in the queue' : ''}</span></span></label></div>`).join('') || '<div class="muted" style="padding:8px">No chats match.</div>'}</div>
 <label class="muted"><input type="checkbox" data-in-check="ensureFilters" ${state.ensureFilters ? 'checked' : ''}> Switch on photos, videos <b>and files/documents</b> for these groups (recommended)</label>
-<div class="btns"><button class="b primary" data-act="p-add" ${state.pick.size ? '' : 'disabled'}>Rescan ${state.pick.size} ticked group(s)</button><button class="b" data-act="p-add-first" ${state.pick.size ? '' : 'disabled'}>★ Rescan ${state.pick.size} ticked first</button><span class="grow"></span><button class="b" data-act="p-finish" ${state.pick.size ? '' : 'disabled'}>✓ Mark ${state.pick.size} ticked finished</button><button class="mini" data-act="p-reopen" ${state.pick.size ? '' : 'disabled'}>Reopen ticked</button></div>
+<div class="btns"><button class="b primary" data-act="p-add" ${state.pick.size ? '' : 'disabled'}>Rescan ${state.pick.size} ticked group(s)</button><button class="b" data-act="p-add-first" ${state.pick.size ? '' : 'disabled'}>★ Rescan ${state.pick.size} ticked first</button><span class="grow"></span><button class="b" data-act="p-finish" ${state.pick.size ? '' : 'disabled'}>✓ Mark ${state.pick.size} ticked finished</button><button class="mini" data-act="p-reopen" ${state.pick.size ? '' : 'disabled'}>Reopen ticked</button><button class="mini" data-act="g-finish-complete" ${groups().some((g) => !g.finishedAt && groupComplete(g)) ? '' : 'disabled'} title="Every group marked ✓ complete on the Overview (all messages and all files saved) is set to finished; rescans then leave it alone">✓ Finish all complete groups</button></div>
 <div class="muted">★ First: these groups join the <a href="#priorities">ranked list</a> and go ahead of all others, for their messages, then queueing their files, then downloading them. Ticking a group that is already queued keeps its progress.</div></div>`;
   return h;
 }
@@ -511,13 +567,19 @@ function viewPriorities() {
 <div class="btns"><label><input type="radio" name="ixprio" data-prio-policy="order" ${spread ? '' : 'checked'}> <b>Finish in order</b></label><span class="muted" style="flex:1 1 100%">Rank 1 until nothing of it can download, then rank 2… Lower groups may get little, but rank 1 is as complete as it can be.</span></div>
 <div class="btns"><label><input type="radio" name="ixprio" data-prio-policy="spread" ${spread ? 'checked' : ''}> <b>Spread coverage</b></label><span class="muted" style="flex:1 1 100%">Groups take turns by how much they already have for their rank (rechecked every 10 minutes), so no important group stays almost empty. No group is promised to finish first.</span></div>
 <div class="muted">Files already downloading finish first. Self-destructing media, links you paste and files you paused keep their own rules. Probable copies stay held at the back whatever the rank: their group's rank goes to the better copy they wait for.</div>
-<div class="muted">This ranking says what goes first. Settings → Account safety says when and how gently things run: quiet hours and the pace apply to ranked groups too, and the deletion-date order only sorts files within a rank and among groups not ranked. ★ First in the Rescan tab is the same ranking: it adds the group at the end of this list.</div></div>`;
+<div class="muted">This ranking says what goes first. Rescan → How rescans run says when and how gently things run: quiet hours and the pace apply to ranked groups too. The rules below only sort files within a rank and among groups not ranked. The Rescan tab shows which groups are ranked and links here.</div></div>`;
+  h += viewOrderRules(state.status.settings);
   if (state.prioError) h += `<div class="status bad">${esc(state.prioError)}</div>`;
   if (!p.known) h += `<div class="status warn">Coverage appears once the browser index has been built (about a minute after starting).</div>`;
   const d = p.distinct || {};
   h += `<div class="status">${p.focus ? `<b>Going first now:</b> ${esc(p.focus)}.<br>` : ''}Each file counted once across all groups: <b>${fmtNum((d.saved || {}).files)}</b> saved (${fmtSize((d.saved || {}).bytes || 0)}), <b>${fmtNum((d.needed || {}).files)}</b> still needed (${fmtSize((d.needed || {}).bytes || 0)}), ${fmtNum((d.probable || {}).files)} probable copies (${fmtSize((d.probable || {}).bytes || 0)}).${p.rate > 0 ? ` Recent speed: ${fmtSize(p.rate3h * 3600)}/h over 3 hours, ${fmtSize(p.rateDay * 3600)}/h over the day.` : ''}</div>`;
   if (sel.size) h += `<div class="sticky"><div class="btns"><b>${fmtNum(sel.size)} ticked</b><button class="b primary" data-act="pr-batch" data-key="first">Put first</button><button class="b" data-act="pr-batch" data-key="last">Put last</button><span class="muted">or at rank</span><input class="t" type="number" min="1" style="width:76px" aria-label="Rank to move the ticked groups to" data-in="prioTo" data-focus="prioto" value="${esc(state.prioTo || '')}"><button class="b" data-act="pr-batch" data-key="to">Move</button><button class="b" data-act="pr-batch" data-key="remove">Take off the ranking</button><button class="mini" data-act="pr-untick">Untick all</button></div></div>`;
   h += `<div class="card"><h2>Ranked groups (${ranked.length})</h2>${state.prioBusy ? '<div class="muted" role="status">Saving…</div>' : ''}`;
+  const notQueued = ranked.filter((g) => g.notQueued);
+  if (notQueued.length) {
+    const files = notQueued.reduce((n, g) => n + ((g.needed || {}).files || 0), 0);
+    h += `<div class="status warn">${fmtNum(notQueued.length)} ranked group(s) have files missing that nothing will queue until they are rescanned (${fmtNum(files)} file(s) still needed). <button class="b" data-act="pr-rescan-missing">Add ${notQueued.length === 1 ? 'it' : 'them'} to the rescan</button> <span class="muted">Their rank stays; a paused rescan stays paused.</span></div>`;
+  }
   if (ranked.length) {
     const head = `<tr><th>Rank</th><th>Group</th><th title="In the library because this group's message brought it">Saved</th><th title="In the library through another group: the same Telegram file, or the same bytes confirmed by every part's hash">Through others</th><th title="Evidence only: a held copy, a look-alike of a saved file, or a re-upload checked on sampled parts. Never counted as saved.">Probable</th><th>Still needed</th><th>Queue</th></tr>`;
     const rows = ranked.map((g, i) => {
@@ -532,6 +594,16 @@ function viewPriorities() {
 <div class="btns"><input class="t" style="flex:1;min-width:180px" placeholder="Search groups…" data-in="prioSearch" data-focus="prios" value="${esc(state.prioSearch || '')}"><button class="mini" data-act="pr-tick-all" ${others.length ? '' : 'disabled'}>Tick all ${fmtNum(others.length)} shown</button></div>
 <div class="list"><table><tr><th>Group</th><th>Saved</th><th>Through others</th><th>Probable</th><th>Still needed</th></tr>${others.map((g) => `<tr><td>${tick(g)}<b>${esc(g.name)}</b>${g.scanned ? '' : ' <span class="pill">not fully read</span>'}<div class="muted">${esc(g.waiting || '')}</div><button class="mini" data-act="pr-add" data-id="${esc(g.groupId)}">Add to the ranking</button></td><td class="n">${prioCount(g.saved)}</td><td class="n">${prioCount(g.shared)}</td><td class="n">${prioCount(g.probable)}</td><td class="n">${prioCount(g.needed)}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">Nothing here.</td></tr>'}</table></div></div>`;
   return h;
+}
+
+// Priorities → the rules that sort files within a rank (moved from Settings).
+function viewOrderRules(s) {
+  return `<div class="card"><h2>Within a rank, and groups not ranked</h2>
+<label>When Telegram has set a deletion date (ranked groups are never set aside by this; it sorts files within a rank, and groups not ranked): <select class="t" data-set-select="deadlineOrder">${[['auto', 'private chats first, then smaller files, only if the backup would not finish in time (recommended)'], ['on', 'private chats first, then smaller files, always'], ['off', 'keep the normal order']].map(([v, l]) => `<option value="${v}" ${(s.deadlineOrder || 'auto') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+<label><input type="checkbox" data-set="lowqFirst" ${s.lowqFirst ? 'checked' : ''}> Save a lower quality of very large videos first when time is short: when a deletion date is set and a video of 200 MB or more would not be reached in time, a smaller copy Telegram keeps of it (at least 480p, at most 40% of the size) is saved first; the original follows after everything else and then replaces it. Not done for likely copies.</label>
+<label style="margin-left:22px"><input type="checkbox" data-set="lowqKeep" ${s.lowqKeep ? 'checked' : ''}> …and keep the lower quality after the original arrives</label>
+<div class="btns">Files of 1 GB or more downloading at once: <input class="t" data-set-text="bigAtOnce" value="${esc(String(s.bigAtOnce == null ? 2 : s.bigAtOnce))}" style="width:60px"> <span class="muted">(recommended: 2; 0 = no limit). A file that big can take hours, and all downloads share how many parts Telegram allows in flight, so with many of them at once everything crawls. The other workers take smaller files; with nothing smaller waiting, twice as many go.</span></div>
+<div class="btns"><button class="b primary" data-act="set-save">Save</button>${state.setMsg ? `<span class="muted">${esc(state.setMsg)}</span>` : ''}</div></div>`;
 }
 
 // ---------------- Categories ----------------
@@ -598,7 +670,7 @@ function viewDuplicates() {
   const s = state.status.settings;
   const st = (state.dups && state.dups.status) || state.status.dups || {};
   const pct = st.total ? Math.floor((100 * st.done) / st.total) : 100;
-  let h = `<div class="card"><h2>Near-duplicate videos</h2>
+  let h = viewCopiesTab() + `<div class="card"><h2>Near-duplicate videos</h2>
 <div class="muted">Finds the same footage saved as different files — re-encoded, resized, trimmed or watermarked — which identical-file matching can't see. It samples each video on a fixed time grid (one or two frames a second, on the graphics card when it can), cuts off black bars, also checks mirror images, and compares the footage frame by frame. Pictures are matched the same way in the media browser. Nothing is deleted or moved: the index shows each set once on category pages and lists them in near_duplicates.csv.</div>`;
   if (st.ffmpeg === false) h += `<div class="status warn"><b>ffmpeg is not installed on this PC</b>, so videos can't be checked yet. Open PowerShell and run <code>winget install Gyan.FFmpeg</code>, then restart the app (close and reopen start.bat).</div>`;
   h += `<div><b>${fmtNum(st.done)} of ${fmtNum(st.total)} videos checked</b> (${pct}%)${st.errors ? ` · <span class="warn">${fmtNum(st.errors)} could not be read</span> <button class="mini" data-act="d-retry">Try them again</button>` : ''} · ${fmtNum(st.pairs)} matching pairs found${st.running ? ` · now: <span class="muted">${esc(st.current)}</span> (${esc(st.hwaccel === 'cpu' ? 'processor' : 'graphics card: ' + st.hwaccel)})` : s.dupEnabled ? ' · idle' : ' · <b>paused</b>'}</div>
@@ -690,28 +762,19 @@ ${state.diag ? `<textarea id="diag" readonly style="width:100%;min-height:260px;
 <div class="muted">Leave the folder empty to use a folder next to your downloads folder. It can't be inside the downloads folder.</div>
 <label><input type="checkbox" data-set="backupEnabled" ${s.backupOff ? '' : 'checked'}> Also back up the Telegram session and the database every night, into a folder next to the index copy${state.status.backup && state.status.backup.dir ? ` (<code>${esc(state.status.backup.dir)}</code>)` : ''}. The last 7 nights are kept.</label>
 <div class="muted">The session files are copied as they are, still encrypted. The key that opens them (<code>secret.key</code> in the app's data folder) is never copied there, so restoring also needs the app's secret key from its data folder: keep a copy of that folder somewhere safe. Saved with the Save settings button below.</div></div>
-<div class="card"><h2>Big videos and the NAS</h2>
-<label><input type="checkbox" data-set="lowqFirst" ${s.lowqFirst ? 'checked' : ''}> Save a lower quality of very large videos first when time is short: when a deletion date is set and a video of 200 MB or more would not be reached in time, a smaller copy Telegram keeps of it (at least 480p, at most 40% of the size) is saved first; the original follows after everything else and then replaces it. Not done for likely copies.</label>
-<label style="margin-left:22px"><input type="checkbox" data-set="lowqKeep" ${s.lowqKeep ? 'checked' : ''}> …and keep the lower quality after the original arrives</label>
-<div class="btns">Files of 1 GB or more downloading at once: <input class="t" data-set-text="bigAtOnce" value="${esc(String(s.bigAtOnce == null ? 2 : s.bigAtOnce))}" style="width:60px"> <span class="muted">(recommended: 2; 0 = no limit). A file that big can take hours, and all downloads share how many parts Telegram allows in flight, so with many of them at once everything crawls. The other workers take smaller files; with nothing smaller waiting, twice as many go.</span></div>
-<div class="btns">Download first to this folder on this computer: <input class="t" data-set-text="stageDir" value="${esc(s.stageDir || '')}" placeholder="empty = off; for example ${esc((state.status.staging || {}).suggest || '')}" style="flex:1;min-width:240px"></div>
-<div class="btns">Space it may use: <input class="t" data-set-text="stageCapGb" value="${esc(String(s.stageCapGb || 20))}" style="width:70px"> GB</div>
-<div class="muted">Downloads are written to this local folder, checked, then copied to the downloads folder (your NAS) and checked again before the local copy is removed, so a network hiccup on the share doesn't fail a download. A copy that fails is retried for as long as it takes; nothing on the NAS is ever replaced. The folder must exist and must not be inside the downloads folder. When it is full, new downloads wait for copies to finish.</div>
-<div class="btns"><button class="b primary" data-act="set-save">Save settings</button></div></div>
-<div class="card"><h2>Account safety</h2>
-<label>Pace of rescans (also how many files a rescan may queue: 500, or 200 when gentle; the ranking still sets their order): <select class="t" data-set-select="pace"><option value="normal" ${s.pace === 'normal' ? 'selected' : ''}>Normal</option><option value="gentle" ${s.pace === 'gentle' ? 'selected' : ''}>Gentle (pauses more often, smaller download batches)</option></select></label>
-<div class="btns">Quiet hours (no new group starts, and a higher-ranked group waits instead of taking over; downloads keep going): <input class="t" data-set-text="quietStart" value="${esc(s.quietStart)}" placeholder="22:00" style="width:80px"> to <input class="t" data-set-text="quietEnd" value="${esc(s.quietEnd)}" placeholder="07:00" style="width:80px"> <span class="muted">empty = none</span></div>
-<label>When Telegram has set a deletion date (ranked groups are never set aside by this; it sorts files within a rank, and groups not ranked): <select class="t" data-set-select="deadlineOrder">${[['auto', 'private chats first, then smaller files, only if the backup would not finish in time (recommended)'], ['on', 'private chats first, then smaller files, always'], ['off', 'keep the normal order']].map(([v, l]) => `<option value="${v}" ${(s.deadlineOrder || 'auto') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+<div class="card"><h2>Downloads</h2>
+<div class="muted">How files transfer from Telegram. What goes first is set in Priorities; when rescans run, in Rescan.</div>
 <label><input type="checkbox" data-set="downloadPacing" ${s.downloadPacing ? 'checked' : ''}> Pace downloads by measuring (recommended for regular accounts): start with two file parts at once and gradually try up to eight per Telegram server. Telegram's waits pause transfers without discarding progress. Untick to disable adaptive part pacing; Telegram's file limits and waits still apply.</label>
-<label><input type="checkbox" data-set="pauseOnFreeze" ${s.pauseOnFreeze ? 'checked' : ''}> Pause rescans when Telegram reports the account frozen <span class="muted">A frozen account can still read history. Leave this off to keep capturing messages while you can.</span></label>
+<label style="margin-left:22px"><input type="checkbox" data-set="paceByAnswers" ${s.paceByAnswers ? 'checked' : ''}> …and judge its tries by how fast Telegram answers each part instead of by bytes a second (experimental, off by default). It climbs more readily, so it falls back to the old way for two hours after two Telegram waits within an hour, or when a climb does not bring more bytes. The diagnostics report says, hour by hour, where it would have decided otherwise: switch it on only if that shows climbs being missed.</label>
 <label><input type="checkbox" data-set="autoRetry" ${s.autoRetry ? 'checked' : ''}> Retry failed downloads automatically every few hours (up to 5 times per file)</label>
-<label><input type="checkbox" data-set="substExact" ${s.substExact ? 'checked' : ''}> Don't download exact re-uploads: when a file is exactly as large as one already saved, compare its bytes on Telegram first (from 256 KB; uses Telegram's own fingerprints of every part, or, for videos from 2 MB, of the start, middle and end or three 1 MB samples; photos only when size, pixel size and preview match a saved one)</label>
-<label><input type="checkbox" data-set="holdLikely" ${s.holdLikely ? 'checked' : ''}> Hold likely copies at the back of the queue: videos as long, as large and with the same preview as one already saved download after everything else. Checking big videos by sampled frames only runs while this is on.</label>
-<label style="margin-left:22px"><input type="checkbox" data-set="holdForever" ${s.holdForever ? 'checked' : ''}> …and keep them held until I release them (Overview)</label>
-<label><input type="checkbox" data-set="fixityEnabled" ${s.fixityEnabled ? 'checked' : ''}> Re-read every stored file about once a month to check it is unchanged (reads from the NAS; follows the duplicate-finding quiet hours)</label>
+<div style="margin-top:8px"><b>Local staging folder</b></div>
+<div class="muted">What it does: downloads are written to a folder on this computer first, checked, then copied to the downloads folder (your NAS) and checked again before the local copy is removed, so a network hiccup on the share does not fail a download that Telegram already sent. A copy that fails is retried for as long as it takes, and nothing on the NAS is ever replaced. Files of 8 MB or more keep their progress there too. When the space below is used up, new downloads wait for copies to finish.</div>
+${stagePicker(s)}
+<div class="btns">Space it may use: <input class="t" data-set-text="stageCapGb" value="${esc(String(s.stageCapGb || 20))}" style="width:70px"> GB</div>
+<label><input type="checkbox" data-set="autoUpdate" ${s.autoUpdate ? 'checked' : ''} ${(state.status.update || {}).restarts ? '' : 'disabled'}> Install updates automatically: when a newer release is out, no new file starts, files of 8 MB or more stop at their next checkpoint (at most 30 seconds away) and carry on after the restart, smaller ones finish, then the app restarts on the new version. If downloads in progress take longer than 20 minutes it goes back to downloading and tries again later.</label>
+${(state.status.update || {}).restarts ? '' : '<div class="warn">This needs a launcher that starts the app again when it exits. Add the line <code>set TGDL_LAUNCHER_RESTARTS=1</code> to <code>start.bat</code> (before <code>:run</code>), then close its window and open it again.</div>'}
 <div class="btns"><button class="b primary" data-act="set-save">Save settings</button></div>
 ${state.setMsg ? `<div class="muted">${esc(state.setMsg)}</div>` : ''}</div>
-${viewCopySettings(s)}
 <div class="card"><h2>Image recognition (recommended)</h2>
 <div class="muted"><b>Without it, these stop working:</b> copy checks by how alike the previews look (and their calibration), search by what pictures show, “more like this”, Things, look-alikes, faces and people, text in pictures, and album suggestions by likeness. <b>These keep working:</b> downloads, the forward, exact re-upload and likely video copy checks, sampling of big videos, the deadline order, backups and browsing.</div>
 <div class="muted">Lets the archive browser find pictures and videos by what they show (“bikes in the snow”, in any language), show “more like this”, set apart files in a set that don't look like the rest, list what pictures show (Things), and, if you turn them on, read the text in pictures and group faces into people. It uses the machine-learning part of Immich (a self-hosted photo app), running in Docker on this PC; nothing is sent anywhere else, and only addresses on this computer or your local network are accepted. Each distinct picture is looked at once, in the background. Instructions: docs/image-recognition.md.</div>
@@ -755,7 +818,7 @@ ${state.sttMsg ? `<div class="muted">${esc(state.sttMsg)}</div>` : ''}</div>
 <div class="btns"><button class="b primary" data-act="set-save">Save settings</button><button class="b" data-act="alert-test">Send a test alert</button></div></div>`;
 }
 
-const TABS = [['overview', 'Overview'], ['priorities', 'Priorities'], ['rescan', 'Rescan'], ['categories', 'Categories'], ['duplicates', 'Duplicates'], ['search', 'Search'], ['settings', 'Settings']];
+const TABS = [['overview', 'Overview'], ['priorities', 'Priorities'], ['rescan', 'Rescan'], ['categories', 'Categories'], ['duplicates', 'Copies &amp; duplicates'], ['search', 'Search'], ['settings', 'Settings']];
 function render() {
   const prev = document.activeElement;
   const focusKey = prev && prev.getAttribute ? prev.getAttribute('data-focus') : null;
@@ -770,6 +833,7 @@ function render() {
   const view = { overview: viewOverview, priorities: viewPriorities, rescan: viewRescan, categories: viewCategories, duplicates: viewDuplicates, search: viewSearch, settings: viewSettings }[state.tab] || viewOverview;
   h += view();
   $app.innerHTML = h;
+  applySetDrafts();
   window.scrollTo(0, y);
   $app.querySelectorAll('.list,.rows').forEach((el, i) => { if (listScroll[i]) el.scrollTop = listScroll[i]; });
   if (focusKey) {
@@ -830,10 +894,17 @@ $app.addEventListener('click', async (ev) => {
     case 'pr-remove': prioSave(prioOrder().filter((x) => x !== id)); break;
     case 'pr-add': { const o = prioOrder(); if (!o.includes(id)) o.push(id); prioSave(o); break; }
     case 'pr-batch': prioBatch(key); break;
+    case 'pr-rescan-missing': {
+      const list = ((state.prio || {}).groups || []).filter((g) => g.place > 0 && g.notQueued).map((g) => ({ id: g.groupId, name: g.name }));
+      if (!list.length) break;
+      const r = await api('POST', '/api/ix/queue/add', { groups: list, ensureFilters: true, start: false, priority: false });
+      state.prioError = r.ok ? '' : 'Could not add: ' + errText(r);
+      loadPrio(); load(); break;
+    }
     case 'u-start': case 'u-cancel': case 'u-now': {
       if (act === 'u-now') {
         const u = state.status.update || {};
-        if (!confirm(`Restart now? ${fmtNum(u.files)} download(s) are in progress (${fmtSize(u.bytesLeft || 0)} left). Big files carry on from their last checkpoint, losing up to 64 MB each; files under 64 MB start over.`)) break;
+        if (!confirm(`Restart now? ${fmtNum(u.files)} download(s) are in progress (${fmtSize(u.bytesLeft || 0)} left). Files of 8 MB or more carry on from their last checkpoint, losing up to 8 MB or 30 seconds each; smaller files start over.`)) break;
       }
       const r = await api('POST', '/api/ix/update', { action: act.slice(2) });
       if (r.ok) { state.status.update = r.data; state.error = ''; } else state.error = errText(r);
@@ -911,6 +982,7 @@ $app.addEventListener('click', async (ev) => {
       if (!ids.length || !confirm(`Mark ${ids.length} complete group(s) as finished? Rescans will leave them alone (you can undo each one).`)) break;
       const r = await api('POST', '/api/ix/groups/finished', { groupIds: ids, finished: true }); if (!r.ok) state.error = errText(r); load(); break;
     }
+    case 'go-prio': state.tab = 'priorities'; location.hash = 'priorities'; state.prioSearch = el.getAttribute('data-name') || ''; render(); loadPrio(); break;
     case 'q-priority': { const r = await api('POST', '/api/ix/queue/priority', { groupId: id, priority: el.getAttribute('data-on') === '1' }); if (!r.ok) state.error = errText(r); load(); break; }
     case 'p-add': case 'p-add-first': {
       const names = new Map();
@@ -967,6 +1039,7 @@ $app.addEventListener('click', async (ev) => {
       for (const x of $app.querySelectorAll('[data-set-select]')) body[x.getAttribute('data-set-select')] = x.value;
       const r = await api('POST', '/api/ix/settings', body);
       state.setMsg = r.ok ? 'Saved.' : 'Not saved: ' + errText(r);
+      if (r.ok) { for (const k of Object.keys(body)) delete state.setDraft[k]; state.stageOther = false; }
       load(); break;
     }
   }
@@ -988,13 +1061,37 @@ $app.addEventListener('input', (ev) => {
     if (undo) undo.disabled = !n;
   }
 });
+// A setting changed and not saved yet is kept, so a redraw does not undo it.
+function noteSetDraft(t) {
+  if (t.matches('[data-set]')) state.setDraft[t.getAttribute('data-set')] = t.checked;
+  else if (t.matches('[data-set-text]')) state.setDraft[t.getAttribute('data-set-text')] = t.value;
+  else if (t.matches('[data-set-select]')) state.setDraft[t.getAttribute('data-set-select')] = t.value;
+}
+function applySetDrafts() {
+  for (const [k, v] of Object.entries(state.setDraft)) {
+    for (const el of $app.querySelectorAll(`[data-set="${CSS.escape(k)}"]`)) el.checked = v;
+    for (const el of $app.querySelectorAll(`[data-set-text="${CSS.escape(k)}"],[data-set-select="${CSS.escape(k)}"]`)) el.value = v;
+  }
+}
+$app.addEventListener('input', (ev) => noteSetDraft(ev.target));
 $app.addEventListener('change', (ev) => {
   const t = ev.target;
+  noteSetDraft(t);
   if (t.matches('[data-prio-sel]')) { const gid = t.getAttribute('data-prio-sel'); if (t.checked) state.prioSel.add(gid); else state.prioSel.delete(gid); render(); }
   else if (t.matches('[data-sel]')) { const gid = t.getAttribute('data-sel'); if (t.checked) state.sel.add(gid); else state.sel.delete(gid); render(); }
   else if (t.matches('[data-pick]')) { const gid = t.getAttribute('data-pick'); if (t.checked) state.pick.add(gid); else state.pick.delete(gid); render(); }
   else if (t.matches('[data-in-check]')) state[t.getAttribute('data-in-check')] = t.checked;
   else if (t.matches('[data-sel-in]')) state[t.getAttribute('data-sel-in')] = t.value;
+  else if (t.matches('[data-stage-pick]')) {
+    const box = $app.querySelector('[data-set-text="stageDir"]');
+    state.stageOther = t.value === '__other';
+    if (box) {
+      if (!state.stageOther) box.value = t.value;
+      box.style.display = state.stageOther ? '' : 'none';
+      state.setDraft.stageDir = box.value;
+      if (state.stageOther) box.focus();
+    }
+  }
 });
 $app.addEventListener('change', async (ev) => {
   const policy = ev.target.getAttribute && ev.target.getAttribute('data-prio-policy');

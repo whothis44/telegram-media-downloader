@@ -438,7 +438,7 @@ func (i sharedInvoker) invokePart(ctx context.Context, input bin.Encoder, output
 		}
 		received := 0
 		err := i.guard.invokeFiles(ctx, i.pool, input, output, partHooks{
-			flood:    func(_ time.Duration, premium bool) { i.pacer.flood(i.dc, premium) },
+			flood:    func(d time.Duration, premium bool) { i.pacer.floodFor(i.dc, premium, d, partFileID(input)) },
 			answered: func(took time.Duration) { i.pacer.answered(i.dc, took) },
 			waited:   func(took time.Duration) { i.pacer.waited(i.dc, took) },
 			waiting:  func(on bool) { i.pacer.waitingOnTelegram(i.dc, on) },
@@ -457,6 +457,21 @@ func (i sharedInvoker) invokePart(ctx context.Context, input bin.Encoder, output
 }
 
 func (sharedInvoker) Close() error { return nil }
+
+// partFileID is the Telegram file a part request is for (0: not known).
+func partFileID(input bin.Encoder) int64 {
+	r, ok := input.(*tg.UploadGetFileRequest)
+	if !ok {
+		return 0
+	}
+	switch l := r.Location.(type) {
+	case *tg.InputDocumentFileLocation:
+		return l.ID
+	case *tg.InputPhotoFileLocation:
+		return l.ID
+	}
+	return 0
+}
 
 var (
 	connectionRetries    = 6
