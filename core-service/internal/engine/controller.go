@@ -111,6 +111,11 @@ func (c *Controller) SetUpdateObserver(observer UpdateObserver) {
 }
 
 type running struct {
+	// claimMu makes the claims that leave out full servers take turns: each
+	// sees the files the claims before it took. Without it the workers of a
+	// start all counted the same servers as free and one server got four
+	// times its slots (ix.12.5).
+	claimMu         sync.Mutex
 	promotionCancel context.CancelFunc // guarded by controller.opMu
 	observing       atomic.Bool
 	jobUsers        atomic.Int64
@@ -128,6 +133,9 @@ type running struct {
 	active          map[int64]context.CancelFunc
 	activeOrigin    map[int64]string
 	progress        map[int64]*transferStats
+	// stopAt: a person paused this download while it moved bytes. A file that
+	// keeps its progress stops right after its next checkpoint (PauseJob).
+	stopAt map[int64]*atomic.Bool
 }
 
 func New(writer, reader *sql.DB, dataDir string, factory Factory, filter Filter, sink Sink, notify func(string, error)) *Controller {
@@ -429,6 +437,9 @@ func (c *Controller) CancelAllQueued(ctx context.Context) (int, error) {
 	return removed, err
 }
 
+// PauseJob pauses a queued file. One already moving bytes stops right after its
+// next checkpoint when it keeps its progress (files from 8 MiB: nothing is lost,
+// and it carries on from there when resumed); a smaller one finishes.
 func (c *Controller) PauseJob(ctx context.Context, key string) (bool, error) {
 	run, err := c.queueRun()
 	if err != nil {
@@ -436,6 +447,9 @@ func (c *Controller) PauseJob(ctx context.Context, key string) (bool, error) {
 	}
 	ok, err := c.work.PauseJob(ctx, key)
 	if err == nil {
+		if ok {
+			c.stopAtCheckpoint(ctx, run, key, true)
+		}
 		c.wake(run)
 	}
 	return ok, err
@@ -448,9 +462,36 @@ func (c *Controller) ResumeJob(ctx context.Context, key string) (bool, error) {
 	}
 	ok, err := c.work.ResumeJob(ctx, key)
 	if err == nil {
+		if ok {
+			c.stopAtCheckpoint(ctx, run, key, false)
+		}
 		c.wake(run)
 	}
 	return ok, err
+}
+
+// stopAtCheckpoint asks the downloads of key in progress to stop at their next
+// checkpoint, or not to after all.
+func (c *Controller) stopAtCheckpoint(ctx context.Context, run *running, key string, on bool) {
+	rows, err := c.reader.QueryContext(ctx, `SELECT id FROM tgdl_work WHERE group_id||'_'||message_id=? AND status='processing'`, key)
+	if err != nil {
+		return
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if rows.Scan(&id) == nil {
+			ids = append(ids, id)
+		}
+	}
+	rows.Close()
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	for _, id := range ids {
+		if flag := run.stopAt[id]; flag != nil {
+			flag.Store(on)
+		}
+	}
 }
 
 func (c *Controller) CancelJob(ctx context.Context, key string) (bool, error) {
@@ -629,6 +670,7 @@ func (c *Controller) start(request, parent context.Context, accounts []AccountCo
 	run := &running{ctx: ctx, cancel: cancel, done: make(chan struct{}), wake: make(chan struct{}, 1), accounts: make(map[string]Account), workers: workers, maxAttempts: maxAttempts, active: make(map[int64]context.CancelFunc), progress: make(map[int64]*transferStats)}
 	run.observing.Store(observing)
 	run.activeOrigin = map[int64]string{}
+	run.stopAt = map[int64]*atomic.Bool{}
 	failed := true
 	defer func() {
 		if failed {
@@ -747,6 +789,8 @@ func (c *Controller) start(request, parent context.Context, accounts []AccountCo
 	scaling := c.scaling
 	c.mu.Unlock()
 	run.target.Store(int32(workers))
+	wg.Add(1)
+	go func() { defer wg.Done(); c.fillServers(ctx) }()
 	if scaling.Max > workers {
 		scaling.Min = max(1, min(scaling.Min, workers))
 		scaling.Max = min(scaling.Max, 64)
@@ -754,6 +798,10 @@ func (c *Controller) start(request, parent context.Context, accounts []AccountCo
 	}
 	go func() {
 		if <-startWorkers {
+			// The files a worker could take know their server before the
+			// first claim, or the first claims would go in rank order alone
+			// and could all land on one server (ix.12.4).
+			c.fillClaimableServers(ctx)
 			wg.Add(run.workers)
 			for i := 0; i < run.workers; i++ {
 				go func() { defer wg.Done(); c.worker(run, i) }()
@@ -1060,12 +1108,9 @@ func (c *Controller) worker(run *running, index int) {
 			work, err = c.work.ClaimExpiring(run.ctx, run.unthrottled(), time.Now(), !run.observing.Load())
 		case smaller:
 			// The large file before gave its place up for a smaller one.
-			work, err = c.work.ClaimSmaller(run.ctx, run.unthrottled(), time.Now(), !run.observing.Load(), telegram.DownloadLargeFile)
-			if err == nil && work == nil {
-				work, err = c.work.Claim(run.ctx, run.unthrottled(), time.Now(), !run.observing.Load())
-			}
+			work, err = run.claimNext(c.work, true)
 		default:
-			work, err = c.work.Claim(run.ctx, run.unthrottled(), time.Now(), !run.observing.Load())
+			work, err = run.claimNext(c.work, false)
 		}
 		smaller = false
 		if err != nil {
@@ -1096,9 +1141,14 @@ func (c *Controller) worker(run *running, index int) {
 		ctx, cancel := context.WithCancel(run.ctx)
 		ctx = WithOrigin(ctx, work.Origin)
 		progress := &transferStats{started: time.Now()}
+		stopAt := &atomic.Bool{}
 		run.mu.Lock()
 		run.active[work.ID] = cancel
 		run.activeOrigin[work.ID] = work.Origin
+		if run.stopAt == nil {
+			run.stopAt = map[int64]*atomic.Bool{}
+		}
+		run.stopAt[work.ID] = stopAt
 		if work.Origin == "live" && !run.observing.Load() {
 			cancel()
 		}
@@ -1168,6 +1218,9 @@ func (c *Controller) worker(run *running, index int) {
 				better, err := c.work.Outranked(ctx, run.unthrottled(), time.Now(), key, manual)
 				return err == nil && better
 			})
+			// A file that keeps its progress stops right after a checkpoint when an
+			// update waits or a person pauses it: nothing is lost (ErrDownloadStopped).
+			rankedCtx = telegram.WithCheckpointStop(rankedCtx, func() bool { return c.draining.Load() || stopAt.Load() })
 			rankedCtx = telegram.WithDownloadRoom(rankedCtx, func() bool {
 				if c.draining.Load() {
 					return false
@@ -1187,10 +1240,16 @@ func (c *Controller) worker(run *running, index int) {
 			// Back to the queue as it was: no bytes moved, no attempt spent.
 			err, wasCancelled = nil, true
 		}
+		if errors.Is(err, telegram.ErrDownloadStopped) {
+			// Stopped after a checkpoint when asked: back to the queue, no
+			// attempt spent, and it carries on from there.
+			err, wasCancelled = nil, true
+		}
 		cancel()
 		run.mu.Lock()
 		delete(run.active, work.ID)
 		delete(run.activeOrigin, work.ID)
+		delete(run.stopAt, work.ID)
 		delete(run.progress, work.ID)
 		run.mu.Unlock()
 		retry := time.Time{}
@@ -1217,6 +1276,74 @@ func (c *Controller) worker(run *running, index int) {
 func attemptTimeout(size int64) time.Duration {
 	seconds := min(max(size, 0)/(16*1024), int64((24*time.Hour)/time.Second))
 	return min(2*time.Minute+time.Duration(seconds)*time.Second, 24*time.Hour)
+}
+
+// fullServers are the servers whose file slots the files downloading now
+// fill (WorkStore.FullServers), for a run of one account whose client knows
+// its slots; nil otherwise (claims then go in rank order alone, as before
+// ix.12.4). Their files are left in the queue for the next claim: a worker
+// takes a file on another server instead of waiting for a slot.
+func (r *running) fullServers(work *WorkStore) []int {
+	if len(r.ids) != 1 {
+		return nil
+	}
+	slots, ok := r.accounts[r.ids[0]].(interface{ FileSlots() (small, large int) })
+	if !ok {
+		return nil
+	}
+	small, large := slots.FileSlots()
+	full, err := work.FullServers(r.ctx, small, large)
+	if err != nil {
+		return nil
+	}
+	return full
+}
+
+// claimNext claims the next file, leaving out full servers (smaller: one
+// under telegram.DownloadLargeFile first, then any). Claims take turns
+// (claimMu).
+func (r *running) claimNext(work *WorkStore, smaller bool) (*Work, error) {
+	r.claimMu.Lock()
+	defer r.claimMu.Unlock()
+	full := r.fullServers(work)
+	if smaller {
+		w, err := work.ClaimSmallerAvoiding(r.ctx, r.unthrottled(), time.Now(), !r.observing.Load(), telegram.DownloadLargeFile, full)
+		if err != nil || w != nil {
+			return w, err
+		}
+	}
+	return work.ClaimAvoiding(r.ctx, r.unthrottled(), time.Now(), !r.observing.Load(), full)
+}
+
+// fillClaimableServers records the servers of the rows workers could take
+// now, before they start: about a second for a few thousand rows; at most
+// fillClaimableFor, after which the background fill carries on.
+func (c *Controller) fillClaimableServers(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(ctx, fillClaimableFor)
+	defer cancel()
+	for ctx.Err() == nil {
+		if n, err := c.work.FillServers(ctx, 500, true); err != nil || n == 0 {
+			return
+		}
+	}
+}
+
+var fillClaimableFor = 30 * time.Second
+
+// fillServers records the servers of rows queued before ix.12.4, in the
+// background, a batch at a time.
+func (c *Controller) fillServers(ctx context.Context) {
+	for ctx.Err() == nil {
+		n, err := c.work.FillServers(ctx, 500)
+		if err != nil || n == 0 {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
 }
 
 // speedLimitedOnly: every account waiting now waits only because of

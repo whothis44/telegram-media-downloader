@@ -218,8 +218,10 @@ func TestIxSamplingRoundTakesTheBiggestFirst(t *testing.T) {
 		order = append(order, id)
 	}
 	rows.Close()
-	if len(order) != 2 || order[0] == small || order[1] == small {
-		t.Fatalf("checked first: %v (big %d, mid %d)", order, big, mid)
+	// Two checks: both turns go to the queue in download order, biggest
+	// first; the held video's turn is the third (ix.12.5).
+	if len(order) != 2 || order[0] != big || order[1] != small {
+		t.Fatalf("checked first: %v (big %d, small %d)", order, big, small)
 	}
 	if how, _ := ixTestHow(a, big); how != "sampled" || !ixTestPaused(t, a, big) {
 		t.Fatalf("the 4 GB copy: %q", how)
@@ -229,12 +231,14 @@ func TestIxSamplingRoundTakesTheBiggestFirst(t *testing.T) {
 	if confirm != "confirmed" {
 		t.Fatalf("confirm %q", confirm)
 	}
-	_ = a.db.Reader.QueryRow(`SELECT confirm FROM ix_copy_hold WHERE work_id=?`, mid).Scan(&confirm)
-	if confirm != "unconfirmed" || !ixTestPaused(t, a, mid) {
-		t.Fatalf("held, not confirmed: %q", confirm)
-	}
 	if err := a.ixSampleRound(ctx, false); err != nil {
 		t.Fatal(err)
+	}
+	// The held video's turn: its frames match no saved video, so it goes
+	// back to its place (ix.12.5).
+	_ = a.db.Reader.QueryRow(`SELECT confirm FROM ix_copy_hold WHERE work_id=?`, mid).Scan(&confirm)
+	if confirm != "unconfirmed" || ixTestPaused(t, a, mid) {
+		t.Fatalf("held, matching nothing: %q, still held %v", confirm, ixTestPaused(t, a, mid))
 	}
 	var n int
 	_ = a.db.Reader.QueryRow(`SELECT COUNT(*) FROM ix_copy_sample WHERE work_id IN (?,?)`, busy, tiny).Scan(&n)
@@ -477,7 +481,7 @@ func TestIxSamplingUnderThrottleAndRetries(t *testing.T) {
 		t.Fatalf("no index: %s final %v", reason, final)
 	}
 	jobs := func() map[int64]bool {
-		js, err := a.ixSampleJobs(ctx, false, 10)
+		js, err := a.ixSampleJobs(ctx, ixSampleAll, 10)
 		if err != nil {
 			t.Fatal(err)
 		}

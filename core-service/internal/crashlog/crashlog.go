@@ -30,6 +30,7 @@ import (
 
 const (
 	currentName = "current.log"
+	causeName   = "cause.txt" // the runtime's words of the last crash, kept by the supervisor (WriteCause)
 	markerName  = "running"
 	historyName = "history.jsonl"
 	keepDumps   = 10
@@ -130,6 +131,44 @@ func (s *Session) Finish() {
 	_ = os.Remove(filepath.Join(s.dir, markerName))
 }
 
+// WriteCause keeps the runtime's own words of a crash (never a panic's
+// message) for the next start's history line. The program's supervisor writes
+// it (cmd/tgdl-server, TGDL_CRASH_CAPTURE): the runtime prints them to the
+// window before it copies anything to the crash file.
+func WriteCause(dir, cause string, at time.Time) error {
+	body, err := json.Marshal(struct {
+		At    time.Time `json:"at"`
+		Cause string    `json:"cause"`
+	}{at, cause})
+	if err != nil {
+		return err
+	}
+	tmp := filepath.Join(dir, causeName+".tmp")
+	if err := os.WriteFile(tmp, body, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, filepath.Join(dir, causeName))
+}
+
+// keptCause is the cause the supervisor kept for a run that started at
+// started (empty: none, or an older one). It is read once.
+func keptCause(dir string, started time.Time) string {
+	path := filepath.Join(dir, causeName)
+	body, err := os.ReadFile(path)
+	_ = os.Remove(path)
+	if err != nil {
+		return ""
+	}
+	var c struct {
+		At    time.Time `json:"at"`
+		Cause string    `json:"cause"`
+	}
+	if json.Unmarshal(body, &c) != nil || (!started.IsZero() && c.At.Before(started)) {
+		return ""
+	}
+	return safe(c.Cause)
+}
+
 // settle turns what the last run left into a history line.
 func settle(dir string) (*Run, error) {
 	var run Run
@@ -161,7 +200,11 @@ func settle(dir string) (*Run, error) {
 	case hasMarker:
 		run.How = HowNoReport
 	default:
+		_ = os.Remove(filepath.Join(dir, causeName))
 		return nil, nil
+	}
+	if cause := keptCause(dir, run.Started); cause != "" {
+		run.Cause = cause // the runtime's words, which the crash file lacks
 	}
 	if run.Ended.IsZero() {
 		run.Ended = time.Now()
@@ -246,8 +289,20 @@ func (r Run) Text() string {
 	if r.Version != "" {
 		fmt.Fprintf(&b, " · %s", r.Version)
 	}
-	if !r.Started.IsZero() && r.Ended.After(r.Started) {
-		fmt.Fprintf(&b, " · after %s", r.Ended.Sub(r.Started).Round(time.Minute))
+	if !r.Started.IsZero() && !r.Ended.Before(r.Started) {
+		d := r.Ended.Sub(r.Started)
+		switch {
+		case r.How == HowNoReport && d < Beat:
+			// Its end is only known to within a beat: the marker is touched once
+			// a minute, so "after 0s" would claim more than is known.
+			b.WriteString(" · within its first minute")
+		case r.How == HowNoReport:
+			fmt.Fprintf(&b, " · after about %s", d.Round(time.Minute))
+		case d < time.Minute:
+			fmt.Fprintf(&b, " · after %s", d.Round(time.Second))
+		default:
+			fmt.Fprintf(&b, " · after %s", d.Round(time.Minute))
+		}
 	}
 	if r.Cause != "" {
 		fmt.Fprintf(&b, " · %s", r.Cause)

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/botnick/telegram-media-downloader/core-service/internal/diskfree"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/download"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/engine"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/telegram"
@@ -213,6 +214,8 @@ type ixStagingStatus struct {
 	On      bool   `json:"on"`
 	CapGB   int    `json:"capGb"`
 	Suggest string `json:"suggest"` // a folder to suggest: the app's data folder
+	// This computer's fixed drives, for the folder picker (Windows; empty elsewhere).
+	Drives []diskfree.Drive `json:"drives,omitempty"`
 }
 
 func (a *App) ixStagingStatus(ctx context.Context) ixStagingStatus {
@@ -224,6 +227,7 @@ func (a *App) ixStagingStatus(ctx context.Context) ixStagingStatus {
 	if a.library != nil {
 		st.StagingStatus = a.library.StagingStatus(ctx)
 	}
+	st.Drives = diskfree.Local()
 	return st
 }
 

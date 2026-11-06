@@ -29,7 +29,9 @@ func (a *App) ixFilesToGo() (out map[string]ixGroupFiles, ok bool) {
 			continue
 		}
 		g := out[it.Group]
-		if it.Status == "held" {
+		// Held as a copy of a saved file. A lesser copy of a file only queued
+		// still has to come: the group is not complete until it does.
+		if it.Status == "held" && it.Like != "" {
 			g.Held++
 		} else {
 			g.ToGo++
