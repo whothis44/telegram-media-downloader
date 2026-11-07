@@ -375,6 +375,9 @@ func ixEnsureSchema(ctx context.Context, db *sql.DB) error {
 	if err := ixEnsureFaceSchema(ctx, db); err != nil {
 		return err
 	}
+	if _, err := db.ExecContext(ctx, ixTopicDirsSchema); err != nil { // ix_topic_dirs.go
+		return err
+	}
 	if err := ixEnsureCopiesSchema(ctx, db); err != nil {
 		return err
 	}

@@ -196,16 +196,25 @@ const ixBigApartTimes = 2
 // the workers have nothing else to take. Beyond that they count, so that
 // the backfills cannot queue big files without end.
 //
-// The two counts are kept for ixApartCacheTTL: a backfill at its limit asks
+// Claimable files whose server has no free slot of their size
+// (ixSlotBlockedNow, ix.12.8) do not count either, under the same bound
+// together with the big files.
+//
+// The counts are kept for ixApartCacheTTL: a backfill at its limit asks
 // every 250 ms.
 func (a *App) ixWaitingApart(ctx context.Context, cap int) int {
-	n := a.ixCaches().apart.get(ixApartCacheTTL, func() ([2]int, bool) { return a.ixWaitingApartNow(ctx) })
-	return n[0] + min(n[1], ixBigApartTimes*max(0, cap))
+	n := a.ixWaitingApartCounts(ctx)
+	return n[0] + min(n[1]+n[2], ixBigApartTimes*max(0, cap))
 }
 
-// ixWaitingApartNow counts the paused items waiting apart, and the big
-// files waiting for their lane.
-func (a *App) ixWaitingApartNow(ctx context.Context) ([2]int, bool) {
+// ixWaitingApartCounts is ixWaitingApartNow, cached.
+func (a *App) ixWaitingApartCounts(ctx context.Context) [3]int {
+	return a.ixCaches().apart.get(ixApartCacheTTL, func() ([3]int, bool) { return a.ixWaitingApartNow(ctx) })
+}
+
+// ixWaitingApartNow counts the paused items waiting apart, the big files
+// waiting for their lane, and the files waiting for a slot on their server.
+func (a *App) ixWaitingApartNow(ctx context.Context) ([3]int, bool) {
 	var apart, big int
 	err := a.db.Reader.QueryRowContext(ctx, `SELECT COALESCE(SUM(w.paused=1),0), COALESCE(SUM(w.paused=0),0) FROM tgdl_work w WHERE w.status='pending' AND w.origin<>'live' AND (
 		w.paused=1 AND (
@@ -213,5 +222,6 @@ func (a *App) ixWaitingApartNow(ctx context.Context) ([2]int, bool) {
 		OR EXISTS (SELECT 1 FROM ix_deferred x WHERE x.work_id=w.id AND x.released_at=0)
 		OR EXISTS (SELECT 1 FROM ix_lowq q WHERE q.work_id=w.id AND q.state='saved'))
 		OR ? > 0 AND w.paused=0 AND w.ttl_seconds=0 AND w.file_size>=?)`, engine.BigFileLane(), engine.BigFileSize).Scan(&apart, &big)
-	return [2]int{apart, big}, err == nil
+	blocked, err2 := a.ixSlotBlockedNow(ctx)
+	return [3]int{apart, big, blocked}, err == nil && err2 == nil
 }

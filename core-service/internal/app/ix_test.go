@@ -1136,6 +1136,12 @@ func TestIxAlertsReachAWebAddressAndStayQuietOnRepeat(t *testing.T) {
 	ixAccountState.Store(a, ixAccountStatus{Frozen: true, LastError: "FROZEN_METHOD_INVALID"})
 	defer ixAccountState.Delete(a)
 	conds := a.ixAlertConditions(ctx, s, time.Now())
+	// The app's own safety check (ixRunSafety) may store the account state it
+	// reads from the database meanwhile, under load: set it again (ix.12.14).
+	for try := 0; try < 5 && len(conds) != 2; try++ {
+		ixAccountState.Store(a, ixAccountStatus{Frozen: true, LastError: "FROZEN_METHOD_INVALID"})
+		conds = a.ixAlertConditions(ctx, s, time.Now())
+	}
 	if len(conds) != 2 {
 		t.Fatalf("conditions: %+v", conds)
 	}

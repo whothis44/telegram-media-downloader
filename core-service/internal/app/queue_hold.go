@@ -91,6 +91,12 @@ func (a *App) queueAddHolds(ctx context.Context, snapshot map[string]any) {
 	}
 	snapshot["archiveHeldCount"] = held
 	snapshot["personPausedCount"] = person
+	// ix.12.14: the files ready to download in the whole queue; the snapshot
+	// lists the next 1,000 of them, so the page can say "921 of 4,832".
+	var ready int
+	if a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM tgdl_work WHERE status='pending' AND paused=0`).Scan(&ready) == nil {
+		snapshot["queuedCount"] = ready
+	}
 }
 
 // queueKeyParts splits a queue key (group_message) at its last underscore.

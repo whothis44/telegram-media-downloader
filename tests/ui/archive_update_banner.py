@@ -52,7 +52,8 @@ with sync_playwright() as p:
     page.click('[data-act="u-start"]')
     page.wait_for_selector('[data-act="u-cancel"]')
     body = page.inner_text('#app')
-    assert 'Waiting for 3 downloads to finish' in body and '2.00 GB left' in body, body
+    assert 'Waiting for 3 downloads in progress' in body and '2.00 GB left' in body, body
+    assert 'stop at their next checkpoint' in body, body
     assert page.locator('[data-act="u-now"]').count() == 1
 
     # Going back.
@@ -83,6 +84,19 @@ with sync_playwright() as p:
     page.reload()
     page.wait_for_selector('text=nothing will be lost')
     assert 'start.bat' in page.inner_text('#app')
+
+    # Installing by itself (ix.12.3): it says so, and why it went back to downloading.
+    update.update(restarts=True, newer=True, draining=True, files=1, bytesLeft=1 << 20, ready=False, autoNow=True, auto=True)
+    page.reload()
+    page.wait_for_selector('text=Installing version 2.0.0 by itself')
+    update.update(draining=False, autoNow=False, autoNote='The automatic update waited 20m0s for the downloads in progress and went back to downloading; it tries again later.')
+    page.reload()
+    page.wait_for_selector('text=went back to downloading')
+    assert 'Settings → Downloads can install' not in page.inner_text('#app'), 'offered a setting already on'
+    update.update(auto=False, autoNote='')
+    page.reload()
+    page.wait_for_selector('[data-act="u-start"]')
+    assert 'Settings → Downloads can install updates by themselves' in page.inner_text('#app')
 
     # Nothing new: no banner.
     update.update(newer=False, draining=False, ready=False)

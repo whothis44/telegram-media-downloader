@@ -44,15 +44,21 @@ type ixSettings struct {
 	SubstExact    bool   `json:"substExact"`    // same-size re-uploads: check bytes on Telegram instead of downloading
 	HoldLikely    bool   `json:"holdLikely"`    // probable copies wait until nothing else is queued
 	HoldForever   bool   `json:"holdForever"`   // ...and are never released automatically
-	MLURL         string `json:"mlUrl"`         // image recognition (Immich machine learning); empty: off
-	MLModel       string `json:"mlModel"`       // its model; empty: ixMLDefaultModel
-	MLFaces       bool   `json:"mlFaces"`       // find faces and group them into people (off unless turned on)
-	MLTextModel   string `json:"mlTextModel"`   // text-reading model (by script); empty: ixOCRDefaultModel
-	MLText        bool   `json:"mlText"`        // read text in pictures
-	MLDupes       bool   `json:"mlDupes"`       // near-identical pictures by recognition go to review
-	MLThings      string `json:"mlThings"`      // subjects to tag, one per line; empty: ixDefaultThings
-	STTURL        string `json:"sttUrl"`        // speech to text (an OpenAI-compatible Whisper server); empty: off
-	STTModel      string `json:"sttModel"`      // its model; empty: ixSTTDefaultModel
+	// SampleBig: big queued videos are checked by sampled frames (ix.12.5;
+	// before, holdLikely switched this too). Unset: as holdLikely.
+	SampleBig *bool `json:"sampleBig,omitempty"`
+	// CheckInDownload (ix.12.13): with sampleBig, a big video is checked as
+	// the first step of its own download. Unset: on. Off: as in 12.12.
+	CheckInDownload *bool  `json:"checkInDownload,omitempty"`
+	MLURL           string `json:"mlUrl"`       // image recognition (Immich machine learning); empty: off
+	MLModel         string `json:"mlModel"`     // its model; empty: ixMLDefaultModel
+	MLFaces         bool   `json:"mlFaces"`     // find faces and group them into people (off unless turned on)
+	MLTextModel     string `json:"mlTextModel"` // text-reading model (by script); empty: ixOCRDefaultModel
+	MLText          bool   `json:"mlText"`      // read text in pictures
+	MLDupes         bool   `json:"mlDupes"`     // near-identical pictures by recognition go to review
+	MLThings        string `json:"mlThings"`    // subjects to tag, one per line; empty: ixDefaultThings
+	STTURL          string `json:"sttUrl"`      // speech to text (an OpenAI-compatible Whisper server); empty: off
+	STTModel        string `json:"sttModel"`    // its model; empty: ixSTTDefaultModel
 	// The Docker containers of the two services (see ix_docker.go), and
 	// whether the archive starts them when it starts.
 	MLContainer   string `json:"mlContainer"`
@@ -63,11 +69,18 @@ type ixSettings struct {
 	// DownloadPacing lets the download pacer set how many file parts are in
 	// flight (ix.9); off goes back to how ix.8 downloaded.
 	DownloadPacing bool `json:"downloadPacing"`
+	// PaceByAnswers judges the pacer's tries by how fast Telegram answers
+	// (ix.12.3); off unless set. Off, the report still says where it would
+	// have decided otherwise.
+	PaceByAnswers bool `json:"paceByAnswers"`
 	// Big videos and the NAS (ix_lowq.go, ix_staging.go).
 	LowqFirst  bool   `json:"lowqFirst"`  // save a lower quality of very large videos first when time is short
 	LowqKeep   bool   `json:"lowqKeep"`   // keep that lower quality after the original arrives
 	StageDir   string `json:"stageDir"`   // local folder downloads go to before the library; empty: off
-	StageCapGB int    `json:"stageCapGb"` // space staged files may take
+	StageCapGB int    `json:"stageCapGb"` // until 12.13: space staged files may take (read by StageKeepFree for upgrades)
+	// StageKeepFreeGB (ix.12.14): a download is staged while the staging
+	// disk keeps this many GB free after it; 0: not set yet (StageKeepFree).
+	StageKeepFreeGB int `json:"stageKeepFreeGb,omitempty"`
 	// BigAtOnce is how many files of 1 GB or more download at once
 	// (engine.BigFileLane; 0: no limit).
 	BigAtOnce int `json:"bigAtOnce"`
@@ -90,6 +103,9 @@ type ixSettings struct {
 	// not downloaded (ix_previews_all.go): auto (while a deletion date is
 	// set), on, off.
 	PreviewsAll string `json:"previewsAll"`
+	// AutoUpdate starts the update's drain by itself when a newer release is
+	// out (ix_update.go). It needs a launcher that says it loops; off unless set.
+	AutoUpdate bool `json:"autoUpdate"`
 }
 
 // public is the settings as the dashboard may see them.
@@ -296,8 +312,50 @@ func (a *App) ixHold(ctx context.Context) string {
 	return ""
 }
 
+// SampleBigOn: big queued videos are checked by sampled frames.
+func (s ixSettings) SampleBigOn() bool {
+	if s.SampleBig != nil {
+		return *s.SampleBig
+	}
+	return s.HoldLikely
+}
+
+// CheckInDownloadOn: big videos are checked in their own download (ix.12.13).
+func (s ixSettings) CheckInDownloadOn() bool {
+	return s.CheckInDownload == nil || *s.CheckInDownload
+}
+
+// ixStageKeepFreeDefault is the free space the staging disk keeps by default,
+// and ixStageKeepFreeMin the least it may be set to: the disk may hold the
+// database too.
+const (
+	ixStageKeepFreeDefault = 50
+	ixStageKeepFreeMin     = 20
+)
+
+// StageKeepFree is the free space, in GB, the staging disk keeps (ix.12.14).
+// Settings saved before 12.14 have only the old "space it may use": up to
+// 50 GB, staging stopped at about 50 GB free anyway (the rule past the
+// space), so they keep 50; above it, staging stopped at that much free, so
+// they keep that much.
+func (s ixSettings) StageKeepFree() int {
+	switch {
+	case s.StageKeepFreeGB > 0:
+		return s.StageKeepFreeGB
+	case s.StageCapGB > ixStageKeepFreeDefault:
+		return s.StageCapGB
+	}
+	return ixStageKeepFreeDefault
+}
+
 func ixParseSettings(body map[string]any, s ixSettings) (ixSettings, error) {
 	s = ixParseBackupSettings(body, s)
+	if v, ok := body["checkInDownload"].(bool); ok {
+		s.CheckInDownload = &v
+	}
+	if v, ok := body["sampleBig"].(bool); ok {
+		s.SampleBig = &v
+	}
 	if v, ok := body["exportEnabled"].(bool); ok {
 		s.ExportEnabled = v
 	}
@@ -311,7 +369,7 @@ func ixParseSettings(body map[string]any, s ixSettings) (ixSettings, error) {
 		s.AutoRetry = v
 	}
 	for key, dst := range map[string]*bool{"fixityEnabled": &s.FixityEnabled, "substExact": &s.SubstExact, "holdLikely": &s.HoldLikely, "holdForever": &s.HoldForever,
-		"mlFaces": &s.MLFaces, "mlText": &s.MLText, "mlDupes": &s.MLDupes, "downloadPacing": &s.DownloadPacing, "mlAutoStart": &s.MLAutoStart} {
+		"mlFaces": &s.MLFaces, "mlText": &s.MLText, "mlDupes": &s.MLDupes, "downloadPacing": &s.DownloadPacing, "mlAutoStart": &s.MLAutoStart, "autoUpdate": &s.AutoUpdate, "paceByAnswers": &s.PaceByAnswers} {
 		if v, ok := body[key].(bool); ok {
 			*dst = v
 		}

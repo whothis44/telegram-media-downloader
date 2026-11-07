@@ -41,8 +41,18 @@ func TestIxLostStagedFileIsQueuedAgain(t *testing.T) {
 	if !strings.Contains(item, `"Requeue"`) {
 		t.Fatal("the staged download keeps nothing to queue its message again")
 	}
-	if err := os.Remove(filepath.Join(stage, download.StageFolder, filepath.FromSlash(path))); err != nil {
-		t.Fatal(err)
+	// The background mover may hold the file open for a moment while it
+	// tries (and fails) to copy it; Windows refuses to remove an open file.
+	staged := filepath.Join(stage, download.StageFolder, filepath.FromSlash(path))
+	for deadline := time.Now().Add(2 * time.Second); ; {
+		err := os.Remove(staged)
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal(err)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 	if _, err := a.db.Writer.Exec(`UPDATE tgdl_stage_moves SET next_at=0`); err != nil {
 		t.Fatal(err)
@@ -67,7 +77,7 @@ func TestIxLostStagedFileIsQueuedAgain(t *testing.T) {
 
 func TestIxStagingAlerts(t *testing.T) {
 	now := time.Now()
-	st := ixStagingStatus{CapGB: 20}
+	st := ixStagingStatus{KeepFreeGB: 50}
 	if al := ixStagingAlerts(st, now); len(al) != 0 {
 		t.Fatalf("alerts with nothing wrong: %+v", al)
 	}

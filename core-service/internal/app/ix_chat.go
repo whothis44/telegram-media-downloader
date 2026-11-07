@@ -60,6 +60,13 @@ func (a *App) ixRecordChatInfo(ctx context.Context, session *engine.MessageSessi
 // of the discussion group they live in, each marked with the post it
 // belongs to. A comment request that fails is logged and left for the next
 // rescan; it does not fail the messages pass.
+// The most comment requests that may fail in a row, and the longest the
+// comments of one pass may take (ix.12.14).
+var (
+	ixCommentsFailMax = 5
+	ixCommentsTimeMax = time.Hour
+)
+
 func (a *App) ixSaveComments(ctx context.Context, session *engine.MessageSession, dialog telegram.Dialog, groupID string) error {
 	type post struct{ id, comments int }
 	rows, err := a.db.Reader.QueryContext(ctx, `SELECT message_id, comments FROM ix_messages WHERE group_id=? AND comments>0 AND deleted_at=0 ORDER BY message_id DESC`, groupID)
@@ -75,7 +82,15 @@ func (a *App) ixSaveComments(ctx context.Context, session *engine.MessageSession
 	}
 	rows.Close()
 	saved := 0
+	// ix.12.14: bounded, so a big channel whose comment requests keep failing
+	// does not hold the rescan's messages lane for hours: the rest waits for
+	// the next rescan.
+	started, failed := time.Now(), 0
 	for _, p := range posts {
+		if failed >= ixCommentsFailMax || time.Since(started) > ixCommentsTimeMax {
+			a.ixLog("comments on %s: stopped after %d failed requests in a row or %d minutes; the rest at the next rescan", groupID, failed, int(time.Since(started)/time.Minute))
+			break
+		}
 		on := groupID + ":" + strconv.Itoa(p.id)
 		var have int
 		_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM ix_messages WHERE comment_on=?`, on).Scan(&have)
@@ -87,6 +102,7 @@ func (a *App) ixSaveComments(ctx context.Context, session *engine.MessageSession
 			if err := ctx.Err(); err != nil {
 				return err
 			}
+			a.ixBeat(groupID)
 			page, err := session.Replies(dialog, p.id, offset)
 			for try := 0; err != nil && try < len(historyPageRetries) && ctx.Err() == nil && session.Err() == nil && historyConnectionLost(err); try++ {
 				select {
@@ -104,8 +120,10 @@ func (a *App) ixSaveComments(ctx context.Context, session *engine.MessageSession
 				if strings.Contains(err.Error(), "FLOOD_WAIT") || strings.Contains(err.Error(), "FROZEN") {
 					return nil // try the rest at the next rescan
 				}
+				failed++
 				break
 			}
+			failed = 0
 			byGroup := map[string][]tg.MessageClass{}
 			for _, raw := range page.Messages {
 				if g := ixMessageGroup(raw); g != "" {

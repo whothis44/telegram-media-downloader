@@ -343,8 +343,13 @@ func init() {
 		if err := a.ixPreviewRound(ctx); err != nil && ctx.Err() == nil {
 			a.ixLog("copy previews: %v", err)
 		}
-		if err := a.ixSampleRound(ctx, false); err != nil && ctx.Err() == nil {
+		// With the check in the download (ix.12.13) the background checks
+		// are kept for videos already held, to confirm or release them.
+		if err := a.ixSampleRound(ctx, a.ixLoadSettings(ctx).CheckInDownloadOn()); err != nil && ctx.Err() == nil {
 			a.ixLog("checking big videos: %v", err)
+		}
+		if err := a.ixSampleRecheck(ctx); err != nil && ctx.Err() == nil { // ix_sample_recheck.go
+			a.ixLog("comparing kept frames of big videos again: %v", err)
 		}
 	}
 	ixBeforeReleaseHook = func(a *App, ctx context.Context) {

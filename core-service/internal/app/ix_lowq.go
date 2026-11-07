@@ -70,11 +70,20 @@ type ixLowqPlan struct {
 // quality first, waits for room in the staging folder, then ingests.
 func (a *App) ixIngestWork(ctx context.Context, work *engine.Work, message *tg.Message, transport telegram.MediaDownloader) error {
 	message, plan := a.ixLowqPick(ctx, work, message, transport)
+	if plan == nil {
+		// The queued file itself: a big video is checked first (ix_dl_check.go).
+		var row *ixDlCheckRow
+		ctx, row = ixWithDlCheck(ctx, work, message)
+		if row != nil {
+			defer func() { ixMemPartsDrop(a, row.ident) }()
+		}
+	}
 	size := work.FileSize
 	if plan != nil && !plan.upgrade {
 		size = plan.alt.Doc.Size
 	}
-	if err := a.ixWaitStageRoom(ctx, size, transport); err != nil {
+	ctx, err := a.ixStagePlace(ctx, work, size, transport)
+	if err != nil {
 		return err
 	}
 	record, err := a.ingestTelegram(ctx, message, work.GroupID, work.GroupName, work.AccountID, transport)

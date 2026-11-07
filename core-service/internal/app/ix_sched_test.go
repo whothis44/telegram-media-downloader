@@ -671,7 +671,8 @@ func TestIxBudgetGivesChecksABoundedTurnUnderPressure(t *testing.T) {
 			open++
 		}
 	}
-	if share := float64(open) / float64(total); share <= 0 || share > 0.15 {
+	// The turn's share of the window (3 minutes in 10 since ix.12.10), never more.
+	if share := float64(open) / float64(total); share <= 0 || share > float64(ixRemoteBudgetSample)/float64(ixRemoteBudgetWindow)+0.02 {
 		t.Fatalf("samples ran %.0f%% of the time", share*100)
 	}
 	// Previews have their own, smaller turn.

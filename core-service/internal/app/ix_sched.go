@@ -331,6 +331,7 @@ func (a *App) ixSchedStep(ctx context.Context) error {
 	if err := a.ixRanksFromStars(ctx); err != nil {
 		return err
 	}
+	a.ixUnlinkedOnce(ctx) // ix_unlinked.go: once
 	box := a.ixSched()
 	box.mu.Lock()
 	defer box.mu.Unlock()

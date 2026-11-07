@@ -174,8 +174,14 @@ func TestIxCopiesAreMeasured(t *testing.T) {
 		t.Fatalf("kept: %+v", got.Known)
 	}
 	lines := a.ixCopiesDiag(ctx)
-	if len(lines) != 4 || !bytes.Contains([]byte(lines[1]), []byte("probable copies by the video checks 2 / 78 MB")) ||
-		!bytes.Contains([]byte(lines[3]), []byte("previews of files not downloaded (auto, off): 4 photos/videos · 320 px preview kept 0 · to fetch 4")) {
+	// ix.12.11: a line more, the parts kept from checks (lines[5]); ix.12.13:
+	// another, the checks in downloads (lines[4]).
+	if len(lines) != 7 || !bytes.Contains([]byte(lines[1]), []byte("probable copies by the video checks 2 / 78 MB")) ||
+		!bytes.Contains([]byte(lines[3]), []byte("big-video checks: last hour 0 checks")) ||
+		!bytes.Contains([]byte(lines[3]), []byte("MB or more: the floor in use)")) ||
+		!bytes.Contains([]byte(lines[4]), []byte("big videos checked in their download (on) since start: 0")) ||
+		!bytes.Contains([]byte(lines[5]), []byte("parts kept from checks: reused by downloads")) ||
+		!bytes.Contains([]byte(lines[6]), []byte("previews of files not downloaded (auto, off): 4 photos/videos · 320 px preview kept 0 · to fetch 4")) {
 		t.Fatalf("diagnostics: %q", lines)
 	}
 }
