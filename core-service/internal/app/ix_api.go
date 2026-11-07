@@ -276,6 +276,7 @@ func (a *App) handleIxQueueAdd(w http.ResponseWriter, r *http.Request) {
 				patch["enabled"] = false
 			}
 			if code, out := ixCall(ctx, a.handleAPIGroupSave, http.MethodPut, "/api/groups/"+id, patch, map[string]string{"id": id}); code >= 300 {
+				a.ixLog("rescan: adding %d group(s) refused: a group's download settings could not be saved (%d: %s)", len(body.Groups), code, toString(out["error"]))
 				writeJSONError(w, http.StatusBadGateway, "could not update "+name+": "+toString(out["error"]))
 				return
 			}
@@ -311,9 +312,13 @@ func (a *App) handleIxQueueAdd(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err != nil {
+		a.ixLog("rescan: adding %d group(s) failed: %v", len(body.Groups), err)
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// ix.12.13: counts only, so the report shows whether an add from the
+	// Priorities page reached the queue.
+	a.ixLog("rescan: %d group(s) added (%d asked, %d skipped as finished, files settings ensured %v)", len(added), len(body.Groups), skipped, body.EnsureFilters)
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "queue": st, "skippedFinished": skipped})
 }
 

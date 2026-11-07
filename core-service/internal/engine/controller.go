@@ -1253,6 +1253,14 @@ func (c *Controller) worker(run *running, index int) {
 		}
 		budget.stop()
 		wasCancelled := ctx.Err() != nil
+		// A check just before the transfer decided the file waits (ix.12.13):
+		// back to the queue paused, no attempt spent, with its reason.
+		var deferred *telegram.DownloadDeferred
+		if !errors.As(err, &deferred) || wasCancelled {
+			deferred = nil
+		} else {
+			err, wasCancelled = nil, true
+		}
 		smaller = errors.Is(err, telegram.ErrDownloadMakeRoom)
 		if errors.Is(err, telegram.ErrDownloadYield) {
 			// Back to the queue as it was: no bytes moved, no attempt spent.
@@ -1280,7 +1288,24 @@ func (c *Controller) worker(run *running, index int) {
 			retry = time.Now().Add(time.Second * time.Duration(1<<min(work.Attempts-1, 8)))
 		}
 		finishCtx, stop := context.WithTimeout(context.Background(), 10*time.Second)
-		finishErr := c.work.Finish(finishCtx, work, err, wasCancelled || flooded, retry)
+		var finishErr error
+		held := false
+		if deferred != nil {
+			d := deferred
+			held, finishErr = c.work.FinishDeferred(finishCtx, work, func(ctx context.Context, tx *sql.Tx) error {
+				if d.Hold == nil {
+					return nil
+				}
+				e := d.Hold(ctx, tx)
+				if e != nil && d.Failed != nil {
+					d.Failed(e)
+				}
+				return e
+			})
+		}
+		if finishErr == nil && !held {
+			finishErr = c.work.Finish(finishCtx, work, err, wasCancelled || flooded, retry)
+		}
 		stop()
 		if finishErr != nil {
 			run.cancel(fmt.Errorf("finish work: %w", finishErr))

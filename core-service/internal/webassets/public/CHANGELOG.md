@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.18-ix.12.13] — 2026-11-07
+
+### Added
+- **Every big video is checked as the first step of its own download.** The download worker that takes a big video (at or above the check floor in use) first reads its sample parts through the download's own connection, samples the frames and compares them with the saved videos' fingerprints. A probable copy goes back to the queue held at the back, and the worker takes its next file; anything else downloads at once, taking the parts the check read (kept on disk as before, and in memory for that download either way, so they are not fetched twice even when the disk is under its free-space floor). No background job has to keep ahead of the downloads any more, and a video already queued is checked the first time it comes up, so the queue as it is is covered from the start. The exact re-upload check (Telegram's hashes) still comes first, and staging after. A download that kept part of an earlier attempt carries on unchecked. Any failure of the check (no ffmpeg, no index, too many parts, a timeout, a program error) means the video downloads, never an error, and the attempt is not counted. At most 6 checks run at once; a video that waits 2 minutes for one downloads unchecked. A check that failed before for a passing reason gets one more try. The time a check takes does not count against the download's time limit. Settings → "Check each big video as the first step of its own download" (on) turns it off without a release: downloads then behave as in 12.12. With it on, the background checks are kept for videos already held, to confirm or release them.
+- The download queue can now take a claimed file back held at the back, without counting an attempt, with the reason it is held written in the same transaction; if anything fails there, the file goes back to the queue as it was and downloads on its next turn.
+- Report: big videos checked in their download since the start, held at the back (copies, partly the same), no match, checks that failed and downloaded anyway (by reason), MB of parts, the seconds a check added on average, and big videos downloaded without a check (by reason).
+- Priorities: groups in the rescan that are not ranked are listed first under "Not ranked", marked "in the rescan", and one button puts them at the end of the ranking. Adding groups in the Rescan tab says whether they were ranked.
+
+### Changed
+- **Partly-same videos of ranked groups keep their place in the rank order.** A video only partly the same as a saved one (3 or 4 of 8 sampled frames) waited at the back of the queue since 12.5. In ranked groups it now downloads in its group's rank order: it is mostly footage the archive does not have, in the groups that matter most. Those held before go back to their place, and so do those of a group ranked later. Unranked groups keep the 12.5 rule; probable copies stay held.
+- The check's ffmpeg decodes with one thread.
+
+### Fixed
+- **The video index no longer switches to the CPU because of broken files.** A GPU decode that failed counted against the GPU even when the file could not be read at all (a broken upload, saved exactly as Telegram has it); three such files in a run switched the whole index to the CPU. Now only a file the CPU then reads counts against the GPU.
+- **The shared report hid a Telegram document ID in a file name.** A generated name such as `document_<id>_<n>_<hash>.m4v` came through: digits after `_` were not seen as a number, `m4v` (and `3gp`, `flv`, `wmv`, `mpeg`, `ts`, `wav`, `flac`, `opus`, `aac`, `bin` and others) were not known extensions, and a path right after a placeholder such as `<name>` was not seen as a path. Long digit runs are now hidden anywhere, short hex runs that mix digits and letters too, and the report guard test checks such names.
+- Priorities → "Add it to the rescan": when the server refused, the message vanished at once with the page's reload, so the click looked as if it did nothing. It now stays, and the log notes every add (counts only), so the report shows whether it reached the queue.
+- Priorities: a group queued again in the rescan was shown "not fully read" although its messages had all been read before.
+
 ## [3.4.18-ix.12.12] — 2026-11-06
 
 ### Changed

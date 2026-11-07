@@ -256,6 +256,28 @@ func (a *App) ixKeptPartsFor(id telegram.MediaIdentity) (kept telegram.KeptParts
 		return nil
 	}
 	ident := ixPartIdent(id)
+	// Parts a check in this download read (ix.12.13) come first, from memory.
+	mem := ixMemPartsGet(a, ident)
+	disk := a.ixKeptPartsOnDisk(id, ident)
+	switch {
+	case mem == nil:
+		return disk
+	case disk == nil:
+		return func(index int) ([]byte, bool) {
+			p, ok := mem[int64(index)]
+			return p, ok && len(p) > 0
+		}
+	}
+	return func(index int) ([]byte, bool) {
+		if p, ok := mem[int64(index)]; ok && len(p) > 0 {
+			return p, true
+		}
+		return disk(index)
+	}
+}
+
+// ixKeptPartsOnDisk: the parts kept on disk for one file (ix.12.11).
+func (a *App) ixKeptPartsOnDisk(id telegram.MediaIdentity, ident string) telegram.KeptParts {
 	base := a.ctx
 	if base == nil {
 		base = context.Background()

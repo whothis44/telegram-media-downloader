@@ -57,6 +57,9 @@ type ixGroupCoverage struct {
 	// NotQueued: files are missing and nothing will queue them until the group
 	// is in the rescan (the page offers to add it, ix.12.3).
 	NotQueued bool `json:"notQueued"`
+	// InRescan: waiting or running in the rescan queue (ix.12.13: the
+	// Priorities page lists these first and offers to rank them).
+	InRescan bool `json:"inRescan"`
 }
 
 const ixNotQueued = "files missing but not queued: add it to the rescan"
@@ -315,10 +318,11 @@ func (a *App) ixPrioritiesMeasure(ctx context.Context) ixPrioritiesInfo {
 	queueState := map[string]ixQueueItem{}
 	for _, it := range q.Items {
 		queueState[it.GroupID] = it
-		if it.State == "done" {
+		// ix.12.13: read fully once (an earlier whole walk), or in this pass
+		// (its files pass, or done) is "read": a group queued again was shown
+		// "not fully read" though its messages had all been read before.
+		if it.State == "done" || it.Phase == ixPhaseFiles {
 			scanned[it.GroupID] = true
-		} else {
-			scanned[it.GroupID] = false
 		}
 	}
 	names := map[string]string{}
@@ -359,6 +363,9 @@ func (a *App) ixPrioritiesMeasure(ctx context.Context) ixPrioritiesInfo {
 		c := &info.Groups[i]
 		c.Waiting = ixCoverageWaiting(c, queueState[c.GroupID], focus)
 		c.NotQueued = c.Waiting == ixNotQueued
+		if q, ok := queueState[c.GroupID]; ok {
+			c.InRescan = q.State == "waiting" || q.State == "running"
+		}
 		if focus == "" && c.Place > 0 && (c.Left > 0 || c.Needed.Files > 0) {
 			focus = c.Name
 			info.Focus = focus

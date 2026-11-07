@@ -48,6 +48,16 @@ func (l *Library) partLoad(ctx context.Context, item Item, stageDir string) part
 	return row
 }
 
+// partOfAttempt: an earlier attempt kept a part of this item's file, in the
+// library or a staging folder (ix.12.13: such a download is not checked
+// again, it carries on).
+func (l *Library) partOfAttempt(ctx context.Context, item Item) bool {
+	var n int
+	err := l.reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM tgdl_part_progress WHERE group_id=? AND message_id=? AND identity=?`,
+		item.GroupID, item.MessageID, item.Identity.Key()).Scan(&n)
+	return err == nil && n > 0
+}
+
 // partForget removes a kept part and its record.
 func (l *Library) partForget(ctx context.Context, item Item, row partRow) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)

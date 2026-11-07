@@ -377,6 +377,7 @@ function viewCopySettings(s) {
 <label><input type="checkbox" data-set="holdLikely" ${s.holdLikely ? 'checked' : ''}> Hold probable copies at the back of the queue: videos as long, as large and with the same preview as one already saved download after everything else.</label>
 <label style="margin-left:22px"><input type="checkbox" data-set="holdForever" ${s.holdForever ? 'checked' : ''}> …and keep them held until I release them (“Download the held files now”, above)</label>
 <label><input type="checkbox" data-set="sampleBig" ${(s.sampleBig ?? s.holdLikely) ? 'checked' : ''}> Check big videos by sampling: a few frames across a queued video of 200 MB or more are read (about 10 MB) and compared with saved videos. A match holds it at the back; a held video that matches nothing goes back to its place. With holding off, matches are only counted.</label>
+<label><input type="checkbox" data-set="checkInDownload" ${s.checkInDownload !== false ? 'checked' : ''}> Check each big video as the first step of its own download (with the setting above): a probable copy goes back to the queue, held at the back; anything else downloads at once, reusing the parts the check read. Off: big videos are checked only in the background, as before 12.13.</label>
 <label><input type="checkbox" data-set="skipConfirmed" ${s.confirmedGoEarly ? '' : 'checked'}> Skip videos matched by sampled frames until everything else is done (recommended): held videos whose frames, sampled across the file without downloading it, match a saved video. A match is probable, not proven. “Download the held files now” (above) still fetches them.</label>
 <label><input type="checkbox" data-set="copyThumbs" ${s.copyThumbsOff ? '' : 'checked'}> Compare Telegram's small previews of queued videos and large pictures with saved files (needs image recognition; one small request per file, a few seconds apart). The previews are kept and shown in the browser for files not downloaded.</label>
 <label>Sharper previews of everything not downloaded: <select class="t" data-set-select="previewsAll">${[['auto', 'while Telegram has set a deletion date (recommended)'], ['on', 'always'], ['off', 'never']].map(([v, l]) => `<option value="${v}" ${(s.previewsAll || 'auto') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
@@ -435,6 +436,7 @@ function viewRescan() {
   let h = `<div class="card"><h2>Rescan everything</h2><div class="muted">Full history of every group, one group after another, with photos, videos <b>and files/documents</b> switched on. Groups already in the queue are skipped.</div>
 <div class="btns"><button class="b primary" data-act="p-everything" ${notQueued.length ? '' : 'disabled'}>Rescan all ${notQueued.length} group(s)</button></div></div>`;
   h += viewRescanRules(s.settings);
+  if (state.rescanNote) h += `<div class="status">${esc(state.rescanNote)} <button class="mini" data-act="tab" data-key="priorities">Open Priorities</button></div>`;
   h += `<div class="status">${head} Two lanes run side by side, one group each. <b>Messages:</b> every group's history is saved, without waiting for downloads. <b>Files:</b> as soon as a group's messages are saved, it is walked again to fetch the files still missing (failed files get another try too). <b>★ First</b> groups go on the <a href="#priorities">ranked list</a>: first in both lanes, and their files download first. Runs inside the server — you can close this page.${q.notice ? `<div class="muted" style="margin-top:4px">${esc(q.notice)}</div>` : ''}<div style="margin-top:6px">${viewDlState()}</div></div>`;
   h += `<div class="btns" style="margin-bottom:12px">${q.running ? `<button class="b" data-act="q-pause">Pause</button>` : `<button class="b primary" data-act="q-start" ${counts.waiting ? '' : 'disabled'}>Start</button>`}
 <button class="b" data-act="q-clear-finished" ${counts.done + counts.failed ? '' : 'disabled'}>Remove finished</button><button class="b" data-act="q-clear" ${items.length ? '' : 'disabled'}>Clear queue</button>
@@ -499,7 +501,10 @@ async function loadPrio() {
 function prioOrder() { return ((state.prio && state.prio.groups) || []).filter((g) => g.rank > 0).sort((a, b) => a.rank - b.rank).map((g) => g.groupId); }
 function prioOthersShown() {
   const qq = (state.prioSearch || '').trim().toLowerCase();
-  return ((state.prio && state.prio.groups) || []).filter((g) => !g.place && (!qq || g.name.toLowerCase().includes(qq)));
+  // ix.12.13: groups in the rescan come first, so a group just added there
+  // is found here at once (before, it sat far down, with nothing counted yet).
+  const list = ((state.prio && state.prio.groups) || []).filter((g) => !g.place && (!qq || g.name.toLowerCase().includes(qq)));
+  return list.filter((g) => g.inRescan).concat(list.filter((g) => !g.inRescan));
 }
 // A change shows at once; the server is told behind it. Changes made while it is
 // being told go together in one more request, the latest order only.
@@ -604,6 +609,10 @@ function viewPriorities() {
   h += `<div class="status">${p.focus ? `<b>Going first now:</b> ${esc(p.focus)}.<br>` : ''}Each file counted once across all groups: <b>${fmtNum((d.saved || {}).files)}</b> saved (${fmtSize((d.saved || {}).bytes || 0)}), <b>${fmtNum((d.needed || {}).files)}</b> still needed (${fmtSize((d.needed || {}).bytes || 0)}), ${fmtNum((d.probable || {}).files)} probable copies (${fmtSize((d.probable || {}).bytes || 0)}).${p.rate > 0 ? ` Recent speed: ${fmtSize(p.rate3h * 3600)}/h over 3 hours, ${fmtSize(p.rateDay * 3600)}/h over the day.` : ''}</div>`;
   if (sel.size) h += `<div class="sticky"><div class="btns"><b>${fmtNum(sel.size)} ticked</b><button class="b primary" data-act="pr-batch" data-key="first">Put first</button><button class="b" data-act="pr-batch" data-key="last">Put last</button><span class="muted">or at rank</span><input class="t" type="number" min="1" style="width:76px" aria-label="Rank to move the ticked groups to" data-in="prioTo" data-focus="prioto" value="${esc(state.prioTo || '')}"><button class="b" data-act="pr-batch" data-key="to">Move</button><button class="b" data-act="pr-batch" data-key="remove">Take off the ranking</button><button class="mini" data-act="pr-untick">Untick all</button></div></div>`;
   h += `<div class="card"><h2>Ranked groups (${ranked.length})</h2>${state.prioBusy ? '<div class="muted" role="status">Saving…</div>' : ''}`;
+  const rescanUnranked = (p.groups || []).filter((g) => !g.place && g.inRescan);
+  if (rescanUnranked.length) {
+    h += `<div class="status">${fmtNum(rescanUnranked.length)} group(s) in the rescan are not ranked: their files go after every ranked group. They are listed first under “Not ranked” below. <button class="b" data-act="pr-rank-rescan">Add ${rescanUnranked.length === 1 ? 'it' : 'them'} to the end of the ranking</button></div>`;
+  }
   const notQueued = ranked.filter((g) => g.notQueued);
   if (notQueued.length) {
     const files = notQueued.reduce((n, g) => n + ((g.needed || {}).files || 0), 0);
@@ -621,7 +630,7 @@ function viewPriorities() {
   }
   h += `</div><div class="card"><h2>Not ranked (${others.length})</h2><div class="muted">These go after every ranked group, private chats and smaller files first while time is short.</div>
 <div class="btns"><input class="t" style="flex:1;min-width:180px" placeholder="Search groups…" data-in="prioSearch" data-focus="prios" value="${esc(state.prioSearch || '')}"><button class="mini" data-act="pr-tick-all" ${others.length ? '' : 'disabled'}>Tick all ${fmtNum(others.length)} shown</button></div>
-<div class="list"><table><tr><th>Group</th><th>Saved</th><th>Through others</th><th>Probable</th><th>Still needed</th></tr>${others.map((g) => `<tr><td>${tick(g)}<b>${esc(g.name)}</b>${g.scanned ? '' : ' <span class="pill">not fully read</span>'}<div class="muted">${esc(g.waiting || '')}</div><button class="mini" data-act="pr-add" data-id="${esc(g.groupId)}">Add to the ranking</button></td><td class="n">${prioCount(g.saved)}</td><td class="n">${prioCount(g.shared)}</td><td class="n">${prioCount(g.probable)}</td><td class="n">${prioCount(g.needed)}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">Nothing here.</td></tr>'}</table></div></div>`;
+<div class="list"><table><tr><th>Group</th><th>Saved</th><th>Through others</th><th>Probable</th><th>Still needed</th></tr>${others.map((g) => `<tr><td>${tick(g)}<b>${esc(g.name)}</b>${g.scanned ? '' : ' <span class="pill">not fully read</span>'}<div class="muted">${esc(g.waiting || '')}</div>${g.inRescan ? ' <span class="pill" title="In the rescan queue (Rescan tab)">in the rescan</span>' : ''}<button class="mini" data-act="pr-add" data-id="${esc(g.groupId)}">Add to the ranking</button></td><td class="n">${prioCount(g.saved)}</td><td class="n">${prioCount(g.shared)}</td><td class="n">${prioCount(g.probable)}</td><td class="n">${prioCount(g.needed)}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">Nothing here.</td></tr>'}</table></div></div>`;
   return h;
 }
 
@@ -923,12 +932,24 @@ $app.addEventListener('click', async (ev) => {
     case 'pr-remove': prioSave(prioOrder().filter((x) => x !== id)); break;
     case 'pr-add': { const o = prioOrder(); if (!o.includes(id)) o.push(id); prioSave(o); break; }
     case 'pr-batch': prioBatch(key); break;
+    case 'pr-rank-rescan': {
+      const o = prioOrder();
+      for (const g of ((state.prio || {}).groups || [])) if (!g.place && g.inRescan && !o.includes(g.groupId)) o.push(g.groupId);
+      prioSave(o); break;
+    }
     case 'pr-rescan-missing': {
       const list = ((state.prio || {}).groups || []).filter((g) => g.place > 0 && g.notQueued).map((g) => ({ id: g.groupId, name: g.name }));
       if (!list.length) break;
       const r = await api('POST', '/api/ix/queue/add', { groups: list, ensureFilters: true, start: false, priority: false });
-      state.prioError = r.ok ? '' : 'Could not add: ' + errText(r);
-      loadPrio(); load(); break;
+      // ix.12.13: say what happened after the reload, which clears
+      // prioError: before, a refused add vanished at once and the click
+      // looked as if it did not stick.
+      let said = '';
+      if (!r.ok) said = 'Could not add: ' + errText(r);
+      else if ((r.data || {}).skippedFinished > 0) said = `Not added: ${fmtNum(r.data.skippedFinished)} group(s) are marked finished. Reopen them in Rescan → Choose groups first.`;
+      await loadPrio(); load();
+      if (said) { state.prioError = said; render(); }
+      break;
     }
     case 'u-start': case 'u-cancel': case 'u-now': {
       if (act === 'u-now') {
@@ -1018,7 +1039,13 @@ $app.addEventListener('click', async (ev) => {
       for (const x of $app.querySelectorAll('input[data-pick]')) names.set(x.getAttribute('data-pick'), x.getAttribute('data-name'));
       const list = [...state.pick].map((gid) => ({ id: gid, name: names.get(gid) || gid }));
       const r = await api('POST', '/api/ix/queue/add', { groups: list, ensureFilters: state.ensureFilters, start: true, priority: act === 'p-add-first' });
-      if (r.ok) { state.pick.clear(); state.pickOnly = false; state.pickSearch = ''; if (r.data.skippedFinished) state.error = `${r.data.skippedFinished} finished group(s) were left out.`; } else state.error = 'Could not add: ' + errText(r);
+      if (r.ok) {
+        state.pick.clear(); state.pickOnly = false; state.pickSearch = '';
+        if (r.data.skippedFinished) state.error = `${r.data.skippedFinished} finished group(s) were left out.`;
+        // ix.12.13: say where they are on the ranking, which a plain add does not change.
+        const n = list.length - (r.data.skippedFinished || 0);
+        state.rescanNote = act === 'p-add-first' ? `Added ${n} group(s) and put them first on the ranking.` : `Added ${n} group(s) to the rescan. They are not ranked, so their files go after every ranked group: rank them (★ when adding, or “Add them to the end of the ranking” on Priorities).`;
+      } else state.error = 'Could not add: ' + errText(r);
       load(); break;
     }
     case 'c-filter': state.filter = key; render(); break;

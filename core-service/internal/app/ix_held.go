@@ -215,6 +215,9 @@ func (a *App) ixHeldStep(ctx context.Context) error {
 	if err := a.ixHeldOutweighed(ctx); err != nil {
 		return err
 	}
+	if _, err := a.ixReleasePartialRanked(ctx); err != nil {
+		return err
+	}
 	if s.HoldLikely {
 		if err := a.ixHeldTriage(ctx); err != nil {
 			return err

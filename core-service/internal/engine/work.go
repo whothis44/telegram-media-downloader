@@ -543,6 +543,34 @@ func (s *WorkStore) Finish(ctx context.Context, w *Work, cause error, cancelled 
 	return err
 }
 
+// FinishDeferred (ix.12.13) takes a claimed row back pending and paused,
+// without counting its attempt, and runs hold in the same transaction (it
+// records why the row waits). False when the row is no longer this claim's
+// (nothing changed then), or when hold failed (rolled back): the caller
+// then finishes the row as cancelled. An error is the database's.
+func (s *WorkStore) FinishDeferred(ctx context.Context, w *Work, hold func(context.Context, *sql.Tx) error) (bool, error) {
+	tx, err := s.writer.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `UPDATE tgdl_work SET status='pending',paused=1,error=NULL,retry_at=0,
+ attempts=MAX(0,attempts-1),claim_generation=NULL,updated_at=?
+ WHERE id=? AND status='processing' AND claim_generation=? AND generation=?`, time.Now().UnixMilli(), w.ID, w.Generation, w.Generation)
+	if err != nil {
+		return false, err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return false, nil
+	}
+	if hold != nil {
+		if hold(ctx, tx) != nil {
+			return false, nil // rolled back: the caller finishes it as cancelled
+		}
+	}
+	return true, tx.Commit()
+}
+
 // IsCurrent closes the interval between claiming work and registering its
 // cancellation function. Later edits cancel through the active map.
 func (s *WorkStore) IsCurrent(ctx context.Context, w *Work) (bool, error) {

@@ -358,6 +358,9 @@ var ixSampleFrame = func(ctx context.Context, address string, t float64) (ixSamp
 	// Telegram sends the parts).
 	cmd := exec.CommandContext(ctx, bin, "-hide_banner", "-nostdin", "-loglevel", "info", "-reconnect", "0",
 		"-rw_timeout", strconv.FormatInt(ixSampleHardTimeout.Microseconds(), 10),
+		// One decoding thread (ix.12.13): one key frame needs no more, and
+		// several checks may run at once in downloads.
+		"-threads", "1",
 		"-noaccurate_seek", "-copyts", "-ss", strconv.FormatFloat(t, 'f', 2, 64), "-i", address,
 		"-frames:v", "1", "-an", "-sn", "-dn", "-vf", fmt.Sprintf("scale=%d:%d:flags=area,format=gray,showinfo", ixVSide, ixVSide),
 		"-f", "rawvideo", "-pix_fmt", "gray", "pipe:1")
@@ -511,6 +514,11 @@ func (a *App) ixSampleCheck(ctx context.Context, r ixCopyReader, msg *tg.Message
 	defer func() {
 		if outer.Err() == nil {
 			a.ixPartsKeep(outer, ixPartIdent(att.Identity), file.partsNow())
+		}
+		// A check in a download keeps them in memory for its transfer too
+		// (ix.12.13, ix_dl_check.go).
+		if sink, ok := outer.Value(ixSamplePartsSinkKey{}).(func(map[int64][]byte)); ok {
+			sink(file.partsNow())
 		}
 	}()
 	address, stop, err := ixServeRemote(file)
@@ -995,10 +1003,15 @@ func (a *App) ixSampleRecord(ctx context.Context, j ixSampleJob, f ixCopyFacts, 
 	if how == "confirmed" {
 		how = "matched by sampled frames" // probable, not proven
 	}
+	partialRanked := false
 	if res.Result == "nomatch" && res.Best >= ixSamplePartialHit {
 		// Not a copy, but partly the same footage: held at the back below
-		// (ix.12.9: the line said only "nomatch").
+		// (ix.12.9: the line said only "nomatch"), except in a ranked group
+		// (ix.12.13), where it keeps its place in the rank order.
 		how = "partly the same footage, not a copy: at the back of the queue while likely copies are held"
+		if partialRanked = a.ixGroupRanked(ctx, j.work); partialRanked {
+			how = "partly the same footage, not a copy: keeps its place (ranked group)"
+		}
 	}
 	if res.Result == "failed" {
 		how += " [" + res.Why + map[bool]string{true: ", final", false: ", tried again later"}[final] + "]"
@@ -1035,7 +1048,7 @@ func (a *App) ixSampleRecord(ctx context.Context, j ixSampleJob, f ixCopyFacts, 
 	if !a.ixLoadSettings(ctx).HoldLikely {
 		return nil // recorded; with holding off nothing moves
 	}
-	if res.Result == "nomatch" && res.Best >= ixSamplePartialHit && res.Of != "" && !a.ixLoadSettings(ctx).HoldForever {
+	if res.Result == "nomatch" && res.Best >= ixSamplePartialHit && res.Of != "" && !a.ixLoadSettings(ctx).HoldForever && !partialRanked {
 		// (Held copies kept for ever never download; a partly matching video
 		// is not a copy, so then it is not held at all.)
 		// Part of it is footage the archive has (another cut, a compilation

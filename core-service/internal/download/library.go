@@ -108,7 +108,13 @@ type Library struct {
 	// key is downloading, so that Substitute can find that one saved (the
 	// app keys by kind, MIME type and exact size, for what it can confirm).
 	// After the wait the item downloads as usual.
-	SubstituteWait    func(context.Context, Item) (string, bool)
+	SubstituteWait func(context.Context, Item) (string, bool)
+	// Check (optional, ix.12.13) runs after Substitute found no saved copy
+	// and before the transfer (staged or not), unless a part of an earlier
+	// attempt is kept (the download then carries on). An error it returns
+	// ends this ingest with that error: the app's sampled check of a big
+	// video returns telegram.DownloadDeferred for a probable copy.
+	Check             func(context.Context, Item, Client) error
 	SubstituteWaitMax time.Duration // 0: 5 minutes
 	// Blocked (optional): the item's identity is to be downloaded for real
 	// (the archive's "Fetch the real files"): it is not matched by its
@@ -317,6 +323,11 @@ func (l *Library) Ingest(ctx context.Context, item Item, client Client) (Record,
 				}
 				return record, err
 			}
+		}
+	}
+	if l.Check != nil && !l.partOfAttempt(ctx, item) {
+		if err := l.Check(ctx, item, client); err != nil {
+			return Record{}, err
 		}
 	}
 	if st := l.stagingFor(ctx, item); st.Dir != "" {

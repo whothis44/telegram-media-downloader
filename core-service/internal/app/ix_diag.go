@@ -34,17 +34,37 @@ var (
 	// A relative path: a token with a slash, to the last extension on the
 	// line, whatever its characters (names in any script, with $, &, emoji,
 	// dots or spaces): hiding too much is safe, too little is not (ix.12.5).
-	ixReUnix = regexp.MustCompile(`(?:^|[\s"'(=])([^\s"'<>|]*/[^"'<>|\r\n]*\.[A-Za-z0-9]{1,5})(?:[\s"'),;]|$)`)
+	// ix.12.13: it also starts after '>', the end of a placeholder such as
+	// <name> put in place of a chat name inside the path.
+	ixReUnix = regexp.MustCompile(`(?:^|[\s"'(=>])([^\s"'<>|]*/[^"'<>|\r\n]*\.[A-Za-z0-9]{1,5})(?:[\s"'),;]|$)`)
 	// A file name alone: from the last ": ", quote, slash or bracket before
-	// a media extension, spaces included.
-	ixReFile = regexp.MustCompile(`[^"'<>|/:\r\n]*?[^\s"'<>|/:]\.(?i:jpe?g|png|gif|webp|mp4|mkv|mov|avi|webm|mp3|ogg|oga|m4a|pdf|zip|rar|7z|docx?|xlsx?|txt|apk|exe|heic|tgs)\b`)
+	// a media extension, spaces included. ix.12.13: more extensions (m4v,
+	// 3gp, flv, wmv, mpeg, ts, wav, flac, opus, aac, bin and others Telegram's
+	// MIME types give generated names).
+	ixReFile = regexp.MustCompile(`[^"'<>|/:\r\n]*?[^\s"'<>|/:]\.(?i:jpe?g|jfif|png|gif|webp|bmp|tiff?|heic|heif|avif|svg|mp4|m4v|mp4v|mpg4|f4v|mkv|mk3d|mov|qt|avi|webm|3gp|3g2|flv|wmv|asf|mpe?g|mpe|m2ts|mts|ts|vob|ogv|rmvb|divx|mp3|ogg|oga|opus|m4a|m4b|aac|wav|flac|wma|amr|mka|pdf|zip|rar|7z|tar|gz|docx?|xlsx?|pptx?|txt|epub|apk|exe|tgs|bin|dat|part)\b`)
 	// A message number: every one, not only long ones.
-	ixReMsgNum  = regexp.MustCompile(`#\d+`)
-	ixReAt      = regexp.MustCompile(`@[A-Za-z][A-Za-z0-9_]{3,}`)
-	ixReEmailD  = regexp.MustCompile(`[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}`)
-	ixReLongNum = regexp.MustCompile(`\b\d{6,}\b`)
-	ixReHex     = regexp.MustCompile(`\b[0-9a-fA-F]{24,}\b`)
+	ixReMsgNum = regexp.MustCompile(`#\d+`)
+	ixReAt     = regexp.MustCompile(`@[A-Za-z][A-Za-z0-9_]{3,}`)
+	ixReEmailD = regexp.MustCompile(`[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}`)
+	// ix.12.13: a run of 6+ digits anywhere, not only between word
+	// boundaries: '_' is a word character, so the Telegram ID in a generated
+	// name such as document_<id>.mp4 had none before it. A 6+ digit count
+	// becomes <n> too, which is fine.
+	ixReLongNum = regexp.MustCompile(`\d{6,}`)
+	// A hex run: 24+ characters anywhere, or 8+ that mix digits and letters
+	// (the hash part of a generated file name).
+	ixReHex = regexp.MustCompile(`[0-9a-fA-F]{8,}`)
 )
+
+// ixHideHex is the replacement for ixReHex: a long run always, a shorter one
+// only when it mixes digits and letters, so words such as "deadline" or
+// plain numbers (handled by ixReLongNum) stay as they are.
+func ixHideHex(m string) string {
+	if len(m) >= 24 || (strings.ContainsAny(m, "0123456789") && strings.ContainsAny(m, "abcdefABCDEF")) {
+		return "<hash>"
+	}
+	return m
+}
 
 func (r *ixRedactor) group(id string) string {
 	if t, ok := r.groups[id]; ok {
@@ -76,7 +96,7 @@ func (r *ixRedactor) clean(s string) string {
 	})
 	s = ixReUnix.ReplaceAllStringFunc(s, func(m string) string {
 		lead, tail := "", ""
-		if len(m) > 0 && strings.ContainsRune(" \"'(=", rune(m[0])) {
+		if len(m) > 0 && strings.ContainsRune(" \"'(=>\t", rune(m[0])) {
 			lead = m[:1]
 		}
 		if n := len(m); n > 0 && strings.ContainsRune(" \"'),;\t\r\n", rune(m[n-1])) {
@@ -94,7 +114,7 @@ func (r *ixRedactor) clean(s string) string {
 	s = ixReMsgNum.ReplaceAllString(s, "#<n>")
 	s = ixReGroupID.ReplaceAllStringFunc(s, r.group)
 	s = ixReAt.ReplaceAllString(s, "<user>")
-	s = ixReHex.ReplaceAllString(s, "<hash>")
+	s = ixReHex.ReplaceAllStringFunc(s, ixHideHex)
 	s = ixReLongNum.ReplaceAllString(s, "<n>")
 	if len(s) > 400 {
 		s = s[:400] + "…"

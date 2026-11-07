@@ -41,8 +41,20 @@ func TestIx127EveryLogLineIsRedacted(t *testing.T) {
 		`-1001234567890`,
 		`@secretuser_name`,
 		`deadbeefdeadbeefdeadbeefdeadbeef00`,
+		// ix.12.13: generated names carry Telegram's document and photo IDs
+		// after '_', and a path may follow a placeholder put in place of a
+		// chat name.
+		`G1/` + chat + `/videos/document_1234567890123456789_1234_ab12cd34ef.m4v`,
+		`G1/<name>/videos/document_1234567890123456789_1234_ab12cd34ef.m4v`,
+		`document_5555555555555555555.mp4`,
+		`photo_4444444444444444444.jpg`,
+		`document_3333333333333333333.bin`,
+		`秘密 clip.3gp`,
+		`名前 old.flv`,
+		`movie 名前.wmv`,
 	}
-	leaks := []string{"名前", "🎉", "Ünïcødé", "秘密", "Тема", "🎈", "secretchannel", "1234567890", "secretuser", "deadbeefdeadbeef"}
+	leaks := []string{"名前", "🎉", "Ünïcødé", "秘密", "Тема", "🎈", "secretchannel", "1234567890", "secretuser", "deadbeefdeadbeef",
+		"1234567890123456789", "5555555555", "4444444444", "3333333333", "ab12cd34ef"}
 	r := &ixRedactor{groups: map[string]string{}}
 	for _, n := range []string{chat, topic} {
 		r.groups[n] = "<name>"
@@ -158,4 +170,22 @@ func ix127LogFormats(t *testing.T) []ix127Format {
 		})
 	}
 	return out
+}
+
+// ix.12.13: the line that leaked in the 18:00-20:00 reports of 11-06, and
+// counts that must still read.
+func TestIx1213GeneratedNamesAreHidden(t *testing.T) {
+	r := &ixRedactor{groups: map[string]string{"Some Chat": "G2"}, names: []string{"Some Chat"}}
+	cases := map[string]string{
+		"not downloading -1001234567890 #55: same bytes as Some Chat/videos/document_1234567890123456789_1234_ab12cd34ef.m4v (hashes)": "not downloading G2 #<n>: same bytes as <path> (hashes)",
+		"same bytes as G1/<name>/videos/document_1234567890123456789_1234_ab12cd34ef.m4v (hashes)":                                     "same bytes as G1/<name><path> (hashes)",
+		"open document_5555555555555555555.mp4: denied":                                                                                "<file>: denied",
+		"took 37 files / 338 MB, 12 of 20 parts, deadline 2026-11-30":                                                                  "took 37 files / 338 MB, 12 of 20 parts, deadline 2026-11-30",
+		"read 1234567 bytes": "read <n> bytes",
+	}
+	for in, want := range cases {
+		if got := r.clean(in); got != want {
+			t.Errorf("clean(%q)\n got %q\nwant %q", in, got, want)
+		}
+	}
 }

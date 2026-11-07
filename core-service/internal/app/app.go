@@ -245,6 +245,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		return nil, err
 	}
 	a.library.Substitute = a.ixSubstitute // archive: exact re-uploads are checked, not downloaded
+	a.library.Check = a.ixDlCheck         // archive: big videos are checked by sampled frames first (ix.12.13)
 	a.library.Adopt = a.ixAdopt           // a copy already in the library by hand is checked, not downloaded again
 	a.library.SubstituteWait = a.ixSubstituteWait
 	a.library.Blocked = a.ixSubstBlocked
