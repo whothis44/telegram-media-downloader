@@ -21,13 +21,16 @@ func TestIxActiveTelegramWaitIsNotAnUnexplainedStall(t *testing.T) {
 
 func TestIxRemoteChecksDeferWithoutRecordingFailure(t *testing.T) {
 	a, ctx := ixTestApp(t)
-	busy := true
-	oldBusy, oldFake, oldReader := ixRemoteChecksBusy, ixSampleFake, ixOpenCopyReader
+	busy, flooded := true, true
+	oldBusy, oldFake, oldReader, oldFlood := ixRemoteChecksBusy, ixSampleFake, ixOpenCopyReader, ixFloodedLately
 	ixRemoteChecksBusy = func(*App) bool { return busy }
+	ixFloodedLately = func(*App) bool { return flooded }
 	ixSampleFake = true
 	opens := 0
 	ixOpenCopyReader = func(*App, context.Context, string) (ixCopyReader, error) { opens++; return &ixFakeReader{}, nil }
-	t.Cleanup(func() { ixRemoteChecksBusy, ixSampleFake, ixOpenCopyReader = oldBusy, oldFake, oldReader })
+	t.Cleanup(func() {
+		ixRemoteChecksBusy, ixSampleFake, ixOpenCopyReader, ixFloodedLately = oldBusy, oldFake, oldReader, oldFlood
+	})
 	s := a.ixLoadSettings(ctx)
 	s.HoldLikely = true
 	s.PreviewsAll = "on"
@@ -40,8 +43,14 @@ func TestIxRemoteChecksDeferWithoutRecordingFailure(t *testing.T) {
 	}
 	a.ixPreviewAllRound(ctx)
 	if !errors.Is(a.ixPreviewAllSignalled(), errIxWaitSignal) {
-		t.Fatal("preview requests did not yield")
+		t.Fatal("preview requests did not yield to a FLOOD_WAIT")
 	}
+	// ix.12.9: the speed limit alone does not stop the previews (it slows them).
+	flooded = false
+	if errors.Is(a.ixPreviewAllSignalled(), errIxWaitSignal) {
+		t.Fatal("preview requests stopped for the speed limit alone")
+	}
+	flooded = true
 	var checks int
 	if err := a.db.Reader.QueryRow(`SELECT count(*) FROM ix_copy_sample WHERE work_id=?`, id).Scan(&checks); err != nil {
 		t.Fatal(err)
@@ -49,7 +58,7 @@ func TestIxRemoteChecksDeferWithoutRecordingFailure(t *testing.T) {
 	if opens != 0 || checks != 0 {
 		t.Fatalf("deferred work opened %d readers and recorded %d failures", opens, checks)
 	}
-	busy = false
+	busy, flooded = false, false
 	if err := a.ixSampleRound(ctx, false); err != nil {
 		t.Fatal(err)
 	}

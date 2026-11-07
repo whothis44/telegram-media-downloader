@@ -363,8 +363,14 @@ func (a *App) ixBuildModel(ctx context.Context) (*ixModel, error) {
 	} else if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
+	// Held copies, with the saved file each looks like. A lesser copy of a file
+	// still queued has none (like_key ''): it is held all the same, and counts
+	// as a probable copy, not as needed (ix.12.3; 3,943 such rows were "needed").
 	held := map[string]string{}
-	if rows, err := a.db.Reader.QueryContext(ctx, `SELECT group_id, message_id, like_key FROM ix_held WHERE released_at=0 AND reason<>'' AND like_key<>''`); err == nil {
+	// Partial matches (only part of the footage matched) are not copies:
+	// needed, though after the rest (ix.12.5).
+	if rows, err := a.db.Reader.QueryContext(ctx, `SELECT h.group_id, h.message_id, h.like_key FROM ix_held h LEFT JOIN ix_copy_hold c ON c.work_id=h.work_id
+		WHERE h.released_at=0 AND h.reason<>'' AND COALESCE(c.how,'')<>'sampled-partial'`); err == nil {
 		for rows.Next() {
 			var g, k string
 			var msg int

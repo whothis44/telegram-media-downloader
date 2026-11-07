@@ -503,6 +503,18 @@ func ixCopyVerified(src, dst, want string) error {
 	return os.Rename(tmp, dst)
 }
 
+// ixHashDiffers: a file to move does not have the bytes recorded.
+type ixHashDiffers struct{ got, want string }
+
+func (e ixHashDiffers) Error() string {
+	return fmt.Sprintf("the file's SHA-256 is %s, not the recorded %s", e.got, e.want)
+}
+
+// ixSkipped marks a step left undone on purpose: the plan goes on.
+type ixSkipped struct{ why string }
+
+func (e ixSkipped) Error() string { return e.why }
+
 // ixMoveVerified moves src to dst: a rename on the same share, otherwise a
 // verified copy and then removal of the source.
 func ixMoveVerified(src, dst, want string) error {
@@ -515,7 +527,7 @@ func ixMoveVerified(src, dst, want string) error {
 			return err
 		}
 		if !strings.EqualFold(got, want) {
-			return fmt.Errorf("the file's SHA-256 is %s, not the recorded %s", got, want)
+			return ixHashDiffers{got, want}
 		}
 	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
@@ -598,6 +610,15 @@ func (a *App) ixApplyPlan(ctx context.Context, id int64) error {
 		case ixNearOp:
 			opErr = a.ixApplyNear(ctx, id, o) // checks, moves and points the entries itself
 			o.Repoint = ""
+		case ixUncatOp:
+			// A copy the catalogue never knew: nothing to point elsewhere
+			// (Repoint names the copy kept, for the check).
+			if a.ixLanded(o) {
+				moved = true
+			} else if opErr = a.ixApplyUncat(ctx, o); opErr == nil {
+				moved = true
+			}
+			o.Repoint = ""
 		case "move", "trash":
 			if o.Op == "trash" {
 				opErr = a.ixCheckKeeper(o)
@@ -621,7 +642,11 @@ func (a *App) ixApplyPlan(ctx context.Context, id int64) error {
 			}
 		}
 		state, msg := "done", ""
-		if opErr != nil {
+		var skip ixSkipped
+		switch {
+		case errors.As(opErr, &skip):
+			state, msg = "skipped", skip.why
+		case opErr != nil:
 			state, msg = "failed", opErr.Error()
 			failure = opErr
 		}
@@ -655,7 +680,7 @@ func (a *App) ixUndoPlan(ctx context.Context, id int64) error {
 	sort.Slice(ops, func(i, j int) bool { return ops[i].Seq > ops[j].Seq })
 	var failure error
 	for _, o := range ops {
-		landed := (o.State == "running" || o.State == "failed") && (o.Op == "move" || o.Op == "trash" || o.Op == ixNearOp) && a.ixLanded(o)
+		landed := (o.State == "running" || o.State == "failed") && (o.Op == "move" || o.Op == "trash" || o.Op == ixNearOp || o.Op == ixUncatOp) && a.ixLanded(o)
 		if o.State != "done" && !landed {
 			continue
 		}
@@ -667,6 +692,8 @@ func (a *App) ixUndoPlan(ctx context.Context, id int64) error {
 			}
 		case ixNearOp:
 			opErr = a.ixUndoNear(ctx, id, o)
+		case ixUncatOp:
+			opErr = ixMoveVerified(a.ixAbs(o.Dst), a.ixAbs(o.Src), o.SHA256)
 		case "move", "trash":
 			opErr = ixMoveVerified(a.ixAbs(o.Dst), a.ixAbs(o.Src), o.SHA256)
 			if opErr == nil && o.Repoint != "" {
@@ -734,6 +761,9 @@ func (a *App) ixRepoint(ctx context.Context, plan int64, o ixMoveOp) error {
 	if _, err = tx.ExecContext(ctx, `UPDATE downloads SET file_path=? WHERE id IN (`+strings.Join(ids, ",")+`)`, o.Repoint); err != nil {
 		return err
 	}
+	if err = ixRepointRefs(ctx, tx, []string{original, o.Src}, o.Repoint); err != nil {
+		return err
+	}
 	if _, err = tx.ExecContext(ctx, `UPDATE ix_moves SET rows=?, src_stored=? WHERE plan_id=? AND seq=?`, strings.Join(ids, ","), original, plan, o.Seq); err != nil {
 		return err
 	}
@@ -779,6 +809,43 @@ func (a *App) ixUnrepoint(ctx context.Context, plan int64, o ixMoveOp) error {
 		if _, err := tx.ExecContext(ctx, `UPDATE downloads SET file_path=? WHERE id IN (`+strings.Join(back, ",")+`)`, original); err != nil {
 			return err
 		}
+		if err := ixRepointRefs(ctx, tx, []string{o.Repoint}, original); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
+}
+
+// ixPathRefs are the archive's other records that name a library file by
+// its path. A move pointed only the catalogue (downloads) at the new place
+// until ix.12.10, so a held copy whose saved look-alike was moved was let go
+// as if that file had left the archive.
+var ixPathRefs = [][2]string{
+	{"ix_held", "like_path"}, {"ix_msg_link", "of_path"}, {"ix_subst", "of_path"},
+	{"ix_vfp", "file_path"}, {"ix_pdq", "file_path"}, {"ix_lowq", "alt_path"}, {"ix_fixity", "path"},
+}
+
+// ixRepointRefs points those records at to (from: the file's old spellings).
+func ixRepointRefs(ctx context.Context, tx *sql.Tx, from []string, to string) error {
+	seen := map[string]bool{}
+	var olds []any
+	for _, f := range from {
+		for _, v := range []string{f, ixNormPath(f), strings.ReplaceAll(ixNormPath(f), "/", `\`)} {
+			if v != "" && v != to && !seen[v] {
+				seen[v] = true
+				olds = append(olds, v)
+			}
+		}
+	}
+	if len(olds) == 0 {
+		return nil
+	}
+	marks := strings.TrimSuffix(strings.Repeat("?,", len(olds)), ",")
+	for _, r := range ixPathRefs {
+		// OR REPLACE: ix_fixity is keyed by the path.
+		if _, err := tx.ExecContext(ctx, `UPDATE OR REPLACE `+r[0]+` SET `+r[1]+`=? WHERE `+r[1]+` IN (`+marks+`)`, append([]any{to}, olds...)...); err != nil {
+			return err
+		}
+	}
+	return nil
 }

@@ -27,15 +27,21 @@ import (
 // the browser shows it ("preview only") and the copy check looks at it
 // without asking Telegram again. It needs no image recognition.
 //
-// It is gentle: one request at a time, at least ixPreviewAllGap apart,
-// through the account's guarded download pools like the copy check. A
-// FLOOD_WAIT, on its own requests or on the downloads', pauses it (five
-// minutes, or as long as Telegram asked). Telegram's speed limit for
-// accounts without Premium (FLOOD_PREMIUM_WAIT) is about volume: each one
-// doubles the time between requests (up to ixPreviewAllGapMax), and a
-// round without one brings it back; one on its own request also pauses it
-// as long as Telegram asked (a minute at least). A read-only archive asks
-// Telegram nothing; without the engine it waits quietly.
+// It is gentle: one request at a time, at least ixPreviewAllGap after the
+// one before ended, through the account's guarded download pools like the
+// copy check. A FLOOD_WAIT, on its own requests or on the downloads',
+// pauses it (five minutes, or as long as Telegram asked; nothing is asked
+// for ten minutes after one on the downloads). Telegram's speed limit for
+// accounts without Premium (FLOOD_PREMIUM_WAIT) is about volume, and a
+// preview is some 9 KB: while the downloads are speed-limited or waiting
+// for parts, the pass goes on at least ixPreviewAllBusyGap apart (ix.12.9;
+// before, it waited for a 30 s turn in ten minutes and, slowed by every
+// speed-limit wait of the downloads, fetched one or two previews in that
+// turn). A speed-limit wait on its own request doubles the time between
+// requests (up to ixPreviewAllGapMax), and a round without one brings it
+// back; it also pauses the pass as long as Telegram asked (a minute at
+// least). A read-only archive asks Telegram nothing; without the engine
+// it waits quietly.
 //
 // Order: private chats first (no public username), then the newest
 // messages; messages deleted on Telegram after the rest. A file posted in
@@ -71,6 +77,12 @@ var (
 	// ixPreviewAllGap is the least time between two requests of the pass
 	// (a message read again counts as one).
 	ixPreviewAllGap = 1500 * time.Millisecond
+	// ixPreviewAllBusyGap is the least time between two requests while the
+	// downloads are speed-limited or waiting for parts: a request holds one
+	// part of one server's download window while Telegram answers it (and
+	// while it waits out a speed-limit wait), so at most a few per cent of
+	// the downloads' parts at this pace; some 250 previews an hour.
+	ixPreviewAllBusyGap = 10 * time.Second
 	// ixPreviewAllIdle is the wait when there is nothing to do.
 	ixPreviewAllIdle = 10 * time.Minute
 )
@@ -191,6 +203,8 @@ func (a *App) ixPreviewAllDiag(ctx context.Context) string {
 	}
 	if p.Why != "" {
 		line += " · " + p.Why
+	} else if p.On && p.Remaining > 0 {
+		line += " · " + a.ixPreviewAllPaceNow()
 	}
 	return line
 }
@@ -319,12 +333,30 @@ func (p *ixPreviewPacer) wait(ctx context.Context) error {
 	return ctx.Err()
 }
 
+// ixPreviewAllHold: the pass stops for now. Telegram told an account to
+// wait (a plain FLOOD_WAIT, a penalty) in the last ten minutes. The speed
+// limit alone does not stop it (ix.12.9): it slows it to
+// ixPreviewAllBusyGap.
+func ixPreviewAllHold(a *App) bool { return ixFloodedLately(a) }
+
 // ixPreviewAllGapNow is the time between two requests now.
 func (a *App) ixPreviewAllGapNow() time.Duration {
 	b := a.ixPreviewAllBox()
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	return ixPreviewAllGap * time.Duration(max(1, b.slower))
+	gap := ixPreviewAllGap * time.Duration(max(1, b.slower))
+	b.mu.Unlock()
+	if gap < ixPreviewAllBusyGap && ixRemoteChecksBusy(a) {
+		gap = ixPreviewAllBusyGap
+	}
+	return gap
+}
+
+// ixPreviewAllPaceNow says how the pass is paced now, for the report.
+func (a *App) ixPreviewAllPaceNow() string {
+	if ixRemoteChecksBusy(a) {
+		return fmt.Sprintf("slow while downloads are speed-limited or waiting: one request at least every %s", a.ixPreviewAllGapNow())
+	}
+	return fmt.Sprintf("one request at least every %s", a.ixPreviewAllGapNow())
 }
 
 // ixPacedReader is a reader whose every request waits its turn.
@@ -350,10 +382,15 @@ func (r *ixPacedReader) before() error {
 	return nil
 }
 
+// after counts the gap from the end of a request: a request that waited
+// out a speed-limit wait does not make the next one start at once.
+func (r *ixPacedReader) after() { r.pacer.last = time.Now() }
+
 func (r *ixPacedReader) FilePart(att telegram.Attachment, offset int64) ([]byte, error) {
 	if err := r.before(); err != nil {
 		return nil, err
 	}
+	defer r.after()
 	return r.ixCopyReader.FilePart(att, offset)
 }
 
@@ -361,6 +398,7 @@ func (r *ixPacedReader) RefreshMessage(m *tg.Message) (*tg.Message, error) {
 	if err := r.before(); err != nil {
 		return nil, err
 	}
+	defer r.after()
 	return r.ixCopyReader.RefreshMessage(m)
 }
 
@@ -405,10 +443,12 @@ func (a *App) ixPreviewAllPause(err error) time.Duration {
 }
 
 // ixPreviewAllSignalled looks at the downloads' waits since the last look:
-// a new FLOOD_WAIT stops the pass (errIxWaitSignal); a new speed-limit wait
-// slows it down.
+// a new FLOOD_WAIT stops the pass (errIxWaitSignal). The downloads'
+// speed-limit waits no longer slow it down further (ix.12.9): under the
+// limit they come every few seconds, and ixPreviewAllBusyGap already
+// spaces the requests out.
 func (a *App) ixPreviewAllSignalled() error {
-	if ixPreviewChecksBusy(a) {
+	if ixPreviewAllHold(a) {
 		return errIxWaitSignal
 	}
 	floods, premium := ixPreviewAllSignal(a)
@@ -416,13 +456,10 @@ func (a *App) ixPreviewAllSignalled() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	first := !b.sigSeen
-	moreFloods, morePremium := floods > b.lastFloods, premium > b.lastPremium
+	moreFloods := floods > b.lastFloods
 	b.sigSeen, b.lastFloods, b.lastPremium = true, floods, premium
 	if first {
 		return nil // waits from before the pass looked are not news
-	}
-	if morePremium {
-		b.slowerLocked()
 	}
 	if moreFloods {
 		return errIxWaitSignal
@@ -506,8 +543,8 @@ func (a *App) ixPreviewAllRound(ctx context.Context) time.Duration {
 		a.ixPreviewAllSetWhy("")
 		return 5 * time.Minute
 	}
-	if ixPreviewChecksBusy(a) {
-		a.ixPreviewAllSetWhy("paused: downloads have priority while Telegram is busy or speed-limited")
+	if ixPreviewAllHold(a) {
+		a.ixPreviewAllSetWhy("paused: Telegram asked the downloads to wait (FLOOD_WAIT) in the last 10 minutes")
 		return time.Minute
 	}
 	b := a.ixPreviewAllBox()

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"fmt"
 	"image"
 	"image/jpeg"
 	"math"
@@ -209,6 +210,9 @@ func (a *App) ixHeldStep(ctx context.Context) error {
 	// Held copies first (one whose better copy was saved meanwhile is
 	// checked against that file), then the new files.
 	if err := a.ixHeldRecheck(ctx); err != nil {
+		return err
+	}
+	if err := a.ixHeldOutweighed(ctx); err != nil {
 		return err
 	}
 	if s.HoldLikely {
@@ -458,6 +462,85 @@ func (a *App) ixHoldWork(ctx context.Context, f ixCopyFacts, how, likePath, like
 		return false, err
 	}
 	return true, tx.Commit()
+}
+
+// ixHeldOutweighed acts on evidence the hold rules did not use (ix.12.5):
+//   - a held video whose sampled frames match no saved video (at most
+//     ixSamplePartialHit-1 of them) goes back to its place for good; one with
+//     ixSamplePartialHit or more is partly the same footage: it stays at the
+//     back, as a partial match rather than a probable copy. A check that
+//     failed or timed out says nothing and changes nothing;
+//   - a hold with no record of why (held before reasons were kept) is
+//     forgotten, so the checks see the file as new: it goes back to its
+//     place unless they find a look-alike again, and then the reason is kept.
+func (a *App) ixHeldOutweighed(ctx context.Context) error {
+	rows, err := a.db.Reader.QueryContext(ctx, `SELECT h.work_id, s.note, COALESCE(c.how,'') FROM ix_held h JOIN ix_copy_sample s ON s.work_id=h.work_id
+		JOIN tgdl_work w ON w.id=h.work_id LEFT JOIN ix_copy_hold c ON c.work_id=h.work_id
+		WHERE h.released_at=0 AND h.reason<>'' AND w.status='pending' AND s.result='nomatch' AND s.samples>0
+		AND COALESCE(c.how,'')<>'sampled-partial' LIMIT 500`)
+	if err != nil {
+		return err
+	}
+	type found struct {
+		id   int64
+		best int
+	}
+	var fs []found
+	for rows.Next() {
+		var id int64
+		var note, how string
+		if rows.Scan(&id, &note, &how) != nil {
+			continue
+		}
+		best := 0
+		if _, err := fmt.Sscanf(note, "at most %d of", &best); err != nil {
+			continue // no count: says nothing
+		}
+		fs = append(fs, found{id, best})
+	}
+	rows.Close()
+	back, partial := 0, 0
+	for _, f := range fs {
+		if f.best >= ixSamplePartialHit {
+			if _, err := a.db.Writer.ExecContext(ctx, `UPDATE ix_copy_hold SET how='sampled-partial' WHERE work_id=?`, f.id); err != nil {
+				return err
+			}
+			partial++
+			continue
+		}
+		if err := a.ixLetGo(ctx, f.id); err != nil {
+			return err
+		}
+		back++
+	}
+	rows, err = a.db.Reader.QueryContext(ctx, `SELECT h.work_id FROM ix_held h LEFT JOIN ix_copy_hold c ON c.work_id=h.work_id JOIN tgdl_work w ON w.id=h.work_id
+		WHERE h.released_at=0 AND h.reason<>'' AND c.work_id IS NULL AND w.status='pending' LIMIT 500`)
+	if err != nil {
+		return err
+	}
+	var unknown []int64
+	for rows.Next() {
+		var id int64
+		if rows.Scan(&id) == nil {
+			unknown = append(unknown, id)
+		}
+	}
+	rows.Close()
+	for _, id := range unknown {
+		if err := a.ixUnhold(ctx, id); err != nil {
+			return err
+		}
+	}
+	if back > 0 {
+		a.ixLog("%d held video(s) go back to their place: their sampled frames match no saved video", back)
+	}
+	if partial > 0 {
+		a.ixLog("%d held video(s) are partly the same footage as a saved video (sampled frames): they stay at the back, as partial matches", partial)
+	}
+	if len(unknown) > 0 {
+		a.ixLog("%d hold(s) with no record of why go back to their place (held by an older version; they are checked again as new files)", len(unknown))
+	}
+	return nil
 }
 
 // ixUnhold lets a held item go and forgets it was looked at, so the checks

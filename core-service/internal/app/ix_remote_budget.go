@@ -30,12 +30,17 @@ var ixRemoteChecksBusy = func(a *App) bool {
 // is different: it is a penalty, and nothing optional runs for ten minutes.
 //
 // Samples (ix_copies_sample.go) cost megabytes and can spare a whole big file.
+// With a minute in ten they ran some 7 an hour under the speed limit, using
+// about 84 MB of parts an hour (2.4% of what came in), while about 1,900 big
+// videos waited for a check on one archive (11-06); a check of a video no other
+// check had caught found a copy about one time in six (a rough figure). Three
+// minutes in ten (ix.12.10).
 // Previews cost kilobytes each and feed the likeness checks, so they get a
 // smaller turn.
 var (
 	ixRemoteBudgetOn     = true
 	ixRemoteBudgetWindow = 10 * time.Minute
-	ixRemoteBudgetSample = time.Minute
+	ixRemoteBudgetSample = 3 * time.Minute // ix.12.10: 1 minute until then
 	ixRemoteBudgetView   = 30 * time.Second
 	ixRemoteBudgetNow    = time.Now
 )
