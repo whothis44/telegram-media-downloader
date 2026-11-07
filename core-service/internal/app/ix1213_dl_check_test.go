@@ -87,8 +87,13 @@ func TestIx1213BigVideoIsCheckedInItsDownload(t *testing.T) {
 		cctx, _ := ixWithDlCheck(ctx, r.work, r.msg)
 		return a.ixDlCheck(cctx, r.item, r.client)
 	}
-	// A copy: deferred, with its hold.
+	// A copy: deferred, with its hold. The held step has marked it "looked
+	// at" (reason '', released_at -1), as it does every pending big video:
+	// that must not stop the check (review of 12.13).
 	cp := queue(901, "COPY-COPY-COPY-1")
+	if _, err := a.db.Writer.Exec(`INSERT INTO ix_held(work_id,group_id,message_id,reason,held_at,released_at) VALUES(?,?,901,'',1,-1)`, cp.work.ID, ixTestGroup); err != nil {
+		t.Fatal(err)
+	}
 	err := check(cp)
 	var d *telegram.DownloadDeferred
 	if !errors.As(err, &d) || d.Hold == nil {
@@ -126,9 +131,6 @@ func TestIx1213BigVideoIsCheckedInItsDownload(t *testing.T) {
 		t.Fatalf("not a copy: %v", err)
 	}
 	ident := ixPartIdent(nc.item.Identity)
-	if ixMemPartsGet(a, ident) == nil {
-		t.Fatal("the parts read are not in memory for the download")
-	}
 	kept := a.ixKeptPartsFor(nc.item.Identity)
 	if p, ok := kept(0); kept == nil || !ok || string(p[:16]) != "NONE-NONE-NONE-1" {
 		t.Fatal("the download does not get the parts the check read")
@@ -143,6 +145,16 @@ func TestIx1213BigVideoIsCheckedInItsDownload(t *testing.T) {
 		t.Fatalf("a checked video was checked again: %v", err)
 	}
 	ixMemPartsDrop(a, ident)
+	// A partial match recorded, whose deferral did not commit (a restart):
+	// deferred again from the record, nothing read.
+	pm := queue(904, "NONE-NONE-NONE-1")
+	if _, err = a.db.Writer.Exec(`INSERT INTO ix_copy_sample(work_id,ident,size,result,note,of_key,parts,samples,tries,at,reason,final) VALUES(?,?,?,'nomatch','at most 4 of 8 sampled frames match a saved video',?,10,8,1,1,'',0)`,
+		pm.work.ID, ixPartIdent(pm.item.Identity), pm.item.Identity.Size, "h:"+ixSixtyFour("7")); err != nil {
+		t.Fatal(err)
+	}
+	if err = check(pm); !errors.As(err, &d) || pm.client.reads != 0 {
+		t.Fatalf("a recorded partial match was not deferred again: %v reads %d", err, pm.client.reads)
+	}
 	// The switch: off, nothing is checked.
 	st := a.ixLoadSettings(ctx)
 	off := false

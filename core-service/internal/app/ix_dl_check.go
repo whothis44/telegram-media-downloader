@@ -186,10 +186,12 @@ func (a *App) ixDlCheck(ctx context.Context, item download.Item, client download
 		t.skip(ixDlSkipHoldFail)
 		return nil
 	}
-	// Let go before (by a person, or by the rules): it downloads; a row is
-	// never held twice (ixHoldWork).
+	// Let go before (by a person, or by the rules), or held now (a person
+	// resumed it): it downloads; a row is never held twice (ixHoldWork).
+	// Rows only marked "looked at" by the held step (reason '', released_at
+	// -1: every pending big video gets one) are checked.
 	var heldRows int
-	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM ix_held WHERE work_id=?`, work.ID).Scan(&heldRows)
+	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM ix_held WHERE work_id=? AND (released_at>0 OR (released_at=0 AND reason<>''))`, work.ID).Scan(&heldRows)
 	if heldRows > 0 {
 		t.skip(ixDlSkipLetGo)
 		return nil
@@ -208,13 +210,21 @@ func (a *App) ixDlCheck(ctx context.Context, item download.Item, client download
 	var result, note, of string
 	var best, final, tries int
 	recorded := a.db.Reader.QueryRowContext(ctx, `SELECT result, note, of_key, final, tries FROM ix_copy_sample WHERE work_id=?`, work.ID).Scan(&result, &note, &of, &final, &tries) == nil
+	fresh := false
 	if recorded && !(result == "failed" && final == 0 && tries < 2) {
-		if result != "confirmed" {
+		// The recorded answer, without reading again: a copy, or a partial
+		// match, is deferred (its deferral may not have committed before a
+		// restart or a cancel); anything else downloads.
+		if result == "nomatch" {
+			_, _ = fmt.Sscanf(note, "at most %d of", &best)
+		}
+		if result != "confirmed" && !(result == "nomatch" && best >= ixSamplePartialHit && of != "") {
 			t.skip(ixDlSkipChecked)
 			return nil
 		}
-		res = ixSampleResult{Result: result, Note: note, Of: of}
+		res = ixSampleResult{Result: result, Note: note, Of: of, Best: best}
 	} else {
+		fresh = true
 		if seekbar.FFmpegPath() == "" && !ixSampleFake {
 			t.skip(ixDlSkipNoFFmpeg)
 			return nil
@@ -255,9 +265,17 @@ func (a *App) ixDlCheck(ctx context.Context, item download.Item, client download
 		t.Checked.Add(1)
 		t.Millis.Add(time.Since(started).Milliseconds())
 		t.PartsMB.Add(int64(res.Parts))
+		// In memory only what the disk store did not keep (below its
+		// free-space floor, or a failed write): those stay for the whole
+		// transfer.
 		if len(mem) > 0 {
-			ixMemPartsPut(a, ixPartIdent(item.Identity), mem)
-			row.ident = ixPartIdent(item.Identity)
+			ident := ixPartIdent(item.Identity)
+			var onDisk int
+			_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM ix_part_store WHERE ident=?`, ident).Scan(&onDisk)
+			if onDisk < len(mem) {
+				ixMemPartsPut(a, ident, mem)
+				row.ident = ident
+			}
 		}
 		if ctx.Err() != nil {
 			return nil // the download itself was stopped: it says so
@@ -278,17 +296,21 @@ func (a *App) ixDlCheck(ctx context.Context, item download.Item, client download
 		t.fail(res.Why)
 		return nil
 	default:
-		t.NoMatch.Add(1)
+		if fresh {
+			t.NoMatch.Add(1)
+		}
 		return nil
 	}
 	path := a.ixStoredPathOfKey(ctx, res.Of)
 	if path == "" {
-		t.NoMatch.Add(1)
+		if fresh {
+			t.NoMatch.Add(1)
+		}
 		return nil
 	}
-	if how == "sampled" {
+	if fresh && how == "sampled" {
 		t.Copies.Add(1)
-	} else {
+	} else if fresh {
 		t.Partial.Add(1)
 	}
 	id, group, msg, likeKey, note2 := work.ID, work.GroupID, work.MessageID, res.Of, res.Note
@@ -304,7 +326,7 @@ func (a *App) ixDlCheck(ctx context.Context, item download.Item, client download
 				id, how, confirm, note2, now); err != nil {
 				return err
 			}
-			t.Held.Add(1)
+			t.Held.Add(1) // counted when the hold is written; its commit follows in the engine
 			return nil
 		},
 		Failed: func(err error) {
