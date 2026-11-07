@@ -77,7 +77,10 @@ type ixSettings struct {
 	LowqFirst  bool   `json:"lowqFirst"`  // save a lower quality of very large videos first when time is short
 	LowqKeep   bool   `json:"lowqKeep"`   // keep that lower quality after the original arrives
 	StageDir   string `json:"stageDir"`   // local folder downloads go to before the library; empty: off
-	StageCapGB int    `json:"stageCapGb"` // space staged files may take
+	StageCapGB int    `json:"stageCapGb"` // until 12.13: space staged files may take (read by StageKeepFree for upgrades)
+	// StageKeepFreeGB (ix.12.14): a download is staged while the staging
+	// disk keeps this many GB free after it; 0: not set yet (StageKeepFree).
+	StageKeepFreeGB int `json:"stageKeepFreeGb,omitempty"`
 	// BigAtOnce is how many files of 1 GB or more download at once
 	// (engine.BigFileLane; 0: no limit).
 	BigAtOnce int `json:"bigAtOnce"`
@@ -320,6 +323,29 @@ func (s ixSettings) SampleBigOn() bool {
 // CheckInDownloadOn: big videos are checked in their own download (ix.12.13).
 func (s ixSettings) CheckInDownloadOn() bool {
 	return s.CheckInDownload == nil || *s.CheckInDownload
+}
+
+// ixStageKeepFreeDefault is the free space the staging disk keeps by default,
+// and ixStageKeepFreeMin the least it may be set to: the disk may hold the
+// database too.
+const (
+	ixStageKeepFreeDefault = 50
+	ixStageKeepFreeMin     = 20
+)
+
+// StageKeepFree is the free space, in GB, the staging disk keeps (ix.12.14).
+// Settings saved before 12.14 have only the old "space it may use": up to
+// 50 GB, staging stopped at about 50 GB free anyway (the rule past the
+// space), so they keep 50; above it, staging stopped at that much free, so
+// they keep that much.
+func (s ixSettings) StageKeepFree() int {
+	switch {
+	case s.StageKeepFreeGB > 0:
+		return s.StageKeepFreeGB
+	case s.StageCapGB > ixStageKeepFreeDefault:
+		return s.StageCapGB
+	}
+	return ixStageKeepFreeDefault
 }
 
 func ixParseSettings(body map[string]any, s ixSettings) (ixSettings, error) {

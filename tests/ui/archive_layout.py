@@ -69,7 +69,7 @@ MOVED = [
     ('downloadPacing', 'data-set', 'settings'),
     ('autoRetry', 'data-set', 'settings'),
     ('stageDir', 'data-set-text', 'settings'),
-    ('stageCapGb', 'data-set-text', 'settings'),
+    ('stageKeepFreeGb', 'data-set-text', 'settings'),
     ('autoUpdate', 'data-set', 'settings'),
     ('paceByAnswers', 'data-set', 'settings'),
     ('substExact', 'data-set', 'duplicates'),

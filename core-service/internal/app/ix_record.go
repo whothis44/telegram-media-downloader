@@ -22,8 +22,11 @@ type ixRuntime struct {
 	groupsAt  time.Time
 	wake      chan struct{}
 	lastError time.Time
-	queueMu   sync.Mutex  // serialises queue state changes
-	recent    []ixLogLine // the last archive log lines, for the diagnostics report
+	queueMu   sync.Mutex       // serialises queue state changes
+	recent    []ixLogLine      // the last archive log lines, for the diagnostics report
+	beats     map[string]int64 // group ID -> its backfill's last sign of work (unix ms; ix_stall.go)
+	passSeen  map[string]int64 // backfill job ID -> first seen running by this process (unix ms)
+	passEnd   map[string]bool  // group ID -> its backfill read every message and is in its end-of-pass work
 }
 
 type ixLogLine struct {

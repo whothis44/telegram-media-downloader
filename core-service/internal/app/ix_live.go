@@ -183,6 +183,7 @@ func (a *App) ixFillGaps(ctx context.Context, session ixByIDReader, dialog teleg
 	}
 	found, gone := 0, 0
 	for start := 0; start < len(ids); start += 100 {
+		a.ixBeat(groupID)
 		batch := ids[start:min(start+100, len(ids))]
 		page, err := session.MessagesByID(dialog, batch)
 		for try := 0; err != nil && try < len(historyPageRetries) && ctx.Err() == nil && session.Err() == nil; try++ {
@@ -201,11 +202,13 @@ func (a *App) ixFillGaps(ctx context.Context, session ixByIDReader, dialog teleg
 			} else if !historyConnectionLost(err) {
 				break
 			}
+			a.ixBeat(groupID) // a Telegram wait of up to 5 min is work, for the stall watchdog
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
 			case <-time.After(wait):
 			}
+			a.ixBeat(groupID)
 			page, err = session.MessagesByID(dialog, batch)
 		}
 		if err != nil {

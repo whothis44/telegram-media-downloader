@@ -52,9 +52,17 @@ func TestIx127EveryLogLineIsRedacted(t *testing.T) {
 		`秘密 clip.3gp`,
 		`名前 old.flv`,
 		`movie 名前.wmv`,
+		// ix.12.14: a chat or topic name inside a file or folder name, with
+		// other words around it (the 12.13 report leaked the words before it).
+		`G1/videos/Zorblat Words ` + chat + `_005_Quixfen Words_2021.mp4`,
+		`G1/videos/_iCaps` + chat + `.mp4`,
+		`data/tgdl-staging/G1/` + topic + ` Snarvik/clip.mp4`,
+		`E:\T\tg-dl\library\G1\Plinthar ` + chat + ` Dravel\folder`,
+		`open E:\T\tg-dl\library\Merovak ` + topic + `\a.mp4: access denied`,
 	}
 	leaks := []string{"名前", "🎉", "Ünïcødé", "秘密", "Тема", "🎈", "secretchannel", "1234567890", "secretuser", "deadbeefdeadbeef",
-		"1234567890123456789", "5555555555", "4444444444", "3333333333", "ab12cd34ef"}
+		"1234567890123456789", "5555555555", "4444444444", "3333333333", "ab12cd34ef",
+		"Zorblat", "Quixfen", "iCaps", "Snarvik", "Plinthar", "Dravel", "Merovak"}
 	r := &ixRedactor{groups: map[string]string{}}
 	for _, n := range []string{chat, topic} {
 		r.groups[n] = "<name>"
@@ -178,10 +186,37 @@ func TestIx1213GeneratedNamesAreHidden(t *testing.T) {
 	r := &ixRedactor{groups: map[string]string{"Some Chat": "G2"}, names: []string{"Some Chat"}}
 	cases := map[string]string{
 		"not downloading -1001234567890 #55: same bytes as Some Chat/videos/document_1234567890123456789_1234_ab12cd34ef.m4v (hashes)": "not downloading G2 #<n>: same bytes as <path> (hashes)",
-		"same bytes as G1/<name>/videos/document_1234567890123456789_1234_ab12cd34ef.m4v (hashes)":                                     "same bytes as G1/<name><path> (hashes)",
+		"same bytes as G1/<name>/videos/document_1234567890123456789_1234_ab12cd34ef.m4v (hashes)":                                     "same bytes as <path> (hashes)",
 		"open document_5555555555555555555.mp4: denied":                                                                                "<file>: denied",
 		"took 37 files / 338 MB, 12 of 20 parts, deadline 2026-11-30":                                                                  "took 37 files / 338 MB, 12 of 20 parts, deadline 2026-11-30",
 		"read 1234567 bytes": "read <n> bytes",
+	}
+	for in, want := range cases {
+		if got := r.clean(in); got != want {
+			t.Errorf("clean(%q)\n got %q\nwant %q", in, got, want)
+		}
+	}
+}
+
+// ix.12.14: the line that leaked in the first 12.13 reports of 11-07: a file
+// name holding a chat name. The path and file rules stopped at the '<' of the
+// placeholder and left the words before it.
+func TestIx1214NamesInsidePathsAreHiddenWhole(t *testing.T) {
+	r := &ixRedactor{groups: map[string]string{"Some Chat": "G2", "Wombat Club": "<name>", "-1001234567890": "G3", "-4012345678": "G4"}, names: []string{"Wombat Club", "Some Chat"}}
+	cases := map[string]string{
+		"not downloading G2 #55: same bytes as Some Chat/videos/Zorblat Words Wombat Club_005.mp4 (hashes)": "not downloading G2 #<n>: same bytes as <path> (hashes)",
+		"same bytes as G2/videos/_iCapsWombat Club.mp4 (size and sampled hashes)":                           "same bytes as <path> (size and sampled hashes)",
+		`open E:\T\lib\Plinthar Wombat Club Dravel\x.mp4: access denied`:                                    "open <path>: access denied",
+		`stat E:\T\lib\Plinthar Wombat Club Dravel: not found`:                                              "stat <path>: not found",
+		"saved: Quixfen Wombat Club old.flv":                                                                "saved: <file>",
+		"group Wombat Club: 3 files, 12 MB":                                                                 "group <name>: 3 files, 12 MB",
+		"link https://t.me/somewhere/12 and mail a@b.example, then Wombat Club":                             "link <link> and mail <email>, then <name>",
+		// The sampled check's line: group ID, message number, and a note
+		// that may name the saved copy.
+		"checked -1001234567890 #5537 (812 MB) from 10 MB of parts: copy (same as Some Chat/videos/Zorblat Wombat Club.mp4)": "checked G3 #<n> (812 MB) from 10 MB of parts: copy (same as <path>)",
+		"checked 1234567890 #12 (300 MB) from 9 MB of parts: no match (-)":                                                   "checked <n> #<n> (300 MB) from 9 MB of parts: no match (-)",
+		"checked -4012345678 #7 (250 MB) from 9 MB of parts: partly the same (3 of 8)":                                       "checked G4 #<n> (250 MB) from 9 MB of parts: partly the same (3 of 8)",
+		"staging: the staged copy of message #4321 in -1001234567890 was missing":                                            "staging: the staged copy of message #<n> in G3 was missing",
 	}
 	for in, want := range cases {
 		if got := r.clean(in); got != want {

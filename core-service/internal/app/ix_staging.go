@@ -29,7 +29,7 @@ import (
 func (a *App) ixWireStaging() {
 	a.library.Staging = func(ctx context.Context) download.Staging {
 		s := a.ixLoadSettings(ctx)
-		return download.Staging{Dir: s.StageDir, Cap: int64(s.StageCapGB) << 30}
+		return download.Staging{Dir: s.StageDir, KeepFree: int64(s.StageKeepFree()) << 30}
 	}
 	a.library.StageHold = func(ctx context.Context) (func(), error) {
 		a.mediaMu.RLock()
@@ -100,9 +100,9 @@ func (a *App) ixStagedLost(ctx context.Context, item download.Item) error {
 		return err
 	}
 	if queued {
-		a.ixLog("staging: the staged copy of message %d in %s was missing from the staging folder; it is queued again", item.MessageID, item.GroupID)
+		a.ixLog("staging: the staged copy of message #%d in %s was missing from the staging folder; it is queued again", item.MessageID, item.GroupID)
 	} else {
-		a.ixLog("staging: the staged copy of message %d in %s was missing from the staging folder; its queue item was skipped or its group purged since, so it is not queued again", item.MessageID, item.GroupID)
+		a.ixLog("staging: the staged copy of message #%d in %s was missing from the staging folder; its queue item was skipped or its group purged since, so it is not queued again", item.MessageID, item.GroupID)
 	}
 	return nil
 }
@@ -198,6 +198,27 @@ func ixParseTransferSettings(body map[string]any, s *ixSettings) error {
 	if s.StageCapGB < 1 || s.StageCapGB > 100000 {
 		return errors.New("the staging space must be between 1 and 100000 GB")
 	}
+	switch v := body["stageKeepFreeGb"].(type) {
+	case float64:
+		s.StageKeepFreeGB = int(v)
+		if s.StageKeepFreeGB < ixStageKeepFreeMin || s.StageKeepFreeGB > 100000 {
+			return fmt.Errorf("the free space to keep must be between %d and 100000 GB", ixStageKeepFreeMin)
+		}
+	case string:
+		t := strings.TrimSpace(v)
+		if t == "" {
+			s.StageKeepFreeGB = ixStageKeepFreeDefault
+			break
+		}
+		n, err := strconv.Atoi(t)
+		if err != nil {
+			return errors.New("the free space to keep must be a number of GB")
+		}
+		if n < ixStageKeepFreeMin || n > 100000 {
+			return fmt.Errorf("the free space to keep must be between %d and 100000 GB", ixStageKeepFreeMin)
+		}
+		s.StageKeepFreeGB = n
+	}
 	return ixParseBigSettings(body, s)
 }
 
@@ -238,16 +259,16 @@ func (a *App) ixCheckStageDir(dir string) error {
 
 type ixStagingStatus struct {
 	download.StagingStatus
-	On      bool   `json:"on"`
-	CapGB   int    `json:"capGb"`
-	Suggest string `json:"suggest"` // a folder to suggest: the app's data folder
+	On         bool   `json:"on"`
+	KeepFreeGB int    `json:"keepFreeGb"` // ix.12.14: the free space the staging disk keeps (ixSettings.StageKeepFree)
+	Suggest    string `json:"suggest"`    // a folder to suggest: the app's data folder
 	// This computer's fixed drives, for the folder picker (Windows; empty elsewhere).
 	Drives []diskfree.Drive `json:"drives,omitempty"`
 }
 
 func (a *App) ixStagingStatus(ctx context.Context) ixStagingStatus {
 	s := a.ixLoadSettings(ctx)
-	st := ixStagingStatus{On: s.StageDir != "", CapGB: s.StageCapGB, Suggest: a.dataDir}
+	st := ixStagingStatus{On: s.StageDir != "", KeepFreeGB: s.StageKeepFree(), Suggest: a.dataDir}
 	if abs, err := filepath.Abs(a.dataDir); err == nil {
 		st.Suggest = abs
 	}
@@ -267,7 +288,10 @@ func (a *App) ixTransferDiag(ctx context.Context, clean func(string) string) []s
 	out := []string{fmt.Sprintf("big videos: lower quality first %s (keep after upgrade %s) · %d big videos saved in a lower quality first (%s instead of %s); %d upgraded (the lower qualities of those cost %s extra) · %d originals still to come",
 		on[s.LowqFirst], on[s.LowqKeep], lq.Saved, gb(lq.SavedBytes), gb(lq.OrigBytes), lq.Upgraded, gb(lq.ExtraBytes), lq.Waiting)}
 	st := a.ixStagingStatus(ctx)
-	line := fmt.Sprintf("local staging %s (up to %d GB) · %d files / %s waiting to be copied to the library", on[st.On], st.CapGB, st.Waiting, gb(st.Bytes))
+	line := fmt.Sprintf("local staging %s (keeps %d GB free on its disk) · %d files / %s waiting to be copied to the library", on[st.On], st.KeepFreeGB, st.Waiting, gb(st.Bytes))
+	if st.On && st.RoomKnown {
+		line += fmt.Sprintf(" · it may take about %s more now", gb(st.Room))
+	}
 	if st.Failing > 0 {
 		line += fmt.Sprintf(" · %d failing, since %s", st.Failing, ixAgo(st.FailingSince, time.Now()))
 	}
@@ -280,9 +304,9 @@ func (a *App) ixTransferDiag(ctx context.Context, clean func(string) string) []s
 	if st.On || st.Waiting > 0 || st.LastMoved > 0 {
 		speed := "-"
 		if st.CopySecsHour > 0 {
-			speed = strconv.FormatFloat(float64(st.MovedHourBytes)/1e6/st.CopySecsHour, 'f', 1, 64) + " MB/s while copying"
+			speed = strconv.FormatFloat(float64(st.MovedHourBytes)/1e6/st.CopySecsHour, 'f', 1, 64) + " MB/s per copy"
 		}
-		line += fmt.Sprintf(" · last hour: %d copied to the library, %.0f MB (%s, %.0f s of copying) · last copy %s · oldest waiting %s",
+		line += fmt.Sprintf(" · last hour: %d copied to the library, %.0f MB (%s, %.0f s of copying, summed over copies running side by side) · last copy %s · oldest waiting %s",
 			st.MovedHour, float64(st.MovedHourBytes)/1e6, speed, st.CopySecsHour, ixAgo(st.LastMoved, time.Now()), ixAgo(st.OldestWaiting, time.Now()))
 	}
 	if st.Bypassed > 0 {
@@ -308,8 +332,8 @@ func ixStagingAlerts(st ixStagingStatus, now time.Time) []ixAlert {
 	gb := func(b int64) string { return strconv.FormatFloat(float64(b)/1e9, 'f', 1, 64) + " GB" }
 	if st.Full && st.FullSince > 0 && now.Sub(time.UnixMilli(st.FullSince)) >= ixStageFullAfter {
 		out = append(out, ixAlert{Key: "staging:full", Title: "Downloads are waiting for room in the staging folder",
-			Message: fmt.Sprintf("Files waiting to be copied to the downloads folder take the space allowed for staging (%d GB): %d file(s), %s. Downloads have waited since %s. New files go straight to the downloads folder meanwhile; these are files whose progress is kept in the staging folder. Usually the downloads folder (the NAS) cannot be reached, or copies to it are slower than downloads: check it. Raising the staging space in Settings, or freeing space on the staging disk, lets downloads go on.",
-				st.CapGB, st.Waiting, gb(st.Bytes), time.UnixMilli(st.FullSince).Format("2006-01-02 15:04"))})
+			Message: fmt.Sprintf("The staging disk is down to the free space it keeps (%d GB), and %d file(s), %s, wait to be copied to the downloads folder. Downloads have waited since %s. New files go straight to the downloads folder meanwhile; these are files whose progress is kept in the staging folder. Usually the downloads folder (the NAS) cannot be reached, or copies to it are slower than downloads: check it. Freeing space on the staging disk, or keeping less free in Settings, lets downloads go on.",
+				st.KeepFreeGB, st.Waiting, gb(st.Bytes), time.UnixMilli(st.FullSince).Format("2006-01-02 15:04"))})
 	}
 	if st.Failing > 0 && st.FailingSince > 0 && now.Sub(time.UnixMilli(st.FailingSince)) >= ixStageFailingAfter {
 		out = append(out, ixAlert{Key: "staging:failing", Title: "Copies to the downloads folder are failing",

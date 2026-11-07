@@ -67,6 +67,9 @@ type ixQueueItem struct {
 	// group. It waits again and carries on below ResumeFrom, at no attempt's
 	// cost.
 	Preempted bool `json:"preempted,omitempty"`
+	// Stalls counts this group's passes in a row stopped for making no
+	// progress (ix_stall.go); the second leaves it failed.
+	Stalls int `json:"stalls,omitempty"`
 	// A pass that stopped part-way carries on below ResumeFrom (the oldest
 	// message it reached); Carried counts what earlier attempts read, and
 	// PassStartedAt is when the pass first started.
@@ -101,20 +104,30 @@ type ixQueueDeps struct {
 	// cancel stops a backfill to give its lane to a higher-ranked group. nil:
 	// lanes are not taken back.
 	cancel func(ctx context.Context, jobID string)
+	// stalled says a running pass has made no progress for too long, and
+	// abandon ends its job (ix_stall.go). nil: no watchdog.
+	stalled func(ctx context.Context, groupID, jobID string, now time.Time) bool
+	abandon func(ctx context.Context, jobID, reason string) string
+	// passEnded says the group's messages pass has read every message and
+	// is in its end-of-pass work (ix_stall.go). nil: never.
+	passEnded func(groupID string) bool
 }
 
 func (a *App) ixDeps() ixQueueDeps {
 	return ixQueueDeps{
-		start:   a.ixStartHistory,
-		job:     a.ixHistoryJob,
-		cursor:  a.ixHistoryCursor,
-		missing: a.ixMissingFiles,
-		finish:  a.ixFinishWalk,
-		hold:    a.ixHold,
-		now:     time.Now,
-		triage:  a.ixTriage,
-		ranks:   a.ixRankBases,
-		cancel:  a.ixCancelHistory,
+		start:     a.ixStartHistory,
+		job:       a.ixHistoryJob,
+		cursor:    a.ixHistoryCursor,
+		missing:   a.ixMissingFiles,
+		finish:    a.ixFinishWalk,
+		hold:      a.ixHold,
+		now:       time.Now,
+		triage:    a.ixTriage,
+		ranks:     a.ixRankBases,
+		cancel:    a.ixCancelHistory,
+		stalled:   a.ixPassStalled,
+		abandon:   a.ixAbandonPass,
+		passEnded: a.ixPassEnded,
 	}
 }
 
@@ -345,15 +358,7 @@ func (a *App) ixQueueStep(ctx context.Context, deps ixQueueDeps) error {
 		}
 		return 1 << 30
 	}
-	better := func(i, j int) bool {
-		if a, b := place(st.Items[i].GroupID), place(st.Items[j].GroupID); a != b {
-			return a < b
-		}
-		if st.Items[i].Priority != st.Items[j].Priority {
-			return st.Items[i].Priority
-		}
-		return ranks[st.Items[i].GroupID] < ranks[st.Items[j].GroupID]
-	}
+	better := ixLaneLess(&st, places, ranks) // ix_lanes.go: the Rescan tab shows the same order
 	remaining := 0
 	for i, item := range st.Items {
 		if item.State != "waiting" {
@@ -483,8 +488,55 @@ func (a *App) ixQueueTrack(ctx context.Context, deps ixQueueDeps, st *ixQueueSta
 	}
 	switch job.State {
 	case "running":
+		if item.Stalls > 0 && job.Processed > 0 {
+			item.Stalls = 0 // read something after a stall: the count starts again
+		}
+		if deps.stalled == nil || !deps.stalled(ctx, item.GroupID, item.JobID, now) {
+			return nil
+		}
+		if item.Phase == ixPhaseMessages && deps.passEnded != nil && deps.passEnded(item.GroupID) {
+			// It had read every message and stalled in the end-of-pass work
+			// (comments, message gaps): the walk is complete, so it counts as
+			// a finished messages pass and the files pass can follow.
+			note := "-"
+			if deps.abandon != nil {
+				note = deps.abandon(ctx, item.JobID, "stopped in its end-of-pass work: no progress")
+			}
+			a.ixLog("rescan: the messages pass of %s had read every message and then made no progress in its comments or message gaps for %d minutes; it counts as done (%s)", item.GroupID, int(ixPassStallAfter/time.Minute), note)
+			job.State, job.Cancelled = "done", false
+			goto passDone
+		}
+		// No progress for too long (ix.12.14): end the job itself, since a
+		// cancel alone leaves a worker that never returns "running".
+		keepPlace(job.Processed)
+		mins := int(ixPassStallAfter / time.Minute)
+		note := "-"
+		if deps.abandon != nil {
+			note = deps.abandon(ctx, item.JobID, fmt.Sprintf("stopped: no progress for %d minutes", mins))
+		}
+		item.Stalls++
+		if item.Stalls >= 2 {
+			a.ixLog("rescan: the %s pass of %s made no progress for %d minutes again; it is stopped so the groups behind it go on (%s)", item.Phase, item.GroupID, mins, note)
+			item.State, item.JobID, item.Preempted, item.FinishedAt = "failed", "", false, now.UnixMilli()
+			item.Error = fmt.Sprintf("no progress for %d minutes, twice: stopped so the other groups go on (Run again tries once more)", mins)
+			return nil
+		}
+		a.ixLog("rescan: the %s pass of %s made no progress for %d minutes; it is stopped and tried again from where it got to (%s)", item.Phase, item.GroupID, mins, note)
+		ixRetryLater(st, i, now, fmt.Sprintf("no progress for %d minutes: stopped, to be tried again from where it got to", mins))
 		return nil
 	case "done":
+		goto passDone
+	default:
+		reason := "the backfill stopped (" + job.State + ")"
+		if job.Error != nil && *job.Error != "" {
+			reason = *job.Error
+		}
+		keepPlace(job.Processed)
+		ixRetryLater(st, i, now, reason)
+		return nil
+	}
+passDone:
+	{
 		if job.Cancelled {
 			keepPlace(job.Processed)
 			ixRetryLater(st, i, now, "the backfill was cancelled")
@@ -497,7 +549,7 @@ func (a *App) ixQueueTrack(ctx context.Context, deps ixQueueDeps, st *ixQueueSta
 			}
 		}
 		read := item.Carried + job.Processed
-		item.ResumeFrom, item.Carried, item.PassStartedAt = 0, 0, 0
+		item.ResumeFrom, item.Carried, item.PassStartedAt, item.Stalls = 0, 0, 0, 0
 		if item.Phase == ixPhaseMessages {
 			item.MessagesAt, item.Messages = now.UnixMilli(), read
 			missing := 0
@@ -517,13 +569,6 @@ func (a *App) ixQueueTrack(ctx context.Context, deps ixQueueDeps, st *ixQueueSta
 			}
 		}
 		item.State, item.FinishedAt, item.Error, item.JobID = "done", now.UnixMilli(), "", ""
-	default:
-		reason := "the backfill stopped (" + job.State + ")"
-		if job.Error != nil && *job.Error != "" {
-			reason = *job.Error
-		}
-		keepPlace(job.Processed)
-		ixRetryLater(st, i, now, reason)
 	}
 	return nil
 }

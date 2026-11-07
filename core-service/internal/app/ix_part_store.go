@@ -42,7 +42,7 @@ import (
 // about 120 MB an hour, so 4 GB held two days and the slowest lost their parts
 // first. In practice the floor below limits the space now, not the cap. The floor went from 20 to 60 GB, above
 // the 50 GB the staging folder keeps free when it runs past its own size
-// (download/staging.go, stageFreeReserve): kept parts give way to staged
+// (download/staging.go, DefaultStageKeepFree; a setting since ix.12.14): kept parts give way to staged
 // downloads, and the sweep removes the oldest while the disk is under it.
 
 const ixPartStoreSchema = `
@@ -64,6 +64,18 @@ var (
 	ixPartsFree             = diskfree.Free
 	ixPartsSweepEvery       = 10 * time.Minute
 )
+
+// ixPartsFloor is the free space under which nothing is kept and the oldest
+// parts go: ixPartsFreeFloor, or 10 GB above what the staging folder keeps
+// free when that is more (ix.12.14: "Keep at least N GB free" may be set
+// above 50 GB, and staged downloads need the room more than kept parts).
+func (a *App) ixPartsFloor(ctx context.Context) int64 {
+	floor := ixPartsFreeFloor
+	if s := a.ixLoadSettings(ctx); s.StageDir != "" {
+		floor = max(floor, int64(s.StageKeepFree()+10)<<30)
+	}
+	return floor
+}
 
 // ixPartsMu orders keeping, sweeping and trimming (one App in the program).
 var ixPartsMu sync.Mutex
@@ -129,7 +141,7 @@ func (a *App) ixPartsKeep(ctx context.Context, ident string, parts map[int64][]b
 		return
 	}
 	t := ixPartsCountsOf(a)
-	if free, ok := ixPartsFree(a.dataDir); !ok || free-need < ixPartsFreeFloor {
+	if free, ok := ixPartsFree(a.dataDir); !ok || free-need < a.ixPartsFloor(ctx) {
 		t.LowDisk.Add(1)
 		return
 	}
@@ -409,8 +421,9 @@ func (a *App) ixPartsSweep(ctx context.Context) error {
 // ixPartsFreeUpLocked removes the oldest files' parts while the data disk
 // has less than ixPartsFreeFloor free (ix.12.12): downloads need the room more.
 func (a *App) ixPartsFreeUpLocked(ctx context.Context) {
+	floor := a.ixPartsFloor(ctx)
 	free, ok := ixPartsFree(a.dataDir)
-	if !ok || free >= ixPartsFreeFloor {
+	if !ok || free >= floor {
 		return
 	}
 	rows, err := a.db.Reader.QueryContext(ctx, `SELECT ident, SUM(bytes) FROM ix_part_store GROUP BY ident ORDER BY MAX(at), ident`)
@@ -430,7 +443,7 @@ func (a *App) ixPartsFreeUpLocked(ctx context.Context) {
 	}
 	rows.Close()
 	for _, f := range files {
-		if free >= ixPartsFreeFloor || ctx.Err() != nil {
+		if free >= floor || ctx.Err() != nil {
 			return
 		}
 		if a.ixPartsRemoveLocked(ctx, f.ident) {
@@ -483,5 +496,5 @@ func (a *App) ixPartsDiag(ctx context.Context) string {
 		free = fmt.Sprintf("%d GB", n>>30)
 	}
 	return fmt.Sprintf("  parts kept from checks: reused by downloads %d MB since start, in %d downloads (refused, fetched again: %d wrong length, %d wrong bytes, %d unreadable) · kept now %d MB of %d files (at most %d MB; none kept under %d GB free, %s free now) · since start kept %d MB, not kept %d for disk space, %d failed writes, %d files removed (%d to free disk space)",
-		reused>>20, t.Downloads.Load(), short, t.BadBytes.Load(), t.Missing.Load(), bytes>>20, files, ixPartsCap>>20, ixPartsFreeFloor>>30, free, t.KeptBytes.Load()>>20, t.LowDisk.Load(), t.Failed.Load(), t.Removed.Load(), t.ForSpace.Load())
+		reused>>20, t.Downloads.Load(), short, t.BadBytes.Load(), t.Missing.Load(), bytes>>20, files, ixPartsCap>>20, a.ixPartsFloor(ctx)>>30, free, t.KeptBytes.Load()>>20, t.LowDisk.Load(), t.Failed.Load(), t.Removed.Load(), t.ForSpace.Load())
 }

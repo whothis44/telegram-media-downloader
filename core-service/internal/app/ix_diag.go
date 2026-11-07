@@ -36,7 +36,9 @@ var (
 	// dots or spaces): hiding too much is safe, too little is not (ix.12.5).
 	// ix.12.13: it also starts after '>', the end of a placeholder such as
 	// <name> put in place of a chat name inside the path.
-	ixReUnix = regexp.MustCompile(`(?:^|[\s"'(=>])([^\s"'<>|]*/[^"'<>|\r\n]*\.[A-Za-z0-9]{1,5})(?:[\s"'),;]|$)`)
+	// ix.12.14: it also ends at ':', as in "open <path>: access denied";
+	// before, such a path kept its folder names.
+	ixReUnix = regexp.MustCompile(`(?:^|[\s"'(=>])([^\s"'<>|]*/[^"'<>|\r\n]*\.[A-Za-z0-9]{1,5})(?:[\s"'),;:]|$)`)
 	// A file name alone: from the last ": ", quote, slash or bracket before
 	// a media extension, spaces included. ix.12.13: more extensions (m4v,
 	// 3gp, flv, wmv, mpeg, ts, wav, flac, opus, aac, bin and others Telegram's
@@ -54,6 +56,14 @@ var (
 	// A hex run: 24+ characters anywhere, or 8+ that mix digits and letters
 	// (the hash part of a generated file name).
 	ixReHex = regexp.MustCompile(`[0-9a-fA-F]{8,}`)
+)
+
+// The placeholders clean puts in before its path and file rules, each as a
+// private-use character for the time those rules run (ix.12.14). A file name
+// that already held such a character only comes out more hidden.
+var (
+	ixPlaceholderHide = strings.NewReplacer("<name>", "", "<link>", "", "<email>", "")
+	ixPlaceholderShow = strings.NewReplacer("", "<name>", "", "<link>", "", "<email>")
 )
 
 // ixHideHex is the replacement for ixReHex: a long run always, a shorter one
@@ -84,6 +94,11 @@ func (r *ixRedactor) clean(s string) string {
 	}
 	s = ixReURL.ReplaceAllString(s, "<link>")
 	s = ixReEmailD.ReplaceAllString(s, "<email>")
+	// ix.12.14: while the path and file rules run, each placeholder put in
+	// so far is one ordinary character, so a path or file name holding a
+	// chat name is hidden whole. Before, the rules stopped at its '<' and the
+	// words before the name stayed in the report.
+	s = ixPlaceholderHide.Replace(s)
 	s = ixReWinPath.ReplaceAllStringFunc(s, func(m string) string {
 		end := ""
 		switch {
@@ -99,7 +114,7 @@ func (r *ixRedactor) clean(s string) string {
 		if len(m) > 0 && strings.ContainsRune(" \"'(=>\t", rune(m[0])) {
 			lead = m[:1]
 		}
-		if n := len(m); n > 0 && strings.ContainsRune(" \"'),;\t\r\n", rune(m[n-1])) {
+		if n := len(m); n > 0 && strings.ContainsRune(" \"'),;:\t\r\n", rune(m[n-1])) {
 			tail = m[n-1:]
 		}
 		return lead + "<path>" + tail
@@ -111,6 +126,7 @@ func (r *ixRedactor) clean(s string) string {
 		}
 		return "<file>"
 	})
+	s = ixPlaceholderShow.Replace(s)
 	s = ixReMsgNum.ReplaceAllString(s, "#<n>")
 	s = ixReGroupID.ReplaceAllStringFunc(s, r.group)
 	s = ixReAt.ReplaceAllString(s, "<user>")

@@ -135,7 +135,10 @@ function holdReasonText(j) {
 // Whole-queue counts from the server (the snapshot lists up to 1000
 // waiting items, the counts cover all of them). Adjusted by single-row WS
 // events; bulk events reload the snapshot.
-const holdCounts = { archive: null, person: null };
+const holdCounts = { archive: null, person: null, queued: null };
+// ix.12.14: whether the snapshot left rows out (it lists the next 1,000
+// files to download and 500 set aside); only then do the chips say "N of total".
+const listCapped = { queued: false, held: false };
 
 // ============ Store ============
 //
@@ -569,11 +572,17 @@ async function loadSnapshot() {
         maxSpeedConfig = snap.maxSpeed ?? null;
         holdCounts.archive = Number.isFinite(snap.archiveHeldCount) ? snap.archiveHeldCount : null;
         holdCounts.person = Number.isFinite(snap.personPausedCount) ? snap.personPausedCount : null;
+        holdCounts.queued = Number.isFinite(snap.queuedCount) ? snap.queuedCount : null;
         // The snapshot lists the downloading rows newest first.
         const booted = Date.now();
         (snap.active || []).forEach((j, i) => upsert({ ...j, startedAt: booted - i }));
         for (const j of snap.queued || []) upsert({ ...j });
         for (const j of snap.recent || []) upsert({ ...j });
+        {
+            const c = _chipCounts();
+            listCapped.queued = holdCounts.queued != null && holdCounts.queued > c.queued;
+            listCapped.held = holdCounts.archive != null && holdCounts.archive > c.held;
+        }
         view.booted = true;
         scheduleStructuralRender();
     } catch (e) {
@@ -1041,7 +1050,16 @@ function renderChips() {
         btn.setAttribute('aria-pressed', active ? 'true' : 'false');
         for (const c of CHIP_IDLE_CLS) btn.classList.toggle(c, !active);
         const countEl = btn.querySelector('[data-chip-count]');
-        const n = String(counts[id] ?? 0);
+        // ix.12.14: the page lists the next 1,000 files to download and 500
+        // set aside; say how many the whole queue holds when it has more.
+        const whole = id === 'queued' && listCapped.queued ? holdCounts.queued : id === 'held' && listCapped.held ? holdCounts.archive : null;
+        const shown = counts[id] ?? 0;
+        const n = whole != null && whole > shown
+            ? i18nT('queue.chip.of', '{n} of {total}').replace('{n}', shown.toLocaleString()).replace('{total}', whole.toLocaleString())
+            : String(shown);
+        if (countEl) countEl.title = whole != null && whole > shown
+            ? i18nT('queue.chip.of_title', 'This page lists the next files only; the second number is the whole queue when the page loaded.')
+            : '';
         if (countEl && countEl.textContent !== n) countEl.textContent = n;
     }
 }

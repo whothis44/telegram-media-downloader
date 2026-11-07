@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -315,6 +316,7 @@ func (a *App) ixPrioritiesMeasure(ctx context.Context) ixPrioritiesInfo {
 	for id, at := range a.ixLatestWalks(ctx) {
 		scanned[id] = at > 0
 	}
+	lanes := a.ixQueueLanes(ctx, q) // ix.12.14: how many wait before each group
 	queueState := map[string]ixQueueItem{}
 	for _, it := range q.Items {
 		queueState[it.GroupID] = it
@@ -361,7 +363,7 @@ func (a *App) ixPrioritiesMeasure(ctx context.Context) ixPrioritiesInfo {
 	focus := ""
 	for i := range info.Groups {
 		c := &info.Groups[i]
-		c.Waiting = ixCoverageWaiting(c, queueState[c.GroupID], focus)
+		c.Waiting = ixCoverageWaiting(c, queueState[c.GroupID], focus, lanes)
 		c.NotQueued = c.Waiting == ixNotQueued
 		if q, ok := queueState[c.GroupID]; ok {
 			c.InRescan = q.State == "waiting" || q.State == "running"
@@ -398,10 +400,37 @@ func ixSortCoverage(g []ixGroupCoverage) {
 	})
 }
 
+// ixLaneWait says what a waiting group waits for in its lane (ix.12.14).
+func ixLaneWait(q ixQueueItem, lanes ixLaneInfo) string {
+	lane, holder := "messages", lanes.Messages
+	if q.Phase == ixPhaseFiles {
+		lane, holder = "files", lanes.Files
+	}
+	n, ok := lanes.Ahead[q.GroupID]
+	switch {
+	case !ok:
+		return "waiting to try its " + lane + " pass again"
+	case n == 0 && holder != nil:
+		// No name: this text is in the diagnostics report too.
+		return "next in the " + lane + " lane, after the group in it now"
+	case n == 0:
+		return "next in the " + lane + " lane"
+	case n == 1:
+		return "waiting for the " + lane + " lane: 1 group before it"
+	}
+	return "waiting for the " + lane + " lane: " + strconv.Itoa(n) + " groups before it"
+}
+
 // ixCoverageWaiting says in a few words why a group stands where it stands.
-func ixCoverageWaiting(c *ixGroupCoverage, q ixQueueItem, focus string) string {
+func ixCoverageWaiting(c *ixGroupCoverage, q ixQueueItem, focus string, lanes ixLaneInfo) string {
 	if c.Needed.Files == 0 && c.Left == 0 && c.Apart == 0 {
 		switch {
+		case !c.Scanned && q.State == "running" && q.Phase != ixPhaseFiles:
+			return "reading its messages now; nothing missing found so far"
+		case !c.Scanned && q.State == "waiting":
+			return "nothing missing so far: " + ixLaneWait(q, lanes)
+		case !c.Scanned && q.State == "failed":
+			return "its rescan failed: see the Rescan tab"
 		case !c.Scanned && q.GroupID != "":
 			return "nothing missing so far; messages still being read"
 		case !c.Scanned:
@@ -417,9 +446,9 @@ func ixCoverageWaiting(c *ixGroupCoverage, q ixQueueItem, focus string) string {
 	case q.State == "running" && q.Phase != ixPhaseFiles:
 		return "reading its messages"
 	case q.State == "waiting" && q.Phase == ixPhaseFiles && c.Left == 0:
-		return "its files are not queued yet: waiting for the files lane"
+		return "its files are not queued yet: " + ixLaneWait(q, lanes)
 	case q.State == "waiting" && c.Left == 0:
-		return "waiting for the messages lane"
+		return ixLaneWait(q, lanes)
 	case c.Left == 0 && c.Apart > 0:
 		return "only files held back or set aside are queued"
 	case c.Left == 0:

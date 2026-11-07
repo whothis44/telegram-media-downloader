@@ -157,4 +157,6 @@ jobs:
       - run: python tests/ui/archive_priorities.py
       - run: python tests/ui/archive_update_banner.py
       - run: python tests/ui/archive_layout.py
+      - run: python tests/ui/archive_rescan_lanes.py
       - run: python tests/ui/queue_download_order.py
+      - run: python tests/ui/queue_chip_totals.py

@@ -55,6 +55,12 @@ var (
 	ixAutoUpdateEvery = time.Minute
 	ixAutoDrainLimit  = 20 * time.Minute
 	ixAutoRetryAfter  = time.Hour
+	// ix.12.14: "Check for updates" looks again at most this often. GitHub
+	// allows 60 anonymous requests an hour per address, shared with the
+	// launcher's ix-update.ps1.
+	ixUpdateCheckMin = time.Minute
+	// ixUpdateCheckWait is how long the button waits for GitHub's answer.
+	ixUpdateCheckWait = 15 * time.Second
 )
 
 // ixLatestRelease asks for the newest published version (replaceable in tests).
@@ -125,6 +131,8 @@ type ixUpdateInfo struct {
 	Auto      bool   `json:"auto"`    // Install updates automatically is on
 	AutoNow   bool   `json:"autoNow"` // this drain was started automatically
 	AutoNote  string `json:"autoNote,omitempty"`
+	CheckedAt int64  `json:"checkedAt,omitempty"` // when GitHub was last asked (unix ms; ix.12.14)
+	Checking  bool   `json:"checking,omitempty"`
 }
 
 type ixUpdateBox struct {
@@ -178,12 +186,49 @@ func (a *App) ixUpdateCheck() {
 	}()
 }
 
+// ixUpdateCheckNow asks GitHub again now, unless it was asked less than
+// ixUpdateCheckMin ago or is being asked, and waits up to ixUpdateCheckWait
+// for the answer. It reports whether it asked.
+func (a *App) ixUpdateCheckNow(ctx context.Context) bool {
+	box := a.ixUpdates()
+	box.mu.Lock()
+	if box.checking || (!box.checked.IsZero() && time.Since(box.checked) < ixUpdateCheckMin) {
+		box.mu.Unlock()
+		return false
+	}
+	box.checked = time.Time{} // lets ixUpdateCheck look now
+	box.mu.Unlock()
+	a.ixUpdateCheck()
+	deadline := time.NewTimer(ixUpdateCheckWait)
+	defer deadline.Stop()
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		box.mu.Lock()
+		busy := box.checking
+		box.mu.Unlock()
+		if !busy {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return true
+		case <-deadline.C:
+			return true
+		case <-tick.C:
+		}
+	}
+}
+
 // ixUpdateNow is the state of the update, without waiting for anything slow.
 func (a *App) ixUpdateNow(ctx context.Context) ixUpdateInfo {
 	a.ixUpdateCheck()
 	box := a.ixUpdates()
 	box.mu.Lock()
-	info := ixUpdateInfo{Current: version.AppVersion, Latest: box.latest, CheckErr: box.checkErr, Exiting: box.exiting, Restarts: ixLauncherRestarts()}
+	info := ixUpdateInfo{Current: version.AppVersion, Latest: box.latest, CheckErr: box.checkErr, Exiting: box.exiting, Restarts: ixLauncherRestarts(), Checking: box.checking}
+	if !box.checked.IsZero() {
+		info.CheckedAt = box.checked.UnixMilli()
+	}
 	box.mu.Unlock()
 	info.Newer = info.Latest != "" && ixVersionNewer(info.Latest, info.Current)
 	info.Auto = a.ixLoadSettings(ctx).AutoUpdate
@@ -215,6 +260,12 @@ func (a *App) handleIxUpdateAction(w http.ResponseWriter, r *http.Request) {
 	if err := decodeBody(w, r, &body); err != nil {
 		return
 	}
+	if body.Action == "check" {
+		// ix.12.14: look now rather than within the hour.
+		a.ixUpdateCheckNow(r.Context())
+		writeJSON(w, http.StatusOK, a.ixUpdateNow(r.Context()))
+		return
+	}
 	if a.monitor == nil {
 		writeJSONError(w, http.StatusConflict, "The downloader is not available")
 		return
@@ -241,7 +292,7 @@ func (a *App) handleIxUpdateAction(w http.ResponseWriter, r *http.Request) {
 		a.monitor.SetDraining(true)
 		a.ixUpdateExit()
 	default:
-		writeJSONError(w, http.StatusBadRequest, "action: start, now or cancel")
+		writeJSONError(w, http.StatusBadRequest, "action: check, start, now or cancel")
 		return
 	}
 	writeJSON(w, http.StatusOK, a.ixUpdateNow(r.Context()))

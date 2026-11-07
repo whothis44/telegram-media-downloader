@@ -90,6 +90,7 @@ func (a *App) runHistory(ctx context.Context, id string) error {
 	stall := time.Duration(max(1, min(86400000, number(history["backpressureMaxWaitMs"], 15*60*1000)))) * time.Millisecond
 	shortEvery := max(0, int(number(history["shortBreakEveryN"], 100)))
 	longEvery := max(0, int(number(history["longBreakEveryN"], 1000)))
+	a.ixPassEnd(j.GroupID, false) // archive: not at its end-of-pass work (ix_stall.go)
 	lastProgress := time.Now()
 	lastPending := -1
 	lastReceived := a.monitor.BytesReceived()
@@ -101,6 +102,7 @@ func (a *App) runHistory(ctx context.Context, id string) error {
 		if err != nil {
 			return err
 		}
+		a.ixBeat(j.GroupID) // archive: a sign of work for the rescan's stall watchdog (ix_stall.go)
 		if j.Limit != nil && j.Processed >= *j.Limit {
 			return nil
 		}
@@ -195,6 +197,8 @@ func (a *App) runHistory(ctx context.Context, id string) error {
 		}
 		if page.Done {
 			if j.MessagesOnly {
+				a.ixPassEnd(j.GroupID, true)
+				defer a.ixPassEnd(j.GroupID, false)
 				return a.ixMessagesPassEnd(ctx, session, dialog, j.GroupID) // archive: comments on channel posts, gaps in message IDs
 			}
 			return nil
@@ -429,6 +433,9 @@ func (a *App) finishHistory(id string, cause error) {
 		if a.output != nil {
 			fmt.Fprintf(a.output, "History completion remains pending: %v\n", err)
 		}
+		// archive (ix.12.14): the job stays "running" with no worker; the
+		// rescan's stall watchdog ends it (ix_stall.go). Said in the report.
+		a.ixLog("backfill of %s: its end could not be saved, so it stays running until the rescan's watchdog ends it: %v", j.GroupID, err)
 		return
 	}
 	*current = j

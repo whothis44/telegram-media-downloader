@@ -77,7 +77,7 @@ func TestIxLostStagedFileIsQueuedAgain(t *testing.T) {
 
 func TestIxStagingAlerts(t *testing.T) {
 	now := time.Now()
-	st := ixStagingStatus{CapGB: 20}
+	st := ixStagingStatus{KeepFreeGB: 50}
 	if al := ixStagingAlerts(st, now); len(al) != 0 {
 		t.Fatalf("alerts with nothing wrong: %+v", al)
 	}

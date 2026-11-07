@@ -2267,6 +2267,8 @@
     "queue.empty.search_body": "Search looks at file names and chat names.",
     "queue.empty.show_all": "Show all downloads",
     "queue.chip.held": "Set aside by the archive",
+    "queue.chip.of": "{n} of {total}",
+    "queue.chip.of_title": "This page lists the next files only; the second number is the whole queue when the page loaded.",
     "queue.status.held": "Set aside",
     "queue.status.paused_tooltip": "Paused by you",
     "queue.hold.label": "Set aside by the archive",

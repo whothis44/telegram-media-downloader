@@ -49,6 +49,9 @@ type ixGroupStatus struct {
 	Files      int64  `json:"files"`
 	LastWalk   int64  `json:"lastWalk,omitempty"`
 	Dir        string `json:"dir"`
+	// Kind: channel, supergroup, forum or group, as Telegram last said
+	// (ix_group_info, recorded by a messages pass); "" when not known.
+	Kind string `json:"kind,omitempty"`
 	// Completeness: what Telegram last said the chat holds.
 	TgCount   int64  `json:"tgCount,omitempty"`
 	TgCountAt int64  `json:"tgCountAt,omitempty"`
@@ -109,13 +112,14 @@ func (a *App) handleIxStatus(w http.ResponseWriter, r *http.Request) {
 	type info struct {
 		count, countAt, members, finished int64
 		about, linked, username, invite   string
+		kind                              string
 	}
 	infos := map[string]info{}
-	if rows, err := a.db.Reader.QueryContext(ctx, `SELECT group_id, tg_count, tg_count_at, members, about, linked_group, finished_at, username, invite_link FROM ix_group_info`); err == nil {
+	if rows, err := a.db.Reader.QueryContext(ctx, `SELECT group_id, tg_count, tg_count_at, members, about, linked_group, finished_at, username, invite_link, kind FROM ix_group_info`); err == nil {
 		for rows.Next() {
 			var id string
 			var v info
-			if rows.Scan(&id, &v.count, &v.countAt, &v.members, &v.about, &v.linked, &v.finished, &v.username, &v.invite) == nil {
+			if rows.Scan(&id, &v.count, &v.countAt, &v.members, &v.about, &v.linked, &v.finished, &v.username, &v.invite, &v.kind) == nil {
 				infos[id] = v
 			}
 		}
@@ -149,7 +153,7 @@ func (a *App) handleIxStatus(w http.ResponseWriter, r *http.Request) {
 		v := infos[g.ID]
 		g.TgCount, g.TgCountAt, g.Members, g.About, g.Linked, g.Comments = v.count, v.countAt, v.members, v.about, v.linked, comments[g.ID]
 		g.FinishedAt = v.finished
-		g.Username, g.Invite = v.username, v.invite
+		g.Username, g.Invite, g.Kind = v.username, v.invite, v.kind
 		g.MaxID, g.Gone = cover[g.ID].MaxID, cover[g.ID].Gone
 		if toGoKnown {
 			n := toGo[g.ID].ToGo
@@ -189,6 +193,7 @@ func (a *App) handleIxStatus(w http.ResponseWriter, r *http.Request) {
 		"update":    a.ixUpdateNow(ctx),
 		"groups":    groups,
 		"queue":     queue,
+		"lanes":     a.ixQueueLanes(ctx, queue),
 		"queueLeft": a.ixQueueLeft(ctx),
 		"dlState":   a.ixDlState(ctx), // ix_dlstate.go
 		"settings":  settings.public(),
@@ -376,6 +381,7 @@ func (a *App) handleIxQueueAction(w http.ResponseWriter, r *http.Request) {
 				st.Items[i].State, st.Items[i].NextAt, st.Items[i].Error = "waiting", 0, ""
 				st.Items[i].Phase, st.Items[i].Attempts = ixPhaseMessages, 0
 				st.Items[i].ResumeFrom, st.Items[i].Carried, st.Items[i].PassStartedAt = 0, 0, 0
+				st.Items[i].Stalls = 0
 			}
 		case "priority":
 			if i := ixQueueIndex(st, groupID); i >= 0 {

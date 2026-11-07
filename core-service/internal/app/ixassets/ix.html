@@ -83,6 +83,7 @@ const state = {
   draft: new Map(), sel: new Set(), bulk: '', search: '', filter: '', saving: false, msg: '',
   // rescan
   pick: new Set(), pickOnly: false, pickSearch: '', ensureFilters: true, dialogs: null, dialogsLoading: false, showAll: false,
+  pickHide: pickHideLoad(),
   // search
   q: '', qCategory: '', hits: null, searching: false, qMore: false, qMode: '',
   // priorities
@@ -99,6 +100,18 @@ async function load() {
   if (r.ok && r.data.mlStart && r.data.mlStart.running && !mlStartTimer) watchMLStart();
 }
 
+// ix.12.14: Rescan → Choose groups can hide channels and supergroups. The
+// choice is remembered in this browser only; a chat whose type is not known
+// stays visible.
+function pickHideLoad() {
+  try { const v = JSON.parse(localStorage.getItem('ix.pickHide') || '{}'); return { channel: !!v.channel, supergroup: !!v.supergroup }; } catch (e) { return { channel: false, supergroup: false }; }
+}
+function pickHideSave() {
+  try { localStorage.setItem('ix.pickHide', JSON.stringify(state.pickHide)); } catch (e) { /* private window: the choice lasts for this page only */ }
+}
+// The same chat can be written with or without Telegram's -100 prefix.
+function bareChatId(id) { return String(id || '').replace(/^-100/, '').replace(/^-/, ''); }
+function chatKind(kind) { return kind === 'forum' ? 'supergroup' : (kind || ''); }
 function groups() { return ((state.status && state.status.groups) || []).filter((g) => g.configured).sort((a, b) => natural(a.name, b.name)); }
 function catOf(g) { return state.draft.has(g.id) ? state.draft.get(g.id) : (g.category || ''); }
 function changed() { return groups().filter((g) => state.draft.has(g.id) && state.draft.get(g.id).trim() !== (g.category || '')); }
@@ -118,6 +131,19 @@ function updateBanner() {
   const note = u.autoNote ? `<div class="muted">${esc(u.autoNote)}</div>` : '';
   if (u.newer) return `<div class="status" role="status"><b>Version ${esc(u.latest)} is out</b> (you have ${esc(u.current)}). <span class="btns" style="margin-top:6px"><button class="b primary" data-act="u-start">Update when downloads finish</button><span class="muted">No new file starts until then. Files of 8 MB or more stop at their next checkpoint and carry on after the restart; smaller ones finish first.${u.auto ? '' : ' Settings → Downloads can install updates by themselves.'}</span></span>${note}</div>`;
   return note ? `<div class="status" role="status">${note}</div>` : '';
+}
+
+// ix.12.14: "Check for updates" and what the last look found.
+function updateCheckLine() {
+  const u = (state.status && state.status.update) || {};
+  let msg;
+  if (u.checking) msg = 'Checking…';
+  else if (u.checkError) msg = `Could not check: ${esc(u.checkError)}`;
+  else if (u.newer) msg = `Version ${esc(u.latest)} is out: see the top of the page.`;
+  else if (u.latest) msg = `You have the latest (${esc(u.current)}).`;
+  else msg = `You have ${esc(u.current || '?')}; not checked yet.`;
+  const when = u.checkedAt ? ` Checked ${esc(fmtTime(u.checkedAt))}.` : '';
+  return `<div class="btns"><button class="mini" data-act="u-check">Check for updates</button><span class="muted" role="status">${msg}${when} The app also checks by itself every hour; a check asked for within a minute of the last one shows that one.</span></div>`;
 }
 
 function banner() {
@@ -149,7 +175,7 @@ function banner() {
   if (s.hold && (!acct.deactivated)) h += `<div class="status warn">${esc(s.hold)}</div>`;
   // The local staging folder (ix_staging.go).
   const g = s.staging || {};
-  if (g.full && g.fullSince && Date.now() - g.fullSince > 10 * 60000) h += `<div class="status bad"><b>Downloads are waiting for room in the local staging folder</b> (since ${esc(fmtTime(g.fullSince))}): ${fmtNum(g.waiting || 0)} file(s), ${fmtSize(g.bytes || 0)}, wait to be copied to the downloads folder${g.failing ? ', and copying them fails' : ''}. Check that the downloads folder (the NAS) can be reached; raising the staging space in Settings also lets downloads go on.</div>`;
+  if (g.full && g.fullSince && Date.now() - g.fullSince > 10 * 60000) h += `<div class="status bad"><b>Downloads are waiting for room in the local staging folder</b> (since ${esc(fmtTime(g.fullSince))}): ${fmtNum(g.waiting || 0)} file(s), ${fmtSize(g.bytes || 0)}, wait to be copied to the downloads folder${g.failing ? ', and copying them fails' : ''}. Check that the downloads folder (the NAS) can be reached; freeing space on this disk, or keeping less free in Settings, also lets downloads go on.</div>`;
   if (g.stuck) h += `<div class="status warn"><b>${fmtNum(g.stuck)} file(s) in the local staging folder need you</b> (${fmtSize(g.stuckBytes || 0)}): they could not be copied to the downloads folder. Their local copies are kept and do not hold up downloads; the diagnostics report says why.</div>`;
   return h;
 }
@@ -420,6 +446,24 @@ function viewRescanRules(s) {
 }
 
 // ---------------- Rescan ----------------
+// ix.12.14: who holds each rescan lane, since when, and its last sign of work.
+function laneLines(lanes) {
+  if (!lanes) return '';
+  const one = (title, l) => {
+    if (!l) return `<div class="muted">${title} lane: free</div>`;
+    const quietMin = Math.floor((Date.now() - (l.lastWork || l.since || Date.now())) / 60000);
+    const rank = l.place ? ` (rank ${fmtNum(l.place)})` : '';
+    const sign = quietMin >= 10 ? ` · <span class="pill failed" title="The pass is stopped after ${Math.round((lanes.stallAfter || 1800000) / 60000)} minutes without a sign of work, and the next group goes on">no progress for ${fmtNum(quietMin)} min</span>` : ` · last sign of work ${quietMin < 1 ? 'just now' : `${fmtNum(quietMin)} min ago`}`;
+    return `<div class="muted">${title} lane: <b>${esc(l.name)}</b>${rank} since ${esc(fmtTime(l.since))}${sign}</div>`;
+  };
+  return `<div style="margin:4px 0">${one('Messages', lanes.messages)}${one('Files', lanes.files)}</div>`;
+}
+function laneQuiet(lanes, it) {
+  const l = lanes && (it.phase === 'files' ? lanes.files : lanes.messages);
+  if (!l || l.groupId !== it.groupId) return '';
+  const quietMin = Math.floor((Date.now() - (l.lastWork || l.since || Date.now())) / 60000);
+  return quietMin >= 10 ? ` <span class="pill failed">no progress for ${fmtNum(quietMin)} min</span>` : '';
+}
 function viewRescan() {
   const s = state.status;
   const q = s.queue || { items: [] };
@@ -437,16 +481,21 @@ function viewRescan() {
 <div class="btns"><button class="b primary" data-act="p-everything" ${notQueued.length ? '' : 'disabled'}>Rescan all ${notQueued.length} group(s)</button></div></div>`;
   h += viewRescanRules(s.settings);
   if (state.rescanNote) h += `<div class="status">${esc(state.rescanNote)} <button class="mini" data-act="tab" data-key="priorities">Open Priorities</button></div>`;
-  h += `<div class="status">${head} Two lanes run side by side, one group each. <b>Messages:</b> every group's history is saved, without waiting for downloads. <b>Files:</b> as soon as a group's messages are saved, it is walked again to fetch the files still missing (failed files get another try too). <b>★ First</b> groups go on the <a href="#priorities">ranked list</a>: first in both lanes, and their files download first. Runs inside the server — you can close this page.${q.notice ? `<div class="muted" style="margin-top:4px">${esc(q.notice)}</div>` : ''}<div style="margin-top:6px">${viewDlState()}</div></div>`;
+  h += `<div class="status">${head}${laneLines(s.lanes)} Two lanes run side by side, one group each. <b>Messages:</b> every group's history is saved, without waiting for downloads. <b>Files:</b> as soon as a group's messages are saved, it is walked again to fetch the files still missing (failed files get another try too). <b>★ First</b> groups go on the <a href="#priorities">ranked list</a>: first in both lanes, and their files download first. Runs inside the server — you can close this page.${q.notice ? `<div class="muted" style="margin-top:4px">${esc(q.notice)}</div>` : ''}<div style="margin-top:6px">${viewDlState()}</div></div>`;
   h += `<div class="btns" style="margin-bottom:12px">${q.running ? `<button class="b" data-act="q-pause">Pause</button>` : `<button class="b primary" data-act="q-start" ${counts.waiting ? '' : 'disabled'}>Start</button>`}
 <button class="b" data-act="q-clear-finished" ${counts.done + counts.failed ? '' : 'disabled'}>Remove finished</button><button class="b" data-act="q-clear" ${items.length ? '' : 'disabled'}>Clear queue</button>
 <span class="muted">Retries: ${q.maxAttempts ? 'up to ' + q.maxAttempts : 'unlimited'}</span></div>`;
   if (items.length) {
     h += `<div class="list" style="margin-bottom:12px"><table><tr><th>#</th><th>Group</th><th>Step</th><th>Messages saved</th><th>Files missing</th><th title="New downloads this group's files pass has added to the download queue">Files queued</th><th>Tries</th><th></th></tr>`;
-    // Shown in the order they run: running, then waiting (★ first), failed, done.
-    const order = { running: 0, waiting: 1, failed: 2, done: 3 };
-    const shownItems = items.map((it, i) => ({ it, i })).sort((a, b) => ((order[a.it.state] ?? 4) - (order[b.it.state] ?? 4))
-      || (a.it.state === 'waiting' ? ((b.it.priority ? 1 : 0) - (a.it.priority ? 1 : 0)) : 0) || (a.i - b.i)).map((x) => x.it);
+    // Shown in the order they run (ix.12.14: the server's own lane order):
+    // running, then waiting by how many come before them in their lane, then
+    // those waiting to retry, failed, done.
+    const ahead = (s.lanes || {}).ahead || {};
+    const places = (s.lanes || {}).places || {};
+    const order = { running: 0, waiting: 1, failed: 3, done: 4 };
+    const rankOf = (it) => (it.state === 'waiting' && !(it.groupId in ahead) ? 2 : order[it.state] ?? 5);
+    const shownItems = items.map((it, i) => ({ it, i })).sort((a, b) => (rankOf(a.it) - rankOf(b.it))
+      || ((ahead[a.it.groupId] ?? 1e9) - (ahead[b.it.groupId] ?? 1e9)) || ((a.it.phase === 'files') - (b.it.phase === 'files')) || (a.i - b.i)).map((x) => x.it);
     shownItems.forEach((it, i) => {
       const when = (it.state === 'waiting' && it.nextAt > Date.now() ? ` · retry ${esc(fmtTime(it.nextAt))}` : '') + (it.resumeFrom && it.state !== 'done' ? ` · continues below message #${it.resumeFrom}` : '');
       const files = it.phase === 'files';
@@ -457,24 +506,32 @@ function viewRescan() {
       const pending = it.state === 'done' && ((lq.left || 0) + (lq.apart || 0)) > 0;
       const heldBack = it.state === 'done' ? (lq.held || 0) : 0;
       const label = pending ? `downloading: ${fmtNum((lq.left || 0) + (lq.apart || 0))} left` : heldBack ? `done · ${fmtNum(heldBack)} held back` : { waiting: files ? 'files: waiting' : 'messages: waiting', running: files ? 'fetching files' : 'saving messages', done: 'done', failed: 'failed' }[it.state] || it.state;
+      const nAhead = ahead[it.groupId];
+      const aheadNote = it.state === 'waiting' && nAhead !== undefined ? (nAhead === 0 ? ' · next in its lane' : ` · ${fmtNum(nAhead)} before it in its lane`) : '';
+      const quiet = it.state === 'running' ? laneQuiet(s.lanes, it) : '';
       const leftNote = (pending && lq.apart ? ` · ${fmtNum(lq.apart)} of them held back for now (likely copies, or larger files while time is short)` : '')
         + (heldBack ? ` · ${fmtNum(heldBack)} ${pending ? 'more ' : ''}wait for you (paused, or likely copies held until you decide)` : '');
       const msgs = it.messagesAt ? it.messages : (it.state === 'running' && !files) || (it.state === 'done' && !it.phase) ? (it.carried || 0) + it.processed : it.carried ? it.carried : null;
       const missing = it.messagesAt ? it.missing : null;
-      h += `<tr><td class="n">${i + 1}</td><td>${it.priority ? '<b title="Goes first, files included">★</b> ' : ''}${esc(it.name)}${it.error ? `<div class="muted bad">${esc(it.error)}</div>` : ''}</td><td><span class="pill ${esc(pending ? 'running' : it.state)}" ${pending ? 'title="Every message is read and every missing file is queued; these files are still in the download queue"' : ''}>${esc(label)}</span><span class="muted">${when}${leftNote}</span></td><td class="n">${msgs === null ? '<span class="muted">–</span>' : fmtNum(msgs)}</td><td class="n">${missing === null ? '<span class="muted">–</span>' : fmtNum(missing)}</td><td class="n">${(files && it.state !== 'waiting') || !it.phase ? fmtNum(it.downloaded) : '<span class="muted">–</span>'}</td><td class="n">${it.attempts || 0}</td>
-<td>${it.state === 'running' || it.state === 'waiting' ? `<button class="mini" title="What goes first is set in the Priorities tab" data-act="go-prio" data-name="${esc(it.name)}">${it.priority ? 'Ranked: change in Priorities' : 'Rank in Priorities…'}</button>` : `<button class="mini" data-act="q-retry" data-id="${esc(it.groupId)}">Run again</button>`}<button class="mini" data-act="q-remove" data-id="${esc(it.groupId)}">${it.state === 'running' ? 'Stop' : 'Remove'}</button></td></tr>`;
+      h += `<tr><td class="n">${i + 1}</td><td>${it.priority ? '<b title="Goes first, files included">★</b> ' : ''}${esc(it.name)}${it.error ? `<div class="muted bad">${esc(it.error)}</div>` : ''}</td><td><span class="pill ${esc(pending ? 'running' : it.state)}" ${pending ? 'title="Every message is read and every missing file is queued; these files are still in the download queue"' : ''}>${esc(label)}</span><span class="muted">${aheadNote}${when}${leftNote}</span>${quiet}</td><td class="n">${msgs === null ? '<span class="muted">–</span>' : fmtNum(msgs)}</td><td class="n">${missing === null ? '<span class="muted">–</span>' : fmtNum(missing)}</td><td class="n">${(files && it.state !== 'waiting') || !it.phase ? fmtNum(it.downloaded) : '<span class="muted">–</span>'}</td><td class="n">${it.attempts || 0}</td>
+<td>${it.state === 'running' || it.state === 'waiting' ? `<button class="mini" title="What goes first is set in the Priorities tab" data-act="go-prio" data-name="${esc(it.name)}">${places[it.groupId] ? `Rank ${fmtNum(places[it.groupId])}: change in Priorities` : 'Rank in Priorities…'}</button>` : `<button class="mini" data-act="q-retry" data-id="${esc(it.groupId)}">Run again</button>`}<button class="mini" data-act="q-remove" data-id="${esc(it.groupId)}">${it.state === 'running' ? 'Stop' : 'Remove'}</button></td></tr>`;
     });
     h += `</table></div>`;
   }
   // picker
   const queued = new Set(items.filter((i) => i.state === 'waiting' || i.state === 'running').map((i) => i.groupId));
-  let list = groups().map((g) => ({ id: g.id, name: g.name, files: g.files, never: !g.lastWalk, finished: !!g.finishedAt,
+  const dialogKind = new Map((state.dialogs || []).map((d) => [bareChatId(d.id), d.type]));
+  let list = groups().map((g) => ({ id: g.id, name: g.name, files: g.files, never: !g.lastWalk, finished: !!g.finishedAt, kind: chatKind(g.kind || dialogKind.get(bareChatId(g.id))),
     sub: (g.finishedAt ? '<b>finished</b> — rescans leave it alone (tick it and reopen it below) · ' : '') + (g.category ? esc(g.category) + ' · ' : '') + (g.files ? fmtNum(g.files) + ' files downloaded · ' : 'no files yet · ') + (g.lastWalk ? 'messages captured, last rescan ' + fmtTime(g.lastWalk) : (g.files ? '<b>messages not captured yet</b>' : 'never rescanned')) }));
   const withFiles = groups().filter((g) => g.files > 0 && !g.lastWalk && !g.finishedAt && !queued.has(g.id)).length;
   if (state.showAll && state.dialogs) {
     const have = new Set(list.map((x) => x.id));
-    for (const d of state.dialogs) if (!have.has(d.id)) list.push({ id: d.id, name: d.name, sub: 'not in the downloader yet (' + (d.type || 'chat') + ')', extra: true });
+    for (const d of state.dialogs) if (!have.has(d.id)) list.push({ id: d.id, name: d.name, kind: chatKind(d.type), sub: 'not in the downloader yet (' + (d.type || 'chat') + ')', extra: true });
   }
+  const hiddenKind = (x) => !!x.kind && !!state.pickHide[x.kind];
+  const hiddenTicked = list.filter((x) => hiddenKind(x) && state.pick.has(x.id)).length;
+  list = list.filter((x) => !hiddenKind(x) || (state.pickOnly && state.pick.has(x.id)));
+  const kindLabel = (x) => (x.kind && !x.extra ? `${esc(x.kind)} · ` : '');
   const qq = state.pickSearch.trim().toLowerCase();
   // Ticks are kept while you search: search, tick, search again, tick more.
   const shown = list.filter((x) => (state.pickOnly ? state.pick.has(x.id) : !qq || x.name.toLowerCase().includes(qq))).sort((a, b) => natural(a.name, b.name));
@@ -482,7 +539,8 @@ function viewRescan() {
 <div class="btns"><input class="t" style="flex:1;min-width:200px" placeholder="Search ${list.length} chats…" data-in="pickSearch" data-focus="pick" value="${esc(state.pickSearch)}">
 <button class="mini" data-act="p-clear-search" ${state.pickSearch ? '' : 'disabled'}>Clear search</button><button class="mini" data-act="p-all">Tick all ${shown.length} shown</button><button class="mini" data-act="p-files" ${withFiles ? '' : 'disabled'}>Tick the ${withFiles} with files but no messages captured</button><button class="mini" data-act="p-never">Tick never rescanned</button><button class="mini" data-act="p-none">Untick all</button>
 <button class="mini" data-act="p-dialogs" ${state.dialogsLoading ? 'disabled' : ''}>${state.dialogsLoading ? 'Loading chats…' : state.showAll ? 'Hide other chats' : 'Show all my chats'}</button></div>
-<div class="list">${shown.map((x) => `<div class="row" style="grid-template-columns:1fr"><label><input type="checkbox" data-pick="${esc(x.id)}" data-name="${esc(x.name)}" data-finished="${x.finished ? '1' : ''}" ${state.pick.has(x.id) ? 'checked' : ''}><span><b>${esc(x.name)}</b> <span class="muted">${x.extra ? esc(x.sub) : x.sub}${queued.has(x.id) ? ' · in the queue' : ''}</span></span></label></div>`).join('') || '<div class="muted" style="padding:8px">No chats match.</div>'}</div>
+<div class="btns"><label class="muted"><input type="checkbox" data-pick-hide="channel" ${state.pickHide.channel ? 'checked' : ''}> Hide channels</label><label class="muted"><input type="checkbox" data-pick-hide="supergroup" ${state.pickHide.supergroup ? 'checked' : ''}> Hide supergroups</label><span class="muted">Chats whose type is not known yet stay listed (the type is learned when their messages are read, or from "Show all my chats").${hiddenTicked ? ` <b>${fmtNum(hiddenTicked)} ticked chat(s) are hidden by this</b>; they stay ticked.` : ''}</span></div>
+<div class="list">${shown.map((x) => `<div class="row" style="grid-template-columns:1fr"><label><input type="checkbox" data-pick="${esc(x.id)}" data-name="${esc(x.name)}" data-finished="${x.finished ? '1' : ''}" ${state.pick.has(x.id) ? 'checked' : ''}><span><b>${esc(x.name)}</b> <span class="muted">${kindLabel(x)}${x.extra ? esc(x.sub) : x.sub}${queued.has(x.id) ? ' · in the queue' : ''}</span></span></label></div>`).join('') || '<div class="muted" style="padding:8px">No chats match.</div>'}</div>
 <label class="muted"><input type="checkbox" data-in-check="ensureFilters" ${state.ensureFilters ? 'checked' : ''}> Switch on photos, videos <b>and files/documents</b> for these groups (recommended)</label>
 <div class="btns"><button class="b primary" data-act="p-add" ${state.pick.size ? '' : 'disabled'}>Rescan ${state.pick.size} ticked group(s)</button><button class="b" data-act="p-add-first" ${state.pick.size ? '' : 'disabled'}>★ Rescan ${state.pick.size} ticked first</button><span class="grow"></span><button class="b" data-act="p-finish" ${state.pick.size ? '' : 'disabled'}>✓ Mark ${state.pick.size} ticked finished</button><button class="mini" data-act="p-reopen" ${state.pick.size ? '' : 'disabled'}>Reopen ticked</button><button class="mini" data-act="g-finish-complete" ${groups().some((g) => !g.finishedAt && groupComplete(g)) ? '' : 'disabled'} title="Every group marked ✓ complete on the Overview (all messages and all files saved) is set to finished; rescans then leave it alone">✓ Finish all complete groups</button></div>
 <div class="muted">★ First: these groups join the <a href="#priorities">ranked list</a> and go ahead of all others, for their messages, then queueing their files, then downloading them. Ticking a group that is already queued keeps its progress.</div></div>`;
@@ -578,6 +636,10 @@ function prioCount(c) { c = c || {}; return `<b>${fmtNum(c.files)}</b><div class
 // the last 3 hours and the last day give. An estimate only, and only of what
 // the rescans have read so far.
 function prioEta(cum, g, p) {
+  // ix.12.14: a group with nothing of its own still needed showed when the
+  // groups above it would finish.
+  const own = ((g.needed || {}).bytes || 0) - ((g.neededAhead || {}).bytes || 0);
+  if (own <= 0) return g.scanned ? '' : '<div class="muted">not known until its messages are read</div>';
   const speeds = [p.rate3h, p.rateDay].filter((x) => x > 0);
   if (!speeds.length || !cum) return '';
   const lo = cum / Math.max(...speeds), hi = cum / Math.min(...speeds);
@@ -806,10 +868,12 @@ ${state.diag ? `<textarea id="diag" readonly style="width:100%;min-height:260px;
 <label style="margin-left:22px"><input type="checkbox" data-set="paceByAnswers" ${s.paceByAnswers ? 'checked' : ''}> …and judge its tries by how fast Telegram answers each part instead of by bytes a second (experimental, off by default). It climbs more readily, so it falls back to the old way for two hours after two Telegram waits within an hour, or when a climb does not bring more bytes. The diagnostics report says, hour by hour, where it would have decided otherwise: switch it on only if that shows climbs being missed.</label>
 <label><input type="checkbox" data-set="autoRetry" ${s.autoRetry ? 'checked' : ''}> Retry failed downloads automatically every few hours (up to 5 times per file)</label>
 <div style="margin-top:8px"><b>Local staging folder</b></div>
-<div class="muted">What it does: downloads are written to a folder on this computer first, checked, then copied to the downloads folder (your NAS) and checked again before the local copy is removed, so a network hiccup on the share does not fail a download that Telegram already sent. A copy that fails is retried for as long as it takes, and nothing on the NAS is ever replaced. Files of 8 MB or more keep their progress there too. When the space below is used up, new downloads wait for copies to finish.</div>
+<div class="muted">What it does: downloads are written to a folder on this computer first, checked, then copied to the downloads folder (your NAS) and checked again before the local copy is removed, so a network hiccup on the share does not fail a download that Telegram already sent. A copy that fails is retried for as long as it takes, and nothing on the NAS is ever replaced. Files of 8 MB or more keep their progress there too. A new download is staged while this computer's disk keeps the free space below after it; otherwise it goes straight to the downloads folder. A larger number keeps the staging folder smaller. At least 20 GB. Parts kept from big-video checks give way first: none are kept while this disk has less than 10 GB more than this free (and never under 60 GB). Up to 3 staged files are copied to the downloads folder at once.</div>
 ${stagePicker(s)}
-<div class="btns">Space it may use: <input class="t" data-set-text="stageCapGb" value="${esc(String(s.stageCapGb || 20))}" style="width:70px"> GB</div>
+<div class="btns">Keep at least <input class="t" data-set-text="stageKeepFreeGb" aria-label="Free space to keep on the staging disk, in GB" value="${esc(String(s.stageKeepFreeGb || (state.status.staging || {}).keepFreeGb || 50))}" style="width:70px"> GB free on this disk</div>
+${(() => { const g = state.status.staging || {}; return g.on && g.roomKnown ? `<div class="muted">Staging may use about ${esc(fmtSize(g.room || 0))} more now${g.waiting ? ` (${fmtNum(g.waiting)} file(s), ${esc(fmtSize(g.bytes || 0))}, wait to be copied)` : ''}.</div>` : ''; })()}
 <label><input type="checkbox" data-set="autoUpdate" ${s.autoUpdate ? 'checked' : ''} ${(state.status.update || {}).restarts ? '' : 'disabled'}> Install updates automatically: when a newer release is out, no new file starts, files of 8 MB or more stop at their next checkpoint (at most 30 seconds away) and carry on after the restart, smaller ones finish, then the app restarts on the new version. If downloads in progress take longer than 20 minutes it goes back to downloading and tries again later.</label>
+${updateCheckLine()}
 ${(state.status.update || {}).restarts ? '' : '<div class="warn">This needs a launcher that starts the app again when it exits. Add the line <code>set TGDL_LAUNCHER_RESTARTS=1</code> to <code>start.bat</code> (before <code>:run</code>), then close its window and open it again.</div>'}
 <div class="btns"><button class="b primary" data-act="set-save">Save settings</button></div>
 ${state.setMsg ? `<div class="muted">${esc(state.setMsg)}</div>` : ''}</div>
@@ -949,6 +1013,12 @@ $app.addEventListener('click', async (ev) => {
       else if ((r.data || {}).skippedFinished > 0) said = `Not added: ${fmtNum(r.data.skippedFinished)} group(s) are marked finished. Reopen them in Rescan → Choose groups first.`;
       await loadPrio(); load();
       if (said) { state.prioError = said; render(); }
+      break;
+    }
+    case 'u-check': {
+      const r = await api('POST', '/api/ix/update', { action: 'check' });
+      if (r.ok) { state.status.update = r.data; state.error = ''; } else state.error = errText(r);
+      render();
       break;
     }
     case 'u-start': case 'u-cancel': case 'u-now': {
@@ -1135,6 +1205,7 @@ $app.addEventListener('change', (ev) => {
   noteSetDraft(t);
   if (t.matches('[data-prio-sel]')) { const gid = t.getAttribute('data-prio-sel'); if (t.checked) state.prioSel.add(gid); else state.prioSel.delete(gid); render(); }
   else if (t.matches('[data-sel]')) { const gid = t.getAttribute('data-sel'); if (t.checked) state.sel.add(gid); else state.sel.delete(gid); render(); }
+  else if (t.matches('[data-pick-hide]')) { state.pickHide[t.getAttribute('data-pick-hide')] = t.checked; pickHideSave(); render(); }
   else if (t.matches('[data-pick]')) { const gid = t.getAttribute('data-pick'); if (t.checked) state.pick.add(gid); else state.pick.delete(gid); render(); }
   else if (t.matches('[data-in-check]')) state[t.getAttribute('data-in-check')] = t.checked;
   else if (t.matches('[data-sel-in]')) state[t.getAttribute('data-sel-in')] = t.value;
