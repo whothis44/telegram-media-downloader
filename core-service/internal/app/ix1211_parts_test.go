@@ -154,7 +154,7 @@ func TestIx1211DoubtfulPartsAreRefused(t *testing.T) {
 // nothing over the cap; over the cap the oldest file's parts go first.
 func TestIx1211CapAndFreeSpaceFloor(t *testing.T) {
 	a, ctx := ixTestApp(t)
-	ix1211Space(t, 20<<30+telegram.PartSize) // one part's room above the floor
+	ix1211Space(t, ixPartsFreeFloor+telegram.PartSize) // one part's room above the floor
 	data := ix1211Data(3, 3*telegram.PartSize)
 	a.ixPartsKeep(ctx, "document:1:3145728", ix1211Parts(data, 0, 1))
 	if n := ix1211Rows(t, a, "document:1:3145728"); n != 0 {
@@ -297,4 +297,39 @@ func TestIx1211TheCheckFloorStepsDown(t *testing.T) {
 	_ = a.ixSampleFloor(ctx)
 	q(8, 500<<20)
 	floor(20)
+}
+
+// ix.12.12: the cap is 100 GB and the floor 60 GB, above the staging folder's
+// 50 GB reserve; while the disk is under the floor the sweep removes the
+// oldest files' parts until it is not, and leaves the rest.
+func TestIx1212PartsGiveWayToTheDisk(t *testing.T) {
+	if ixPartsCap != 100<<30 || ixPartsFreeFloor != 60<<30 {
+		t.Fatalf("cap %d GB, floor %d GB", ixPartsCap>>30, ixPartsFreeFloor>>30)
+	}
+	a, ctx := ixTestApp(t)
+	ix1211Space(t, 100<<30)
+	data := ix1211Data(5, 3*telegram.PartSize)
+	var idents []string
+	for i := 0; i < 3; i++ {
+		m := ixTestVideo(10+i, int64(2000+i), int64(len(data)), 60, 640, 360, nil, 1700000000)
+		ixTestQueue(t, a, m)
+		f, _ := ixCopyFactsOf(m)
+		idents = append(idents, f.Ident)
+		a.ixPartsKeep(ctx, f.Ident, ix1211Parts(data, 0, 1))
+		time.Sleep(3 * time.Millisecond)
+	}
+	// One MiB short of the floor: the oldest file's 2 MiB is enough.
+	ixPartsFree = func(string) (int64, bool) { return ixPartsFreeFloor - telegram.PartSize, true }
+	if err := a.ixPartsSweep(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if ix1211Rows(t, a, idents[0]) != 0 || ix1211Rows(t, a, idents[1]) != 2 || ix1211Rows(t, a, idents[2]) != 2 {
+		t.Fatalf("kept after freeing space: %d %d %d", ix1211Rows(t, a, idents[0]), ix1211Rows(t, a, idents[1]), ix1211Rows(t, a, idents[2]))
+	}
+	if ixPartsCountsOf(a).ForSpace.Load() != 1 {
+		t.Fatal("not counted")
+	}
+	if line := a.ixPartsDiag(ctx); !strings.Contains(line, "at most 102400 MB; none kept under 60 GB free") || !strings.Contains(line, "(1 to free disk space)") {
+		t.Fatalf("report: %s", line)
+	}
 }

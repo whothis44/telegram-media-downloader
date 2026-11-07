@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.18-ix.12.12] — 2026-11-06
+
+### Changed
+- **Parts kept from big-video checks are kept much longer: up to 100 GB instead of 4 GB.** A checked video is usually downloaded about a day after its check (on one archive: a quarter within 2 hours, a quarter after 38 hours), and 240 checked videos were still waiting after a median of 55 hours, while checks kept about 120 MB of parts an hour. 4 GB held about two days, so the slowest videos lost their kept parts before their download came. In practice the free space limits it now: nothing new is kept while the data disk has less than 60 GB free (20 GB until now), and below that the oldest kept parts are removed, so staged downloads, which go on locally while 50 GB stays free, always have the room first.
+
+### Added
+- The log says when a download took parts kept from its check: "a download took N MB of its M MB file from parts kept from its check, not from Telegram" (sizes only), and the report counts those downloads.
+- Report: where each Telegram server's time went, hour by hour: the parts' time in flight, of it answered by Telegram, failed requests, waits (and of those speed-limit sleeps), the request rate limit, and the rest; and the seconds plain Telegram waits asked for. On 11-06 one server moved far fewer bytes per part in flight than the others in several hours, while Telegram answered its parts as fast: these numbers show where that time goes before anything is changed. Nothing about downloading changes.
+
 ## [3.4.18-ix.12.11] — 2026-11-06
 
 ### Added

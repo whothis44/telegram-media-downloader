@@ -153,7 +153,15 @@ func TestDownloadMediaTakesKeptPartsByIdentity(t *testing.T) {
 		return keptFunc(kept)
 	})
 	defer SetKeptParts(nil)
+	type use struct {
+		id    MediaIdentity
+		bytes int64
+	}
+	var used []use
+	SetKeptPartsUsed(func(got MediaIdentity, n int64) { used = append(used, use{got, n}) })
+	defer SetKeptPartsUsed(nil)
 	for _, threads := range []int{1, 4} {
+		used = nil
 		pool := &keptTestPool{parts: fakeParts{data: data}}
 		c := &downloadTestClient{}
 		client := keptTestClient{downloadTestClient: c, pool: pool}
@@ -181,6 +189,10 @@ func TestDownloadMediaTakesKeptPartsByIdentity(t *testing.T) {
 		}
 		if threads > 1 && len(askedParts(&pool.parts)) != 5 {
 			t.Fatalf("threads %d: another file took kept parts: asked %v", threads, askedParts(&pool.parts))
+		}
+		// ix.12.12: one report for the file that took kept parts, with its bytes.
+		if len(used) != 1 || used[0].id.Key() != id.Key() || used[0].bytes != 2*downloadPartSize {
+			t.Fatalf("threads %d: reported %+v", threads, used)
 		}
 	}
 	if len(looked) == 0 {

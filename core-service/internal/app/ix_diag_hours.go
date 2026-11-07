@@ -132,6 +132,13 @@ func (a *App) ixDiagHours(ctx context.Context, now time.Time) []string {
 				ixAddCounts(&r.pace.DCTriesDown, h.DCTriesDown)
 				ixAddCounts(&r.pace.DCAtFloor, h.DCAtFloor)
 				ixAddCounts(&r.pace.DCBelow, h.DCBelow)
+				ixAddCounts(&r.pace.DCOkMs, h.DCOkMs) // ix.12.12: where each server's time went
+				ixAddCounts(&r.pace.DCFailMs, h.DCFailMs)
+				ixAddCounts(&r.pace.DCFails, h.DCFails)
+				ixAddCounts(&r.pace.DCWaitedMs, h.DCWaitedMs)
+				ixAddCounts(&r.pace.DCSleptMs, h.DCSleptMs)
+				ixAddCounts(&r.pace.DCLimitMs, h.DCLimitMs)
+				ixAddCounts(&r.pace.DCWaitSecs, h.DCWaitSecs)
 				r.pace.Waits += h.Waits
 				r.pace.Premium += h.Premium
 				r.pace.Seconds = max(r.pace.Seconds, h.Seconds)
@@ -188,6 +195,9 @@ func (a *App) ixDiagHours(ctx context.Context, now time.Time) []string {
 			}
 			if w := ixDCCounts(r.pace.DCWaits); w != "" {
 				line += " | plain Telegram waits per server: " + w
+			}
+			if t := ixDCTimes(r.pace); t != "" {
+				line += " | time per server, seconds summed over parts: " + t
 			}
 			if r.pace.TriesUp+r.pace.TriesDown > 0 {
 				line += " | " + ixTriesLine(r.pace)
@@ -316,6 +326,41 @@ func ixDCLoad(h telegram.PaceHour) string {
 		parts = append(parts, x)
 	}
 	return strings.Join(parts, ", ")
+}
+
+// ixDCTimes is where each server's parts spent their time in the hour
+// (ix.12.12): in flight (sampled every 10 s), of that with Telegram (answered,
+// and failed), in deliberate waits (of those speed-limit sleeps of single
+// requests), held by the request rate limit, and what none of those covers;
+// then the seconds plain FLOOD_WAITs asked for. Numbers only.
+func ixDCTimes(h telegram.PaceHour) string {
+	seen := map[int]bool{}
+	for _, m := range []map[int]int{h.DCOkMs, h.DCFailMs, h.DCWaitedMs, h.DCLimitMs, h.DCWaitSecs} {
+		for dc := range m {
+			seen[dc] = true
+		}
+	}
+	if len(seen) == 0 {
+		return ""
+	}
+	dcs := make([]int, 0, len(seen))
+	for dc := range seen {
+		dcs = append(dcs, dc)
+	}
+	sort.Ints(dcs)
+	s := func(ms int) int { return (ms + 500) / 1000 }
+	parts := make([]string, 0, len(dcs))
+	for _, dc := range dcs {
+		inflight := h.DCInflight[dc] * 10 // samples every 10 s (telegram.paceInterval)
+		ok, failed, waited, limit := s(h.DCOkMs[dc]), s(h.DCFailMs[dc]), s(h.DCWaitedMs[dc]), s(h.DCLimitMs[dc])
+		x := fmt.Sprintf("DC%d in flight %d, answered %d, failed %d (%d requests), waits %d (speed-limit sleeps %d), rate limit %d, other %d",
+			dc, inflight, ok, failed, h.DCFails[dc], waited, s(h.DCSleptMs[dc]), limit, max(0, inflight-ok-failed-waited-limit))
+		if n := h.DCWaits[dc]; n > 0 {
+			x += fmt.Sprintf(", %d plain waits asked %d", n, h.DCWaitSecs[dc])
+		}
+		parts = append(parts, x)
+	}
+	return strings.Join(parts, "; ")
 }
 
 // ixDCList is "DC1 820 MB (3 limit waits), DC4 10 MB", by server number.

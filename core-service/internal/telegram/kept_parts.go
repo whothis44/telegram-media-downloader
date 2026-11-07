@@ -39,6 +39,46 @@ func keptPartsFor(id MediaIdentity) KeptParts {
 
 var keptPartBytes, keptPartRefused atomic.Int64
 
+// KeptPartsUsed is told, after a download that took kept parts finished,
+// how many bytes of the file came from them (ix.12.12: one log line each).
+type KeptPartsUsed func(id MediaIdentity, bytes int64)
+
+var keptPartsUsed atomic.Pointer[KeptPartsUsed]
+
+// SetKeptPartsUsed sets who hears of downloads that took kept parts (nil: nobody).
+func SetKeptPartsUsed(f KeptPartsUsed) {
+	if f == nil {
+		keptPartsUsed.Store(nil)
+		return
+	}
+	keptPartsUsed.Store(&f)
+}
+
+// countingKept counts into used the bytes kept hands out with the length
+// keptPart accepts. It is called from the download's own loop only.
+func countingKept(kept KeptParts, size int64, used *int64) KeptParts {
+	if kept == nil {
+		return nil
+	}
+	return func(index int) ([]byte, bool) {
+		data, ok := kept(index)
+		if ok && int64(len(data)) == min(int64(downloadPartSize), size-int64(index)*downloadPartSize) {
+			*used += int64(len(data))
+		}
+		return data, ok
+	}
+}
+
+// reportKeptUsed tells the hook of a finished download's kept bytes.
+func reportKeptUsed(id MediaIdentity, used int64) {
+	if used <= 0 {
+		return
+	}
+	if f := keptPartsUsed.Load(); f != nil && *f != nil {
+		(*f)(id, used)
+	}
+}
+
 // KeptPartStats: bytes of kept parts written in place of a fetch since the
 // start, and kept parts refused for their length (fetched from Telegram).
 func KeptPartStats() (bytes, refused int64) {

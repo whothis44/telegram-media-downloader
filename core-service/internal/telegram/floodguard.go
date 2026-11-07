@@ -181,6 +181,9 @@ func sleepRequest(ctx context.Context, d time.Duration, hooks partHooks) error {
 	if hooks.waiting != nil {
 		hooks.waiting(false)
 	}
+	if hooks.slept != nil {
+		hooks.slept(time.Since(started))
+	}
 	if hooks.waited != nil {
 		hooks.waited(time.Since(started))
 	}
@@ -256,10 +259,12 @@ func (g *floodGuard) wait(ctx context.Context) error {
 }
 
 func (g *floodGuard) waitGate(ctx context.Context, files bool) error {
-	return g.waitGateObserved(ctx, files, nil, nil)
+	return g.waitGateObserved(ctx, files, nil, nil, nil)
 }
 
-func (g *floodGuard) waitGateObserved(ctx context.Context, files bool, waited func(time.Duration), waiting func(bool)) error {
+// limited (ix.12.12, optional) hears how long the account's request rate
+// limit held a request, for the hour-by-hour record only.
+func (g *floodGuard) waitGateObserved(ctx context.Context, files bool, waited func(time.Duration), waiting func(bool), limited func(time.Duration)) error {
 	for {
 		g.mu.Lock()
 		delay := time.Until(g.until)
@@ -268,7 +273,13 @@ func (g *floodGuard) waitGateObserved(ctx context.Context, files bool, waited fu
 		}
 		g.mu.Unlock()
 		if delay <= 0 {
-			return g.limiter.Wait(ctx)
+			if limited == nil {
+				return g.limiter.Wait(ctx)
+			}
+			started := time.Now()
+			err := g.limiter.Wait(ctx)
+			limited(time.Since(started))
+			return err
 		}
 		resume := pauseDownloadWait(ctx)
 		if waiting != nil {
@@ -313,6 +324,13 @@ type partHooks struct {
 	answered func(took time.Duration)
 	waited   func(time.Duration)
 	waiting  func(bool)
+	// For the hour-by-hour record only (ix.12.12), all optional: every
+	// request's time with Telegram and whether it came back without an
+	// error, the request rate limit's hold, and the speed-limit sleeps of a
+	// single request (also told to waited).
+	invoked func(took time.Duration, ok bool)
+	limited func(time.Duration)
+	slept   func(time.Duration)
 }
 
 // filePartTimeout gives up on one file part that has not been answered in
@@ -331,7 +349,7 @@ func (g *floodGuard) invokeFiles(ctx context.Context, next tg.Invoker, input bin
 
 func (g *floodGuard) invokeGate(ctx context.Context, next tg.Invoker, input bin.Encoder, output bin.Decoder, files bool, hooks partHooks) error {
 	for attempt := 0; ; attempt++ {
-		if err := g.waitGateObserved(ctx, files, hooks.waited, hooks.waiting); err != nil {
+		if err := g.waitGateObserved(ctx, files, hooks.waited, hooks.waiting, hooks.limited); err != nil {
 			return err
 		}
 		var err error
@@ -341,6 +359,9 @@ func (g *floodGuard) invokeGate(ctx context.Context, next tg.Invoker, input bin.
 			err = next.Invoke(reqCtx, input, output)
 			timedOut := errors.Is(reqCtx.Err(), context.DeadlineExceeded)
 			cancel()
+			if hooks.invoked != nil {
+				hooks.invoked(time.Since(started), err == nil)
+			}
 			// A part not answered in time counts as answered that slowly:
 			// when every part times out, the window must still shrink.
 			if hooks.answered != nil && (err == nil || timedOut && ctx.Err() == nil) {

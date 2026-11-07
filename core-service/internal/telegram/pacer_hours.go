@@ -69,6 +69,19 @@ type PaceHour struct {
 	DCTriesDown map[int]int `json:"dcTriesDown,omitempty"`
 	DCAtFloor   map[int]int `json:"dcAtFloor,omitempty"`
 	DCBelow     map[int]int `json:"dcBelowFloor,omitempty"`
+	// Per server (ix.12.12), milliseconds summed across requests: with
+	// Telegram and answered, with Telegram and failed (and how many failed),
+	// in deliberate waits, of those the speed-limit sleeps of single requests,
+	// and held by the account's request rate limit; and the seconds plain
+	// FLOOD_WAITs on file parts asked for. With DCInflight (sampled every 10 s)
+	// they say where a server's time in flight went.
+	DCOkMs     map[int]int `json:"dcOkMs,omitempty"`
+	DCFailMs   map[int]int `json:"dcFailMs,omitempty"`
+	DCFails    map[int]int `json:"dcFails,omitempty"`
+	DCWaitedMs map[int]int `json:"dcWaitedMs,omitempty"`
+	DCSleptMs  map[int]int `json:"dcSleptMs,omitempty"`
+	DCLimitMs  map[int]int `json:"dcLimitMs,omitempty"`
+	DCWaitSecs map[int]int `json:"dcWaitSecs,omitempty"`
 
 	took    time.Duration
 	answers int
@@ -106,6 +119,13 @@ func (p *downloadPacer) recordHourLocked(now time.Time, secs float64) {
 		h.TriesDown += d.triesDown
 		h.DropsKept += d.dropsKept
 		d.triesUp, d.climbsRefused, d.triesDown, d.dropsKept = 0, 0, 0, 0
+		addDC(&h.DCOkMs, d.dc, int(d.times.ok.Milliseconds()))
+		addDC(&h.DCFailMs, d.dc, int(d.times.failed.Milliseconds()))
+		addDC(&h.DCFails, d.dc, d.times.failures)
+		addDC(&h.DCWaitedMs, d.dc, int(d.times.waited.Milliseconds()))
+		addDC(&h.DCSleptMs, d.dc, int(d.times.slept.Milliseconds()))
+		addDC(&h.DCLimitMs, d.dc, int(d.times.limit.Milliseconds()))
+		d.times = dcTimes{}
 		h.Bytes += d.bytes
 		if d.bytes > 0 {
 			if h.DCBytes == nil {
@@ -199,6 +219,7 @@ func (p *downloadPacer) hourWaitLocked(now time.Time, dc int, premium bool, aske
 			h.DCWaits = map[int]int{}
 		}
 		h.DCWaits[dc]++
+		addDC(&h.DCWaitSecs, dc, int(asked.Round(time.Second).Seconds()))
 	}
 }
 
@@ -273,6 +294,8 @@ func (p *downloadPacer) hoursNewestFirst() []PaceHour {
 		h.DCCutsWait, h.DCCutsSlow = maps.Clone(h.DCCutsWait), maps.Clone(h.DCCutsSlow)
 		h.DCTriesUp, h.DCTriesDown = maps.Clone(h.DCTriesUp), maps.Clone(h.DCTriesDown)
 		h.DCAtFloor, h.DCBelow = maps.Clone(h.DCAtFloor), maps.Clone(h.DCBelow)
+		h.DCOkMs, h.DCFailMs, h.DCFails = maps.Clone(h.DCOkMs), maps.Clone(h.DCFailMs), maps.Clone(h.DCFails)
+		h.DCWaitedMs, h.DCSleptMs, h.DCLimitMs, h.DCWaitSecs = maps.Clone(h.DCWaitedMs), maps.Clone(h.DCSleptMs), maps.Clone(h.DCLimitMs), maps.Clone(h.DCWaitSecs)
 		out = append(out, h)
 	}
 	return out

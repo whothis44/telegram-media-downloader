@@ -442,6 +442,9 @@ func (i sharedInvoker) invokePart(ctx context.Context, input bin.Encoder, output
 			answered: func(took time.Duration) { i.pacer.answered(i.dc, took) },
 			waited:   func(took time.Duration) { i.pacer.waited(i.dc, took) },
 			waiting:  func(on bool) { i.pacer.waitingOnTelegram(i.dc, on) },
+			invoked:  func(took time.Duration, ok bool) { i.pacer.invoked(i.dc, took, ok) },
+			limited:  func(took time.Duration) { i.pacer.timeIn(i.dc, dcTimes{limit: took}) },
+			slept:    func(took time.Duration) { i.pacer.timeIn(i.dc, dcTimes{slept: took}) },
 		})
 		if err == nil {
 			if box, ok := output.(*tg.UploadFileBox); ok {
@@ -546,17 +549,26 @@ func downloadMedia(ctx context.Context, client downloadClient, a Attachment, w i
 	// Parts an earlier check of this file kept (ix.12.11, kept_parts.go). Not
 	// with per-chunk verification, whose reader is the library's.
 	var kept KeptParts
+	var keptUsed int64
 	if !verify && a.Identity.Size > downloadPartSize {
-		kept = keptPartsFor(a.Identity)
+		kept = countingKept(keptPartsFor(a.Identity), a.Identity.Size, &keptUsed)
 	}
 	if offset := downloadOffsetOf(ctx); offset > 0 {
 		if offset%downloadPartSize != 0 || offset >= a.Identity.Size {
 			return fmt.Errorf("invalid resume offset %d of %d", offset, a.Identity.Size)
 		}
-		return fetchParallelKept(ctx, tg.NewClient(pool), a.Location, a.Identity.Size, offset, max(threads, 1), kept, w)
+		err := fetchParallelKept(ctx, tg.NewClient(pool), a.Location, a.Identity.Size, offset, max(threads, 1), kept, w)
+		if err == nil {
+			reportKeptUsed(a.Identity, keptUsed)
+		}
+		return err
 	}
 	if !verify && (threads > 1 || kept != nil) && a.Identity.Size > downloadPartSize {
-		return fetchParallelKept(ctx, tg.NewClient(pool), a.Location, a.Identity.Size, 0, max(threads, 1), kept, w)
+		err := fetchParallelKept(ctx, tg.NewClient(pool), a.Location, a.Identity.Size, 0, max(threads, 1), kept, w)
+		if err == nil {
+			reportKeptUsed(a.Identity, keptUsed)
+		}
+		return err
 	}
 	if !verify {
 		_, err = downloader.NewDownloader().WithPartSize(downloadPartSize).Download(tg.NewClient(pool), a.Location).Stream(ctx, w)

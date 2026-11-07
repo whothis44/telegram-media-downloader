@@ -32,8 +32,18 @@ import (
 //
 // Space: at most ixPartsCap in all, nothing kept while the data disk has less
 // than ixPartsFreeFloor free. A file's parts go once it is downloaded or no
-// queue row of it is left, and the oldest go first over the cap. The folder is
-// not in the backups (they hold the database and the sessions).
+// queue row of it is left, and the oldest go first over the cap, or while the
+// disk is under the floor. The folder is not in the backups (they hold the
+// database and the sessions).
+//
+// ix.12.12: the cap went from 4 GB to 100 GB. Checked videos download about a
+// day after their check (on 11-06: a quarter within 2 hours, a quarter after 38
+// hours), 240 checked ones still waited a median 55 hours, and checks kept
+// about 120 MB an hour, so 4 GB held two days and the slowest lost their parts
+// first. In practice the floor below limits the space now, not the cap. The floor went from 20 to 60 GB, above
+// the 50 GB the staging folder keeps free when it runs past its own size
+// (download/staging.go, stageFreeReserve): kept parts give way to staged
+// downloads, and the sweep removes the oldest while the disk is under it.
 
 const ixPartStoreSchema = `
 CREATE TABLE IF NOT EXISTS ix_part_store ( -- 1 MiB parts a check read from Telegram, kept for the download (ix.12.11)
@@ -49,8 +59,8 @@ CREATE INDEX IF NOT EXISTS ix_part_store_at ON ix_part_store(at);
 
 // Limits (variables for tests).
 var (
-	ixPartsCap        int64 = 4 << 30
-	ixPartsFreeFloor  int64 = 20 << 30
+	ixPartsCap        int64 = 100 << 30
+	ixPartsFreeFloor  int64 = 60 << 30
 	ixPartsFree             = diskfree.Free
 	ixPartsSweepEvery       = 10 * time.Minute
 )
@@ -64,6 +74,8 @@ type ixPartsCounts struct {
 	LowDisk, Failed   atomic.Int64 // checks whose parts were not kept: too little free space, a write failed
 	BadBytes, Missing atomic.Int64 // parts refused on reading: SHA-256 differs, file gone or unreadable
 	Removed           atomic.Int64 // files whose parts went (downloaded, out of the queue, over the cap)
+	ForSpace          atomic.Int64 // of those, removed because the disk was under the floor (ix.12.12)
+	Downloads         atomic.Int64 // downloads that took kept parts (ix.12.12)
 }
 
 var ixPartsTotals sync.Map // *App -> *ixPartsCounts
@@ -292,6 +304,14 @@ func (a *App) ixKeptPartsFor(id telegram.MediaIdentity) (kept telegram.KeptParts
 	}
 }
 
+// ixKeptPartsUsed logs a download that took parts kept from its check (ix.12.12):
+// sizes only. It runs in the download; a fault in it is caught here.
+func (a *App) ixKeptPartsUsed(id telegram.MediaIdentity, bytes int64) {
+	defer func() { _ = recover() }()
+	ixPartsCountsOf(a).Downloads.Add(1)
+	a.ixLog("a download took %d MB of its %d MB file from parts kept from its check, not from Telegram", bytes>>20, id.Size>>20)
+}
+
 // ixPartsSweep removes the parts of files downloaded or no longer queued,
 // folders no row names (a write cut short), and the oldest over the cap.
 func (a *App) ixPartsSweep(ctx context.Context) error {
@@ -360,7 +380,42 @@ func (a *App) ixPartsSweep(ctx context.Context) error {
 		}
 	}
 	a.ixPartsTrimLocked(ctx, "")
+	a.ixPartsFreeUpLocked(ctx)
 	return nil
+}
+
+// ixPartsFreeUpLocked removes the oldest files' parts while the data disk
+// has less than ixPartsFreeFloor free (ix.12.12): downloads need the room more.
+func (a *App) ixPartsFreeUpLocked(ctx context.Context) {
+	free, ok := ixPartsFree(a.dataDir)
+	if !ok || free >= ixPartsFreeFloor {
+		return
+	}
+	rows, err := a.db.Reader.QueryContext(ctx, `SELECT ident, SUM(bytes) FROM ix_part_store GROUP BY ident ORDER BY MAX(at), ident`)
+	if err != nil {
+		return
+	}
+	type file struct {
+		ident string
+		bytes int64
+	}
+	var files []file
+	for rows.Next() {
+		var f file
+		if rows.Scan(&f.ident, &f.bytes) == nil {
+			files = append(files, f)
+		}
+	}
+	rows.Close()
+	for _, f := range files {
+		if free >= ixPartsFreeFloor || ctx.Err() != nil {
+			return
+		}
+		if a.ixPartsRemoveLocked(ctx, f.ident) {
+			free += f.bytes
+			ixPartsCountsOf(a).ForSpace.Add(1)
+		}
+	}
 }
 
 func ixSplitPartIdent(ident string) (kind, id string, size int64, ok bool) {
@@ -378,7 +433,9 @@ func ixSplitPartIdent(ident string) (kind, id string, size int64, ok bool) {
 // ixRunParts gives downloads the kept parts and sweeps them now and then.
 func (a *App) ixRunParts(ctx context.Context) {
 	telegram.SetKeptParts(a.ixKeptPartsFor)
+	telegram.SetKeptPartsUsed(a.ixKeptPartsUsed)
 	defer telegram.SetKeptParts(nil)
+	defer telegram.SetKeptPartsUsed(nil)
 	wait := 3 * time.Minute
 	for {
 		select {
@@ -403,6 +460,6 @@ func (a *App) ixPartsDiag(ctx context.Context) string {
 	if n, ok := ixPartsFree(a.dataDir); ok {
 		free = fmt.Sprintf("%d GB", n>>30)
 	}
-	return fmt.Sprintf("  parts kept from checks: reused by downloads %d MB since start (refused, fetched again: %d wrong length, %d wrong bytes, %d unreadable) · kept now %d MB of %d files (at most %d MB; none kept under %d GB free, %s free now) · since start kept %d MB, not kept %d for disk space, %d failed writes, %d files removed",
-		reused>>20, short, t.BadBytes.Load(), t.Missing.Load(), bytes>>20, files, ixPartsCap>>20, ixPartsFreeFloor>>30, free, t.KeptBytes.Load()>>20, t.LowDisk.Load(), t.Failed.Load(), t.Removed.Load())
+	return fmt.Sprintf("  parts kept from checks: reused by downloads %d MB since start, in %d downloads (refused, fetched again: %d wrong length, %d wrong bytes, %d unreadable) · kept now %d MB of %d files (at most %d MB; none kept under %d GB free, %s free now) · since start kept %d MB, not kept %d for disk space, %d failed writes, %d files removed (%d to free disk space)",
+		reused>>20, t.Downloads.Load(), short, t.BadBytes.Load(), t.Missing.Load(), bytes>>20, files, ixPartsCap>>20, ixPartsFreeFloor>>30, free, t.KeptBytes.Load()>>20, t.LowDisk.Load(), t.Failed.Load(), t.Removed.Load(), t.ForSpace.Load())
 }

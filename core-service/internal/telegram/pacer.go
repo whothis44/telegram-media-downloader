@@ -167,6 +167,7 @@ type dcPace struct {
 	premiumAt       []time.Time
 	lastUse         time.Time
 	gateWait        time.Duration // cumulative deliberate waits, summed across requests
+	times           dcTimes       // this interval's, for the hour-by-hour record (ix.12.12)
 	gateWaiting     int           // requests currently sleeping for Telegram
 	lastPremiumFile int64         // the file the last speed-limit wait came for
 	waitedGate      bool          // an interval containing a wait is not a throughput experiment
@@ -308,6 +309,43 @@ func (p *downloadPacer) waited(dc int, took time.Duration) {
 	defer p.mu.Unlock()
 	p.dcLocked(dc).gateWait += took
 	p.dcLocked(dc).waitedGate = true
+	p.dcLocked(dc).times.waited += took
+}
+
+// dcTimes is where a server's parts spent their time in one interval, for
+// the hour-by-hour record (ix.12.12): with Telegram (answered, or with an
+// error), waiting (any deliberate wait: the shared gates closed for a plain
+// FLOOD_WAIT, a speed-limit sleep), of those the speed-limit sleeps of a
+// single request, and held by the account's request rate limit. Parts in
+// flight are sampled apart (DCInflight); what those times do not cover is
+// time a part held its room with none of them.
+type dcTimes struct {
+	ok, failed, waited, slept, limit time.Duration
+	failures                         int
+}
+
+func (t *dcTimes) add(o dcTimes) {
+	t.ok += o.ok
+	t.failed += o.failed
+	t.waited += o.waited
+	t.slept += o.slept
+	t.limit += o.limit
+	t.failures += o.failures
+}
+
+// invoked records one request to Telegram for a part of dc.
+func (p *downloadPacer) invoked(dc int, took time.Duration, ok bool) {
+	if ok {
+		p.timeIn(dc, dcTimes{ok: took})
+	} else {
+		p.timeIn(dc, dcTimes{failed: took, failures: 1})
+	}
+}
+
+func (p *downloadPacer) timeIn(dc int, t dcTimes) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.dcLocked(dc).times.add(t)
 }
 
 func (p *downloadPacer) waitingOnTelegram(dc int, on bool) {
