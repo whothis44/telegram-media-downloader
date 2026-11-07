@@ -64,26 +64,32 @@ type ixDeadlineLoss struct {
 }
 
 type ixDeadlineInfo struct {
-	Mode       string           `json:"mode"`   // auto, on, off
-	Active     bool             `json:"active"` // smaller files are going first now
-	Until      int64            `json:"until,omitempty"`
-	LeftFiles  int              `json:"leftFiles"` // in the download queue now
-	LeftBytes  int64            `json:"leftBytes"`
-	ToGetFiles int              `json:"toGetFiles"` // every distinct file not downloaded yet (copies counted once), queued or not
-	ToGetBytes int64            `json:"toGetBytes"`
-	Copies     int              `json:"copies"`   // not downloaded, but the same Telegram file is saved or queued elsewhere
-	Rate24h    float64          `json:"rate24h"`  // bytes a second over the last day
-	Rate3h     float64          `json:"rate3h"`   // over the last 3 hours
-	Rate1h     float64          `json:"rate1h"`   // over the last hour
-	Rate       float64          `json:"rate"`     // the one the estimate uses (ixDeadlineRate)
-	RateUsed   string           `json:"rateUsed"` // which: "day" or "3h"
-	Premium1h  int              `json:"premium1h"`
-	EtaSec     int64            `json:"etaSec"`   // at Rate; 0: unknown
-	Finishes   string           `json:"finishes"` // yes, no, unknown
-	Deferred   []int            `json:"deferred"` // items set aside, by band
-	Unscanned  int              `json:"unscanned"`
-	Loss       []ixDeadlineLoss `json:"loss"`
-	BandLimits []int64          `json:"bandLimits"`
+	Mode      string `json:"mode"`   // auto, on, off
+	Active    bool   `json:"active"` // smaller files are going first now
+	Until     int64  `json:"until,omitempty"`
+	LeftFiles int    `json:"leftFiles"` // in the download queue now
+	LeftBytes int64  `json:"leftBytes"`
+	// Ahead: queued files neither held as copies nor set aside, what
+	// downloads first, and whether it finishes in time at Rate (ix.12.5).
+	AheadFiles    int              `json:"aheadFiles"`
+	AheadBytes    int64            `json:"aheadBytes"`
+	AheadFinishes string           `json:"aheadFinishes"`
+	ToGetFiles    int              `json:"toGetFiles"` // every distinct file not downloaded yet (copies counted once), queued or not
+	ToGetBytes    int64            `json:"toGetBytes"`
+	Copies        int              `json:"copies"`   // not downloaded, but the same Telegram file is saved or queued elsewhere
+	Rate24h       float64          `json:"rate24h"`  // bytes a second over the last day
+	Rate3h        float64          `json:"rate3h"`   // over the last 3 hours
+	Rate1h        float64          `json:"rate1h"`   // over the last hour
+	Rate          float64          `json:"rate"`     // the one the estimate uses (ixDeadlineRate)
+	RateUsed      string           `json:"rateUsed"` // which: "day" or "3h"
+	Premium1h     int              `json:"premium1h"`
+	EtaSec        int64            `json:"etaSec"`   // at Rate; 0: unknown
+	Finishes      string           `json:"finishes"` // yes, no, unknown
+	Deferred      []int            `json:"deferred"` // items set aside, by band
+	Unscanned     int              `json:"unscanned"`
+	Loss          []ixDeadlineLoss `json:"loss"`
+	BandLimits    []int64          `json:"bandLimits"`
+	Forecast      *ixForecast      `json:"forecast,omitempty"` // with the loss list only (ix_forecast.go)
 }
 
 // ixDeadlineEstimate measures what is left and how fast it goes.
@@ -138,6 +144,13 @@ func (a *App) ixDeadlineEstimate(ctx context.Context, withLoss bool) ixDeadlineI
 		}
 		need = max(need, d.ToGetBytes)
 	}
+	_ = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(file_size),0) FROM tgdl_work w WHERE status IN ('pending','processing')
+		AND NOT EXISTS (SELECT 1 FROM ix_held h WHERE h.work_id=w.id AND h.released_at=0 AND h.reason<>'')
+		AND NOT EXISTS (SELECT 1 FROM ix_deferred x WHERE x.work_id=w.id AND x.released_at=0)`).Scan(&d.AheadFiles, &d.AheadBytes)
+	d.AheadFinishes = "unknown"
+	if d.Rate > 0 && d.Until > 0 {
+		d.AheadFinishes = map[bool]string{true: "yes", false: "no"}[now.Unix()+int64(float64(d.AheadBytes)/d.Rate) < d.Until]
+	}
 	d.Finishes = "unknown"
 	if d.Rate > 0 {
 		d.EtaSec = int64(float64(need) / d.Rate)
@@ -173,6 +186,7 @@ func (a *App) ixDeadlineEstimate(ctx context.Context, withLoss bool) ixDeadlineI
 	if !withLoss {
 		return d
 	}
+	d.Forecast = a.ixForecastNow(ctx, d)
 	names := map[string]string{}
 	if metas, err := a.ixGroups(ctx); err == nil {
 		for _, g := range metas {
@@ -383,7 +397,14 @@ func (a *App) ixDeadlineStep(ctx context.Context) error {
 		return err
 	}
 	if unqueued {
-		return a.ixDeadlineKeepBusy(ctx, acctClause, args, reading)
+		// A rescan held by the queue limit brings nothing meanwhile: no
+		// workers need keeping free for it.
+		return a.ixDeadlineKeepBusy(ctx, acctClause, args, reading && !a.ixBigFilesMeasure(ctx).CapPaused)
+	}
+	// Slots that the band going now cannot use (its files are on other
+	// servers, or of the other size) take set-aside files too (ix_slotfill.go).
+	if small, large := ixFileSlots(a); small > 0 && large > 0 {
+		return a.ixDeadlineKeepBusy(ctx, acctClause, args, false)
 	}
 	return nil
 }
@@ -494,37 +515,56 @@ func (a *App) ixDeadlineKeepBusy(ctx context.Context, acctClause string, args []
 	if workers <= 0 {
 		workers = 25
 	}
-	ready, busy, err := a.ixClaimableNow(ctx, acctClause, args)
-	if err != nil {
-		return err
-	}
 	limit := workers
 	if reading {
 		limit = (workers + 1) / 2
 	}
-	need := limit - ready - busy
-	if need <= 0 {
-		return nil
-	}
-	q := `SELECT w.id FROM ix_deferred x JOIN tgdl_work w ON w.id=x.work_id
-		WHERE x.released_at=0 AND w.status='pending' AND w.paused=1 AND w.retry_at<=?` + strings.ReplaceAll(acctClause, "account_id", "w.account_id") + `
-		AND w.id NOT IN (SELECT work_id FROM ix_held WHERE released_at=0 AND reason<>'')
-		ORDER BY x.band, w.file_size, w.id LIMIT ` + strconv.Itoa(need)
-	rows, err := a.db.Reader.QueryContext(ctx, q, args...)
-	if err != nil {
-		return err
-	}
 	var ids []any
-	for rows.Next() {
-		var id int64
-		if rows.Scan(&id) == nil {
+	if small, large := ixFileSlots(a); small > 0 && large > 0 {
+		// By server slots (ix_slotfill.go): only files that would start count.
+		room, err := a.ixSlotRoomNow(ctx, acctClause, args, small, large)
+		if err != nil {
+			return err
+		}
+		picked, err := a.ixSlotFillPick(ctx, acctClause, args, room, limit-room.Ready-room.Busy)
+		if err != nil {
+			return err
+		}
+		for _, id := range picked {
 			ids = append(ids, id)
 		}
+	} else {
+		ready, busy, err := a.ixClaimableNow(ctx, acctClause, args)
+		if err != nil {
+			return err
+		}
+		need := limit - ready - busy
+		if need <= 0 {
+			return nil
+		}
+		q := `SELECT w.id FROM ix_deferred x JOIN tgdl_work w ON w.id=x.work_id
+			WHERE x.released_at=0 AND w.status='pending' AND w.paused=1 AND w.retry_at<=?` + strings.ReplaceAll(acctClause, "account_id", "w.account_id") + `
+			AND w.id NOT IN (SELECT work_id FROM ix_held WHERE released_at=0 AND reason<>'')
+			ORDER BY x.band, w.file_size, w.id LIMIT ` + strconv.Itoa(need)
+		rows, err := a.db.Reader.QueryContext(ctx, q, args...)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var id int64
+			if rows.Scan(&id) == nil {
+				ids = append(ids, id)
+			}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
 	}
-	rows.Close()
 	if len(ids) == 0 {
-		return rows.Err()
+		return nil
 	}
+	a.ixSlotFillNote(len(ids))
 	in := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
 	tx, err := a.db.Writer.BeginTx(ctx, nil)
 	if err != nil {

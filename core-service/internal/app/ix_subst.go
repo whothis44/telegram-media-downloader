@@ -275,6 +275,30 @@ func ixSameBytes(ctx context.Context, remote ixRemoteFile, local *os.File, size 
 	return how, ok
 }
 
+// ixAdopt is the library's hook for a file already in the library under the
+// item's own name but not catalogued (moved there by hand, ix.12.6): its
+// bytes are compared with the file on Telegram (hashes, else sampled parts).
+func (a *App) ixAdopt(ctx context.Context, item download.Item, path string, client download.Client) bool {
+	remote, ok := client.(ixRemoteFile)
+	if !ok {
+		return false
+	}
+	rel := ixNormPath(path)
+	if rel == "" {
+		return false
+	}
+	f, err := os.Open(filepath.Join(a.downloadsDir, filepath.FromSlash(rel)))
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	how, same := ixSameBytes(ctx, remote, f, item.Identity.Size)
+	if same {
+		a.ixLog("adopted %s #%d: its file was already in the library (%s), not downloaded again", item.GroupID, item.MessageID, how)
+	}
+	return same
+}
+
 // ixSubstitute is the library's hook: the relative path of a saved file
 // with exactly this item's bytes, how that was confirmed, or false.
 func (a *App) ixSubstitute(ctx context.Context, item download.Item, client download.Client) (string, string, bool) {

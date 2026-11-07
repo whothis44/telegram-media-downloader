@@ -241,3 +241,22 @@ func TestStartOnAnUnusableFolderFailsPolitely(t *testing.T) {
 		t.Fatal("not running")
 	}
 }
+
+// A run that ended without a report is only known to within a beat: within its
+// first minute, it says so instead of "after 0s".
+func TestRunTextSaysWhatIsKnownOfTheLength(t *testing.T) {
+	start := time.Date(2026, 11, 5, 10, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		run  Run
+		want string
+	}{
+		{Run{How: HowNoReport, Started: start, Ended: start.Add(20 * time.Millisecond)}, "no report · within its first minute"},
+		{Run{How: HowNoReport, Started: start, Ended: start.Add(3*time.Hour + 10*time.Second)}, "no report · after about 3h0m0s"},
+		{Run{How: HowCrash, Started: start, Ended: start.Add(12 * time.Second)}, "crash · after 12s"},
+		{Run{How: HowClean, Started: start, Ended: start.Add(90 * time.Minute)}, "clean · after 1h30m0s"},
+	} {
+		if got := c.run.Text(); got != c.want {
+			t.Fatalf("%q, want %q", got, c.want)
+		}
+	}
+}

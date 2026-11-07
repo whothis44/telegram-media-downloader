@@ -9,7 +9,9 @@ import (
 )
 
 func TestVersionCheckReportsNewestStableRelease(t *testing.T) {
+	asked := 0
 	releases := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked++
 		_, _ = w.Write([]byte(`[
 			{"tag_name":"v99.0.0-rc1","prerelease":true},
 			{"tag_name":"v99.1.0","draft":true},
@@ -36,6 +38,14 @@ func TestVersionCheckReportsNewestStableRelease(t *testing.T) {
 	}
 	if got["latest"] != "v99.0.0" || got["updateAvailable"] != true || got["releaseUrl"] != "https://example/v99" {
 		t.Fatalf("check=%v", got)
+	}
+	// ix.12.7: the answer is kept, so the dashboard does not ask GitHub on
+	// every request.
+	for i := 0; i < 3; i++ {
+		a.Handler().ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/api/version/check", nil))
+	}
+	if asked != 1 {
+		t.Fatalf("GitHub asked %d times for 4 checks", asked)
 	}
 	if compareSemver("v3.0.10", "3.0.9") != 1 || compareSemver("3.0.4", "v3.0.4") != 0 {
 		t.Fatal("semver compare")

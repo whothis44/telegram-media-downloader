@@ -8,6 +8,9 @@ set TGDL_SERVER_BIN=%~dp0core-service\tgdl-server.exe
 rem This window starts the app again when it exits, so the app may restart itself
 rem for an update once its downloads are done.
 set TGDL_LAUNCHER_RESTARTS=1
+rem Keep the words of a crash in the data folder's crashes folder (window.log, and
+rem the cause in the run history). If it cannot work, the app runs as before.
+set TGDL_CRASH_CAPTURE=1
 
 rem Use the ffmpeg from "winget install Gyan.FFmpeg" (it can use an NVIDIA card)
 rem rather than another copy that happens to be on PATH.

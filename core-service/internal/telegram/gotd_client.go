@@ -52,6 +52,10 @@ func (c *GotdClient) DownloadPace() PaceStats {
 		return PaceStats{}
 	}
 	s := c.pacer.stats()
+	if c.guard != nil {
+		s.PremiumPerRequest, s.PremiumShared, s.PremiumFallbacks = c.guard.PremiumMode()
+		s.FallbackPeriods = c.guard.FallbackPeriods()
+	}
 	if c.files != nil {
 		c.files.fillStats(&s)
 	}
@@ -127,7 +131,9 @@ func NewGotdClient(cfg GotdConfig) (*GotdClient, error) {
 		}
 		options.Logger = logslog.New(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slogLevel})))
 	}
-	return &GotdClient{guard: guard, threads: newThreadTuner(maxDownloadThreads), pacer: newDownloadPacer(cfg.SessionPath + ".pace.json"), files: newDownloadFiles(), client: gotd.NewClient(cfg.AppID, cfg.AppHash, options)}, nil
+	c := &GotdClient{guard: guard, threads: newThreadTuner(maxDownloadThreads), pacer: newDownloadPacer(cfg.SessionPath + ".pace.json"), files: newDownloadFiles(), client: gotd.NewClient(cfg.AppID, cfg.AppHash, options)}
+	c.pacer.slots = c.files.usage
+	return c, nil
 }
 
 func ensureConvertedSession(cfg GotdConfig, storage session.Storage) error {

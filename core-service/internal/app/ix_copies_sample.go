@@ -18,8 +18,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/botnick/telegram-media-downloader/core-service/internal/engine"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/procutil"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/seekbar"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/telegram"
@@ -27,7 +29,8 @@ import (
 )
 
 // Confirming big copies without downloading them. For a queued video of
-// 200 MB or more, frames are sampled across the whole file: the file on
+// 200 MB or more (less once none of those waits: ix_sample_floor.go), frames
+// are sampled across the whole file: the file on
 // Telegram is served to ffmpeg by a tiny web server on this computer
 // (127.0.0.1, a random port and a random path for each check), which
 // answers ffmpeg's byte ranges with 1 MiB parts read from Telegram on
@@ -355,6 +358,9 @@ var ixSampleFrame = func(ctx context.Context, address string, t float64) (ixSamp
 	// Telegram sends the parts).
 	cmd := exec.CommandContext(ctx, bin, "-hide_banner", "-nostdin", "-loglevel", "info", "-reconnect", "0",
 		"-rw_timeout", strconv.FormatInt(ixSampleHardTimeout.Microseconds(), 10),
+		// One decoding thread (ix.12.13): one key frame needs no more, and
+		// several checks may run at once in downloads.
+		"-threads", "1",
 		"-noaccurate_seek", "-copyts", "-ss", strconv.FormatFloat(t, 'f', 2, 64), "-i", address,
 		"-frames:v", "1", "-an", "-sn", "-dn", "-vf", fmt.Sprintf("scale=%d:%d:flags=area,format=gray,showinfo", ixVSide, ixVSide),
 		"-f", "rawvideo", "-pix_fmt", "gray", "pipe:1")
@@ -449,6 +455,7 @@ type ixSampleResult struct {
 	Offset  float64 // seconds to add to the queued video's time
 	Parts   int
 	Samples int
+	Frames  []ixSampledFrame // confirmed, nomatch: the sampled frames, kept to compare again (ix.12.10)
 }
 
 // ixSampleDecided says whether more frames could not change the answer: already a
@@ -482,6 +489,7 @@ func (a *App) ixSampleCheck(ctx context.Context, r ixCopyReader, msg *tg.Message
 	if len(cands) == 0 {
 		return ixSampleResult{Result: "nomatch", Note: "no saved video of a similar length has a fingerprint yet"}
 	}
+	outer := ctx
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	var refreshed bool
@@ -501,6 +509,18 @@ func (a *App) ixSampleCheck(ctx context.Context, r ixCopyReader, msg *tg.Message
 	if file.mime == "" {
 		file.mime = "video/mp4"
 	}
+	// Whatever the result, the parts read are kept for the download (ix.12.11,
+	// ix_part_store.go), once the server below has stopped.
+	defer func() {
+		if outer.Err() == nil {
+			a.ixPartsKeep(outer, ixPartIdent(att.Identity), file.partsNow())
+		}
+		// A check in a download keeps them in memory for its transfer too
+		// (ix.12.13, ix_dl_check.go).
+		if sink, ok := outer.Value(ixSamplePartsSinkKey{}).(func(map[int64][]byte)); ok {
+			sink(file.partsNow())
+		}
+	}()
 	address, stop, err := ixServeRemote(file)
 	if err != nil {
 		return ixSampleResult{Result: "failed", Why: ixSampleWhyFFmpeg, Note: err.Error()}
@@ -585,14 +605,26 @@ func (a *App) ixSampleCheck(ctx context.Context, r ixCopyReader, msg *tg.Message
 			best, bestOf = hit, c.key
 		}
 		if hit >= need {
+			res.Frames = samples
 			res.Result, res.Of, res.Offset = "confirmed", c.key, off
 			res.Note = fmt.Sprintf("%d of %d sampled frames match at %+.0f s", hit, len(samples), off)
 			return res
 		}
 	}
 	res.Result, res.Note = "nomatch", fmt.Sprintf("at most %d of %d sampled frames match a saved video", best, len(samples))
-	res.Best, res.Of = best, bestOf
+	res.Best, res.Of, res.Frames = best, bestOf, samples
 	return res
+}
+
+// partsNow is a copy of the parts read so far.
+func (f *ixRangeFile) partsNow() map[int64][]byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make(map[int64][]byte, len(f.parts))
+	for i, p := range f.parts {
+		out[i] = p
+	}
+	return out
 }
 
 func (f *ixRangeFile) fetchedNow() int {
@@ -658,9 +690,17 @@ type ixSampleJob struct {
 // first (ix_sched.go), then largest first. Originals of
 // videos saved in a lower quality first are not copies (ix_lowq.go): they
 // are left out.
-func (a *App) ixSampleJobs(ctx context.Context, heldOnly bool, n int) ([]ixSampleJob, error) {
-	rows, err := a.db.Reader.QueryContext(ctx, `SELECT w.id, w.file_size, w.account_id, w.body, h.work_id IS NOT NULL, COALESCE(h.like_key,'') `+ixSampleDue(heldOnly)+`
-		ORDER BY w.sched_order, w.file_size DESC, w.id LIMIT ?`, ixSampleMinSize, time.Now().UnixMilli(), n)
+//
+// Which rows: ixSampleAll, ixSampleHeld (held ones only, ranked groups first,
+// then the largest: what a check can bring back is biggest there) or
+// ixSampleNotHeld.
+func (a *App) ixSampleJobs(ctx context.Context, which int, n int) ([]ixSampleJob, error) {
+	order := ` ORDER BY w.sched_order, w.file_size DESC, w.id`
+	if which == ixSampleHeld {
+		order = ` ORDER BY w.sched_order>=` + strconv.Itoa(engine.UnrankedOrder) + `, w.file_size DESC, w.id`
+	}
+	rows, err := a.db.Reader.QueryContext(ctx, `SELECT w.id, w.file_size, w.account_id, w.body, h.work_id IS NOT NULL, COALESCE(h.like_key,'') `+ixSampleDueOf(which)+
+		order+` LIMIT ?`, a.ixSampleFloor(ctx), time.Now().UnixMilli(), n)
 	if err != nil {
 		return nil, err
 	}
@@ -675,11 +715,58 @@ func (a *App) ixSampleJobs(ctx context.Context, heldOnly bool, n int) ([]ixSampl
 	return out, rows.Err()
 }
 
+// Which rows ixSampleJobs takes.
+const (
+	ixSampleAll = iota
+	ixSampleHeld
+	ixSampleNotHeld
+)
+
+// ixSampleHeldEvery: one check in this many goes to a held video (ix.12.5),
+// the others to the queue in download order, whose checks spare bytes now.
+const ixSampleHeldEvery = 3
+
+// ixSampleTurns lists the rows of the next checks: from the queue in
+// download order, with every ixSampleHeldEvery-th from the held videos. When
+// one list is empty the other fills its turns.
+func (a *App) ixSampleTurns(ctx context.Context, n int) ([]ixSampleJob, error) {
+	front, err := a.ixSampleJobs(ctx, ixSampleNotHeld, n)
+	if err != nil {
+		return nil, err
+	}
+	held, err := a.ixSampleJobs(ctx, ixSampleHeld, n)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ixSampleJob, 0, len(front)+len(held))
+	seq := a.ixSampleSeqOf().Load()
+	for len(front) > 0 || len(held) > 0 {
+		take := &front
+		if (seq%ixSampleHeldEvery == ixSampleHeldEvery-1 && len(held) > 0) || len(front) == 0 {
+			take = &held
+		}
+		out = append(out, (*take)[0])
+		*take = (*take)[1:]
+		seq++
+	}
+	return out, nil
+}
+
 // ixSampleDue is the rows that may be checked now, as the end of a query.
 func ixSampleDue(heldOnly bool) string {
-	cond := ""
 	if heldOnly {
+		return ixSampleDueOf(ixSampleHeld)
+	}
+	return ixSampleDueOf(ixSampleAll)
+}
+
+func ixSampleDueOf(which int) string {
+	cond := ""
+	switch which {
+	case ixSampleHeld:
 		cond = " AND h.work_id IS NOT NULL"
+	case ixSampleNotHeld:
+		cond = " AND h.work_id IS NULL"
 	}
 	return `FROM tgdl_work w LEFT JOIN ix_held h ON h.work_id=w.id AND h.released_at=0 AND h.reason<>''
 		LEFT JOIN ix_copy_sample s ON s.work_id=w.id
@@ -752,7 +839,7 @@ func (a *App) ixSampleReuse(ctx context.Context, heldOnly bool) error {
 		return nil
 	}
 	rows, err = a.db.Reader.QueryContext(ctx, `SELECT w.id, w.identity `+ixSampleDue(heldOnly)+`
-		ORDER BY w.sched_order, w.file_size DESC, w.id`, ixSampleMinSize, time.Now().UnixMilli())
+		ORDER BY w.sched_order, w.file_size DESC, w.id`, a.ixSampleFloor(ctx), time.Now().UnixMilli())
 	if err != nil {
 		return err
 	}
@@ -808,7 +895,7 @@ func (a *App) ixSampleRound(ctx context.Context, heldOnly bool) error {
 		return nil // read-only: nothing may talk to Telegram, and that is no error
 	}
 	s := a.ixLoadSettings(ctx)
-	if !s.HoldLikely {
+	if !s.SampleBigOn() {
 		return nil
 	}
 	if err := a.ixSampleReuse(ctx, heldOnly); err != nil {
@@ -821,7 +908,13 @@ func (a *App) ixSampleRound(ctx context.Context, heldOnly bool) error {
 		return nil
 	}
 	// More rows than checks: rows of one file are passed over without a check.
-	jobs, err := a.ixSampleJobs(ctx, heldOnly, ixSamplesPerRun*8)
+	var jobs []ixSampleJob
+	var err error
+	if heldOnly {
+		jobs, err = a.ixSampleJobs(ctx, ixSampleHeld, ixSamplesPerRun*8)
+	} else {
+		jobs, err = a.ixSampleTurns(ctx, ixSamplesPerRun*8)
+	}
 	if err != nil || len(jobs) == 0 {
 		return err
 	}
@@ -861,6 +954,7 @@ func (a *App) ixSampleRound(ctx context.Context, heldOnly bool) error {
 			continue
 		}
 		checks++
+		a.ixSampleSeqOf().Add(1)
 		r := readers[j.account]
 		if r == nil {
 			if r, err = ixOpenCopyReader(a, ctx, j.account); err != nil {
@@ -879,6 +973,14 @@ func (a *App) ixSampleRound(ctx context.Context, heldOnly bool) error {
 	return nil
 }
 
+// ixSampleSeqOf counts the checks made (ixSampleTurns), per App.
+func (a *App) ixSampleSeqOf() *atomic.Int64 {
+	v, _ := ixSampleSeqs.LoadOrStore(a, new(atomic.Int64))
+	return v.(*atomic.Int64)
+}
+
+var ixSampleSeqs sync.Map // *App -> *atomic.Int64
+
 // ixSampleFake lets tests run without ffmpeg (with ixSampleFrame replaced).
 var ixSampleFake = false
 
@@ -890,7 +992,27 @@ func (a *App) ixSampleRecord(ctx context.Context, j ixSampleJob, f ixCopyFacts, 
 		j.work, f.Ident, j.size, res.Result, res.Note, res.Of, res.Offset, res.Parts, res.Samples, ixNowMs(), res.Why, final); err != nil {
 		return err
 	}
+	if len(res.Frames) > 0 {
+		// Kept so a "no match" can be compared again, here, when more saved
+		// videos have their fingerprints (ix_sample_recheck.go).
+		if _, err := a.db.Writer.ExecContext(ctx, `UPDATE ix_copy_sample SET frames=?, dur_ms=? WHERE work_id=?`, ixPackSampled(res.Frames), f.Dur, j.work); err != nil {
+			return err
+		}
+	}
 	how := res.Result
+	if how == "confirmed" {
+		how = "matched by sampled frames" // probable, not proven
+	}
+	partialRanked := false
+	if res.Result == "nomatch" && res.Best >= ixSamplePartialHit {
+		// Not a copy, but partly the same footage: held at the back below
+		// (ix.12.9: the line said only "nomatch"), except in a ranked group
+		// (ix.12.13), where it keeps its place in the rank order.
+		how = "partly the same footage, not a copy: at the back of the queue while likely copies are held"
+		if partialRanked = a.ixGroupRanked(ctx, j.work); partialRanked {
+			how = "partly the same footage, not a copy: keeps its place (ranked group)"
+		}
+	}
 	if res.Result == "failed" {
 		how += " [" + res.Why + map[bool]string{true: ", final", false: ", tried again later"}[final] + "]"
 	}
@@ -898,15 +1020,35 @@ func (a *App) ixSampleRecord(ctx context.Context, j ixSampleJob, f ixCopyFacts, 
 		a.ixLog("checked %s #%d (%d MB) from %d MB of parts: %s (%s)", f.Group, f.Msg, j.size>>20, res.Parts, how, res.Note)
 	}
 	if j.held {
-		switch res.Result {
-		case "confirmed", "nomatch":
-			c := map[string]string{"confirmed": "confirmed", "nomatch": "unconfirmed"}[res.Result]
-			_, err := a.db.Writer.ExecContext(ctx, `UPDATE ix_copy_hold SET confirm=?, confirm_note=?, checked_at=? WHERE work_id=?`, c, res.Note, ixNowMs(), j.work)
+		switch {
+		case res.Result == "confirmed":
+			// A partial match found to be a copy after all (compared again,
+			// ix.12.10) is a probable copy now, not a partial match.
+			_, err := a.db.Writer.ExecContext(ctx, `UPDATE ix_copy_hold SET confirm='confirmed', how=CASE WHEN how='sampled-partial' THEN 'sampled' ELSE how END, confirm_note=?, checked_at=? WHERE work_id=?`, res.Note, ixNowMs(), j.work)
 			return err
+		case res.Result == "nomatch" && res.Best >= ixSamplePartialHit:
+			// Partly the same footage: it stays at the back, but as a
+			// partial match, not a probable copy (ix.12.5).
+			_, err := a.db.Writer.ExecContext(ctx, `UPDATE ix_copy_hold SET how='sampled-partial', confirm='unconfirmed', confirm_note=?, checked_at=? WHERE work_id=?`, res.Note, ixNowMs(), j.work)
+			return err
+		case res.Result == "nomatch":
+			// Its sampled frames match no saved video: the look-alike
+			// evidence it was held on is outweighed; it goes back to its
+			// place (ix.12.5). A failed check changes nothing.
+			if _, err := a.db.Writer.ExecContext(ctx, `UPDATE ix_copy_hold SET confirm='unconfirmed', confirm_note=?, checked_at=? WHERE work_id=?`, res.Note, ixNowMs(), j.work); err != nil {
+				return err
+			}
+			if err := a.ixLetGo(ctx, j.work); err != nil {
+				return err
+			}
+			a.ixLog("held %s #%d goes back to its place: its sampled frames match no saved video (%s)", f.Group, f.Msg, res.Note)
 		}
 		return nil
 	}
-	if res.Result == "nomatch" && res.Best >= ixSamplePartialHit && res.Of != "" && !a.ixLoadSettings(ctx).HoldForever {
+	if !a.ixLoadSettings(ctx).HoldLikely {
+		return nil // recorded; with holding off nothing moves
+	}
+	if res.Result == "nomatch" && res.Best >= ixSamplePartialHit && res.Of != "" && !a.ixLoadSettings(ctx).HoldForever && !partialRanked {
 		// (Held copies kept for ever never download; a partly matching video
 		// is not a copy, so then it is not held at all.)
 		// Part of it is footage the archive has (another cut, a compilation

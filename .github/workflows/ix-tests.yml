@@ -23,10 +23,9 @@ jobs:
           go-version-file: core-service/go.mod
           cache-dependency-path: core-service/go.sum
       - name: Install ffmpeg
-        run: |
-          command -v ffmpeg && command -v ffprobe && exit 0
-          sudo apt-get -o Acquire::Retries=1 update
-          sudo apt-get install -y ffmpeg
+        # A static build first; the package mirror only when none can be had.
+        timeout-minutes: 15
+        run: bash scripts/ci-install-ffmpeg.sh
       - name: Archive tests
         env:
           IX_SAMPLE_OUT: ${{ runner.temp }}/archive-data-sample

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,6 +30,17 @@ func (a *App) handleDialogTopics(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 	defer cancel()
+	groupID := r.PathValue("id")
+	// ix.12.13: when Telegram cannot answer (a frozen account is refused the
+	// topic list, or no account is connected), the topics the archive has
+	// recorded from the group's messages are listed instead.
+	fallback := func(status int, msg string) {
+		if topics := a.ixArchiveTopics(ctx, groupID); len(topics) > 0 {
+			writeJSON(w, http.StatusOK, map[string]any{"topics": topics, "source": "archive"})
+			return
+		}
+		writeJSONError(w, status, msg)
+	}
 	a.monitorOp.Lock()
 	err := a.startTelegramEngine(ctx, false)
 	var session *engine.DialogSession
@@ -37,20 +49,45 @@ func (a *App) handleDialogTopics(w http.ResponseWriter, r *http.Request) {
 	}
 	a.monitorOp.Unlock()
 	if err != nil {
-		writeJSONError(w, http.StatusServiceUnavailable, "Telegram account is not connected")
+		fallback(http.StatusServiceUnavailable, "Telegram account is not connected")
 		return
 	}
 	defer session.Close()
 	if _, err := session.List(-1); err != nil {
-		writeJSONError(w, http.StatusServiceUnavailable, "Telegram topics are unavailable")
+		fallback(http.StatusServiceUnavailable, "Telegram topics are unavailable")
 		return
 	}
-	topics, err := session.ForumTopics(ctx, r.PathValue("id"))
+	topics, err := session.ForumTopics(ctx, groupID)
 	if err != nil {
-		writeJSONError(w, http.StatusBadGateway, "Could not load forum topics: "+err.Error())
+		fallback(http.StatusBadGateway, "Could not load forum topics: "+err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"topics": topics})
+}
+
+// ixArchiveTopics: the forum topics recorded for a group (ix_topics, and
+// topics seen on its messages without a recorded title), by number.
+func (a *App) ixArchiveTopics(ctx context.Context, groupID string) []telegram.ForumTopic {
+	out := []telegram.ForumTopic{}
+	rows, err := a.db.Reader.QueryContext(ctx, `SELECT t.topic_id, COALESCE((SELECT title FROM ix_topics x WHERE x.group_id=? AND x.topic_id=t.topic_id),'') FROM
+		(SELECT topic_id FROM ix_topics WHERE group_id=? UNION SELECT DISTINCT topic_id FROM ix_messages WHERE group_id=? AND topic_id>1) t
+		WHERE t.topic_id>1 ORDER BY t.topic_id`, groupID, groupID, groupID)
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int
+		var name string
+		if rows.Scan(&id, &name) != nil {
+			continue
+		}
+		if name == "" {
+			name = "Topic " + strconv.Itoa(id)
+		}
+		out = append(out, telegram.ForumTopic{ID: id, Name: name})
+	}
+	return out
 }
 
 func (a *App) handleDialogs(w http.ResponseWriter, r *http.Request) {

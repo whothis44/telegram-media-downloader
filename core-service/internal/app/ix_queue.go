@@ -142,10 +142,14 @@ func (a *App) ixStart() {
 		{"backups", a.ixRunBackups},
 		{"account check", a.ixRunGone},
 		{"duplicate checks", a.ixRunCopies},
+		{"check parts", a.ixRunParts},        // parts a check read, taken by downloads (ix.12.11)
 		{"lower quality first", a.ixRunLowq}, // lower quality first, and the staging folder's moves to the library
 		{"staging", a.ixRunStaging},
 		{"previews", a.ixRunPreviewsAll},
 		{"group priorities", a.ixRunSched},
+		{"updates", a.ixRunUpdates},
+		{"process sampler", a.ixRunProcess}, // the report's [process] line
+		{"report file", a.ixRunReportFile},  // data/ixreports (ix.12.8)
 	} {
 		a.ixBackground(task.name, task.run)
 	}

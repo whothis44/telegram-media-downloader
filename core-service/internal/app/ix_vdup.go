@@ -586,6 +586,7 @@ func ixFFmpegFingerprint(ctx context.Context, path, hwaccel string) (float64, []
 	}
 	ctx, cancel := context.WithTimeout(ctx, ixVdupMaxDuration)
 	defer cancel()
+	ixNoteLibReadPath(ixReadVideoIdx, path) // decoded whole: about its size read
 	args := []string{"-hide_banner", "-nostdin", "-loglevel", "info"}
 	if hwaccel != "" {
 		args = append(args, "-hwaccel", hwaccel)
@@ -819,14 +820,19 @@ func (a *App) ixVdupStep(ctx context.Context) (bool, error) {
 	}
 	duration, frames, err := ixFingerprintVideo(ctx, full, hw)
 	if err != nil && hw != "" && ctx.Err() == nil {
-		// GPU decoding can fail on some files or drivers: the CPU always works.
-		box.mu.Lock()
-		box.gpuErrors++
-		if box.gpuErrors >= 3 {
-			box.cpuOnly = true
-		}
-		box.mu.Unlock()
+		// GPU decoding can fail on some files or drivers: try the CPU. Only a
+		// file the CPU then reads counts against the GPU (ix.12.13): a file
+		// neither can open is a broken upload, not the GPU's fault, and three
+		// of those used to switch the whole run to the CPU.
 		duration, frames, err = ixFingerprintVideo(ctx, full, "")
+		if err == nil {
+			box.mu.Lock()
+			box.gpuErrors++
+			if box.gpuErrors >= 3 {
+				box.cpuOnly = true
+			}
+			box.mu.Unlock()
+		}
 	}
 	if ctx.Err() != nil {
 		return false, ctx.Err()
